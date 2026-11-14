@@ -1,0 +1,233 @@
+export type ChickenBreedId = 'leghorn' | 'rhode' | 'orpington' | 'australorp';
+
+export type NavTab = 'farm' | 'packs' | 'tasks' | 'friends' | 'wallet';
+
+export type SubView =
+  | 'none'
+  | 'profile'
+  | 'leaderboard'
+  | 'your_farm'
+  | 'deposit'
+  | 'withdraw'
+  | 'admin';
+
+export type DepositNetwork = 'GRAM_TON';
+
+export type LanguageCode = 'en' | 'hi' | 'es' | 'ru' | 'fr' | 'pt' | 'ar';
+
+export type TransactionType =
+  | 'collect'
+  | 'task'
+  | 'deposit'
+  | 'withdraw'
+  | 'reinvest'
+  | 'buy_chicken'
+  | 'upgrade_basket'
+  | 'promo'
+  | 'referral'
+  | 'booster'
+  | 'golden_egg'
+  | 'achievement'
+  | 'season_prize';
+
+export interface ChickenPack {
+  id: ChickenBreedId;
+  name: string;
+  eggsPerHour: number;
+  coinCost: number;
+  usdCost: number;
+  leaderboardPoints: number;
+  tagline: string;
+  accentColor: string;
+}
+
+export interface UserFarmProfile {
+  uid: string;
+  displayName: string;
+  handle: string;
+  photoUrl: string;
+  avatarColor: string;
+  level: number;
+  xp: number;
+  coins: number;
+  eggs: number;
+  totalEggsCollected: number;
+  totalCashEarnedUsd: number;
+  totalWithdrawnUsd: number;
+  basketCapacity: number;
+  basketTierHours: number;
+  leghornCount: number;
+  rhodeCount: number;
+  orpingtonCount: number;
+  australorpCount: number;
+  boughtThisWeek: number;
+  dailyStreak: number;
+  lastDailyClaimDate: string;
+  completedTaskIds: string[];
+  claimedPromoCodes: string[];
+  watchedAdsCount: number;
+  referralCode: string;
+  referredBy: string;
+  referralActivated: boolean;
+  referralCount: number;
+  referralCoinsEarned: number;
+  firstDepositBonusUsed: boolean;
+  language: LanguageCode;
+  lastCollectedAt: number;
+  createdAtMs: number;
+  feedBoostUntilMs?: number;
+  lastGoldenEggAtMs?: number;
+  goldenEggsFound?: number;
+  claimedAchievementIds?: string[];
+  claimedReferralMilestones?: number[];
+}
+
+export type WithdrawalStatus = 'pending' | 'approved' | 'rejected' | 'completed' | 'processing';
+
+export interface TransactionEntry {
+  id: string;
+  userId: string;
+  type: TransactionType;
+  title: string;
+  amount: number;
+  currency: 'eggs' | 'coins';
+  usdValue: number;
+  status: 'completed' | 'pending' | 'approved' | 'rejected';
+  createdAtMs: number;
+}
+
+export interface DepositOrder {
+  id: string;
+  userId: string;
+  coinsAmount: number;
+  bonusCoins: number;
+  usdAmount: number;
+  network: DepositNetwork;
+  cryptoAmount: string;
+  depositAddress: string;
+  txHash: string;
+  status: 'completed' | 'pending';
+  createdAtMs: number;
+}
+
+export interface WithdrawalOrder {
+  id: string;
+  txId?: string;
+  userId: string;
+  eggsAmount: number;
+  gramAmount: string;
+  usdValue: number;
+  walletAddress: string;
+  memo: string;
+  network: 'GRAM_TON';
+  status: WithdrawalStatus;
+  adminNote?: string;
+  reviewedAtMs?: number;
+  createdAtMs: number;
+}
+
+export interface WithdrawRequestRecord {
+  id: string;
+  txId: string;
+  userId: string;
+  displayName: string;
+  handle: string;
+  eggsAmount: number;
+  gramAmount: string;
+  usdValue: number;
+  walletAddress: string;
+  memo: string;
+  network: 'GRAM_TON';
+  status: 'pending' | 'approved' | 'rejected';
+  adminNote: string;
+  createdAtMs: number;
+  reviewedAtMs: number;
+}
+
+export interface ReferralRecord {
+  id: string;
+  referrerUid: string;
+  referredUid: string;
+  referredName: string;
+  referredHandle: string;
+  status: 'pending' | 'active';
+  coinsEarned: number;
+  eggsEarned?: number;
+  toppedUpUsd: number;
+  createdAtMs: number;
+}
+
+export interface LeaderboardEntry {
+  uid: string;
+  displayName: string;
+  handle: string;
+  photoUrl: string;
+  avatarColor: string;
+  referralCode: string;
+  buyerPoints: number;
+  inviterCount: number;
+  eggs: number;
+  totalEggsCollected: number;
+  chickensCount: number;
+  isCurrentUser?: boolean;
+}
+
+export interface TaskDefinition {
+  id: string;
+  category: 'daily' | 'milestone' | 'partner';
+  title: string;
+  subtitle?: string;
+  rewardCoins: number;
+  icon: string;
+  actionUrl?: string;
+  isCustom?: boolean;
+  isActive?: boolean;
+  createdAtMs?: number;
+}
+
+export interface DynamicPromoCode {
+  code: string;
+  label: string;
+  coins: number;
+  maxUses: number;
+  usedCount: number;
+  expiresAtMs: number;
+  isActive: boolean;
+  createdAtMs: number;
+}
+
+export interface SeasonWinnerRecord {
+  uid: string;
+  displayName: string;
+  handle: string;
+  category: 'buyers' | 'inviters' | 'eggs';
+  rank: number;
+  prizeCoins: number;
+}
+
+export interface SeasonConfig {
+  seasonNumber: number;
+  title: string;
+  prizePoolCoins: number;
+  endsAtMs: number;
+  lastWinners: SeasonWinnerRecord[];
+  updatedAtMs: number;
+}
+
+export type AdProviderType = 'countdown' | 'adsgram' | 'monetag' | 'custom_sponsor';
+
+export interface AdConfig {
+  provider: AdProviderType;
+  adsgramBlockId: string;
+  monetagZoneId: string;
+  customTitle: string;
+  customDescription: string;
+  customUrl: string;
+  watchSeconds: number;
+  bannerEnabled: boolean;
+  bannerTitle: string;
+  bannerSubtitle: string;
+  bannerCtaText: string;
+  bannerUrl: string;
+  updatedAtMs: number;
+}
