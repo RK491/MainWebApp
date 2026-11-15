@@ -148,15 +148,20 @@
     },
     "CustomTask": {
       "title": "CustomTask",
-      "description": "Admin-managed task shown in the Tasks tab.",
+      "description": "User/Admin-managed task shown in the Tasks tab with optional slot limits.",
       "type": "object",
       "properties": {
         "id": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "category": { "type": "string", "enum": ["daily", "milestone", "partner"] },
+        "category": { "type": "string", "enum": ["social", "daily", "exclusive", "partner", "milestone"] },
         "title": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "subtitle": { "type": "string", "maxLength": 120 },
         "rewardCoins": { "type": "number" },
         "icon": { "type": "string", "minLength": 1, "maxLength": 24 },
         "actionUrl": { "type": "string", "maxLength": 256 },
+        "totalSlots": { "type": "number" },
+        "claimedCount": { "type": "number" },
+        "creatorUid": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "paidCoins": { "type": "number" },
         "isActive": { "type": "boolean" },
         "createdAtMs": { "type": "number" },
         "createdAt": { "type": "string", "format": "date-time" }
@@ -168,8 +173,9 @@
       "description": "Admin-managed ad provider and sponsor banner configuration.",
       "type": "object",
       "properties": {
-        "provider": { "type": "string", "enum": ["countdown", "adsgram", "monetag", "custom_sponsor"] },
+        "provider": { "type": "string", "enum": ["countdown", "adsgram", "gigapub", "monetag", "custom_sponsor"] },
         "adsgramBlockId": { "type": "string", "maxLength": 64 },
+        "gigapubProjectId": { "type": "string", "maxLength": 64 },
         "monetagZoneId": { "type": "string", "maxLength": 64 },
         "customTitle": { "type": "string", "maxLength": 80 },
         "customDescription": { "type": "string", "maxLength": 200 },
@@ -225,7 +231,7 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "displayName", "handle", "photoUrl", "avatarColor", "referralCode", "buyerPoints", "inviterCount", "eggs", "totalEggsCollected", "chickensCount", "updatedAt"]
-    }
+    },
     "DynamicPromoCode": {
       "title": "DynamicPromoCode",
       "description": "Admin-managed promo codes stored in Firestore with usage limits and expiration.",

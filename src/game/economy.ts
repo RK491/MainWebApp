@@ -1,5 +1,6 @@
 import type {
   AdConfig,
+  AdNetworkId,
   ChickenBreedId,
   ChickenPack,
   DepositNetwork,
@@ -8,7 +9,9 @@ import type {
   LeaderboardEntry,
   ReferralRecord,
   SeasonConfig,
+  TaskCategory,
   TaskDefinition,
+  TaskSortOption,
   TransactionEntry,
   UserFarmProfile,
   WithdrawalOrder,
@@ -272,6 +275,42 @@ export const PROMO_CODES: Record<string, { coins: number; label: string }> = {
   GRAMTON: { coins: 300, label: 'TON Community Drop' },
 };
 
+export interface AdNetworkTaskDefinition {
+  id: AdNetworkId;
+  name: string;
+  subtitle: string;
+  rewardCoins: number;
+  dailyLimit: number;
+  badge: string;
+}
+
+export const AD_NETWORK_TASKS: AdNetworkTaskDefinition[] = [
+  {
+    id: 'adsgram',
+    name: 'AdsGram',
+    subtitle: 'Watch Telegram native rewarded ad',
+    rewardCoins: 80,
+    dailyLimit: 5,
+    badge: 'Telegram Ad',
+  },
+  {
+    id: 'gigapub',
+    name: 'Gigapub',
+    subtitle: 'Watch Gigapub interactive rewarded ad',
+    rewardCoins: 90,
+    dailyLimit: 5,
+    badge: 'Interactive',
+  },
+  {
+    id: 'monetag',
+    name: 'Monetag',
+    subtitle: 'Complete Monetag rewarded zone view',
+    rewardCoins: 100,
+    dailyLimit: 5,
+    badge: 'High Reward',
+  },
+];
+
 export const TASK_DEFINITIONS: TaskDefinition[] = [
   {
     id: 'daily_news',
@@ -279,6 +318,7 @@ export const TASK_DEFINITIONS: TaskDefinition[] = [
     title: 'Check in on our news channel',
     rewardCoins: 20,
     icon: 'megaphone',
+    actionUrl: 'https://t.me/AIRDROP_GALAXYS',
   },
   {
     id: 'daily_payments',
@@ -286,6 +326,7 @@ export const TASK_DEFINITIONS: TaskDefinition[] = [
     title: 'Check in on our payments channel',
     rewardCoins: 20,
     icon: 'wallet',
+    actionUrl: 'https://t.me/AG_PAYOUTS',
   },
   {
     id: 'daily_promos',
@@ -293,6 +334,7 @@ export const TASK_DEFINITIONS: TaskDefinition[] = [
     title: 'Check in on our promo codes channel',
     rewardCoins: 20,
     icon: 'ticket',
+    actionUrl: 'https://t.me/AIRDROP_GALAXYS',
   },
   {
     id: 'daily_reinvest',
@@ -303,47 +345,113 @@ export const TASK_DEFINITIONS: TaskDefinition[] = [
   },
   {
     id: 'milestone_react',
-    category: 'milestone',
+    category: 'social',
     title: 'React to our farm update post',
+    subtitle: 'Drop a reaction on our latest community post',
     rewardCoins: 50,
     icon: 'heart',
+    actionUrl: 'https://t.me/AIRDROP_GALAXYS',
   },
   {
     id: 'milestone_join_news',
-    category: 'milestone',
+    category: 'social',
     title: 'Join Farm News community',
+    subtitle: 'Stay updated on daily drops & events',
     rewardCoins: 100,
     icon: 'send',
+    actionUrl: 'https://t.me/AIRDROP_GALAXYS',
   },
   {
     id: 'milestone_join_pay',
-    category: 'milestone',
+    category: 'social',
     title: 'Verify TON payout channel',
+    subtitle: 'Check live GRAM withdrawal proofs',
     rewardCoins: 100,
     icon: 'shield',
+    actionUrl: 'https://t.me/AG_PAYOUTS',
+  },
+  {
+    id: 'social_share_farm',
+    category: 'social',
+    title: 'Follow Alpha Gram announcements',
+    subtitle: 'Turn on notifications for promo code drops',
+    rewardCoins: 120,
+    icon: 'users',
+    actionUrl: 'https://t.me/AIRDROP_GALAXYS',
+  },
+  {
+    id: 'exclusive_vip_pack',
+    category: 'exclusive',
+    title: 'Claim VIP Flock Starter',
+    subtitle: 'Limited early-bird bonus for active farmers',
+    rewardCoins: 250,
+    icon: 'gift',
+    totalSlots: 500,
+    claimedCount: 312,
+  },
+  {
+    id: 'exclusive_ton_wallet',
+    category: 'exclusive',
+    title: 'Verify TON Wallet Quest',
+    subtitle: 'Exclusive TON ecosystem farmer reward',
+    rewardCoins: 300,
+    icon: 'shield',
+    actionUrl: 'https://t.me/AG_PAYOUTS',
+    totalSlots: 1000,
+    claimedCount: 640,
+  },
+  {
+    id: 'exclusive_golden_hunter',
+    category: 'exclusive',
+    title: 'Golden Egg Collector Bonus',
+    subtitle: 'Limited seasonal quest for loyal coop owners',
+    rewardCoins: 400,
+    icon: 'flame',
+    totalSlots: 250,
+    claimedCount: 148,
   },
   {
     id: 'partner_app',
     category: 'partner',
     title: 'Partner farm explorer',
+    subtitle: 'Visit featured TON partner channel',
     rewardCoins: 300,
     icon: 'link',
+    actionUrl: 'https://t.me/AIRDROP_GALAXYS',
+    totalSlots: 1000,
+    claimedCount: 615,
   },
   {
     id: 'partner_boost',
     category: 'partner',
     title: 'Community reaction bonus',
+    subtitle: 'Support our verified partner campaign',
     rewardCoins: 500,
     icon: 'flame',
+    actionUrl: 'https://t.me/AG_PAYOUTS',
+    totalSlots: 500,
+    claimedCount: 289,
+  },
+  {
+    id: 'partner_galaxy',
+    category: 'partner',
+    title: 'Join Partner Airdrop Hub',
+    subtitle: 'Limited slots partner quest · instant check',
+    rewardCoins: 350,
+    icon: 'send',
+    actionUrl: 'https://t.me/AIRDROP_GALAXYS',
+    totalSlots: 800,
+    claimedCount: 472,
   },
 ];
 
 export const DEFAULT_AD_CONFIG: AdConfig = {
   provider: 'countdown',
   adsgramBlockId: '',
+  gigapubProjectId: '',
   monetagZoneId: '',
   customTitle: 'Alpha Gram Partner Spotlight',
-  customDescription: 'Watch this short sponsor showcase to earn 1 step toward a free White Leghorn.',
+  customDescription: 'Watch this short sponsor showcase to earn coins & 1 step toward a free White Leghorn.',
   customUrl: 'https://t.me/AIRDROP_GALAXYS',
   watchSeconds: 5,
   bannerEnabled: false,
@@ -357,6 +465,77 @@ export const DEFAULT_AD_CONFIG: AdConfig = {
 export function mergeTaskDefinitions(customTasks: TaskDefinition[] = []): TaskDefinition[] {
   const activeCustom = customTasks.filter((t) => t.isActive !== false);
   return [...TASK_DEFINITIONS, ...activeCustom];
+}
+
+export function getTaskRemainingSlots(
+  task: Pick<TaskDefinition, 'totalSlots' | 'claimedCount' | 'isCustom'>,
+  completedByUser = false,
+): number | null {
+  const total = Number(task.totalSlots ?? 0);
+  if (!Number.isFinite(total) || total <= 0) return null;
+  const claimed = Math.max(0, Math.floor(Number(task.claimedCount ?? 0)));
+  const localAdjust = !task.isCustom && completedByUser ? 1 : 0;
+  return Math.max(0, total - claimed - localAdjust);
+}
+
+export function sortTasks(
+  tasks: TaskDefinition[],
+  sortBy: TaskSortOption,
+  completedTaskIds: string[] = [],
+): TaskDefinition[] {
+  const completedSet = new Set(completedTaskIds);
+  const indexed = tasks.map((task, idx) => ({ task, idx }));
+
+  indexed.sort((a, b) => {
+    if (sortBy === 'most_reward') {
+      const rewardDiff = b.task.rewardCoins - a.task.rewardCoins;
+      if (rewardDiff !== 0) return rewardDiff;
+      const timeDiff = (b.task.createdAtMs ?? 0) - (a.task.createdAtMs ?? 0);
+      if (timeDiff !== 0) return timeDiff;
+      return a.idx - b.idx;
+    }
+
+    if (sortBy === 'newest') {
+      const timeDiff = (b.task.createdAtMs ?? 0) - (a.task.createdAtMs ?? 0);
+      if (timeDiff !== 0) return timeDiff;
+      const rewardDiff = b.task.rewardCoins - a.task.rewardCoins;
+      if (rewardDiff !== 0) return rewardDiff;
+      return a.idx - b.idx;
+    }
+
+    // 'ending_soon': open limited-slot tasks (fewest spots left > 0) first,
+    // then unlimited tasks (null), then sold-out tasks (0 spots left) at the bottom.
+    const remA = getTaskRemainingSlots(a.task, completedSet.has(a.task.id));
+    const remB = getTaskRemainingSlots(b.task, completedSet.has(b.task.id));
+
+    const rankOf = (rem: number | null): number => {
+      if (rem !== null && rem > 0) return 0;
+      if (rem === null) return 1;
+      return 2;
+    };
+
+    const groupDiff = rankOf(remA) - rankOf(remB);
+    if (groupDiff !== 0) return groupDiff;
+
+    if (remA !== null && remB !== null && remA !== remB) {
+      return remA - remB;
+    }
+
+    const rewardDiff = b.task.rewardCoins - a.task.rewardCoins;
+    if (rewardDiff !== 0) return rewardDiff;
+    return a.idx - b.idx;
+  });
+
+  return indexed.map((item) => item.task);
+}
+
+export function getAdNetworkClaimCountToday(
+  completedTaskIds: string[],
+  network: AdNetworkId,
+  todayStr: string,
+): number {
+  const prefix = `ad_${network}_${todayStr}_`;
+  return completedTaskIds.filter((id) => id.startsWith(prefix)).length;
 }
 
 export function getWithdrawalStatusMeta(status: WithdrawalStatus): {
@@ -1072,14 +1251,21 @@ export function completeTask(
   taskId: string,
   nowMs: number,
   customTasks: TaskDefinition[] = [],
-): { profile: UserFarmProfile; transaction: TransactionEntry; rewardCoins: number } | { error: string } {
+): { profile: UserFarmProfile; transaction: TransactionEntry; rewardCoins: number; isCustomTask: boolean } | { error: string } {
   const allTasks = mergeTaskDefinitions(customTasks);
   const task = allTasks.find((t) => t.id === taskId);
   if (!task) {
     return { error: 'Task not found.' };
   }
+  if (task.creatorUid && task.creatorUid === profile.uid) {
+    return { error: 'You cannot claim rewards on your own posted task.' };
+  }
   if (profile.completedTaskIds.includes(taskId)) {
     return { error: 'Task already completed.' };
+  }
+  const remainingSlots = getTaskRemainingSlots(task, false);
+  if (remainingSlots !== null && remainingSlots <= 0) {
+    return { error: 'All slots for this task have been claimed.' };
   }
 
   const nextProfile: UserFarmProfile = {
@@ -1100,7 +1286,188 @@ export function completeTask(
     createdAtMs: nowMs,
   };
 
-  return { profile: nextProfile, transaction, rewardCoins: task.rewardCoins };
+  return {
+    profile: nextProfile,
+    transaction,
+    rewardCoins: task.rewardCoins,
+    isCustomTask: Boolean(task.isCustom),
+  };
+}
+
+export const USER_TASK_MIN_REWARD_COINS = 10;
+export const USER_TASK_MAX_REWARD_COINS = 100_000;
+export const USER_TASK_MIN_SLOTS = 1;
+export const USER_TASK_MAX_SLOTS = 10_000;
+export const USER_TASK_PLATFORM_FEE_RATE = 0.1;
+export const USER_TASK_MIN_FEE_COINS = 25;
+
+export interface PaidTaskCostBreakdown {
+  rewardCoins: number;
+  totalSlots: number;
+  rewardPoolCoins: number;
+  platformFeeCoins: number;
+  totalCostCoins: number;
+}
+
+export function calculatePaidTaskCost(
+  rewardCoins: number,
+  totalSlots: number,
+): PaidTaskCostBreakdown {
+  const safeReward = Math.max(
+    USER_TASK_MIN_REWARD_COINS,
+    Math.min(USER_TASK_MAX_REWARD_COINS, Math.floor(Number(rewardCoins) || 0)),
+  );
+  const safeSlots = Math.max(
+    USER_TASK_MIN_SLOTS,
+    Math.min(USER_TASK_MAX_SLOTS, Math.floor(Number(totalSlots) || 0)),
+  );
+  const rewardPoolCoins = safeReward * safeSlots;
+  const platformFeeCoins = Math.max(
+    USER_TASK_MIN_FEE_COINS,
+    Math.round(rewardPoolCoins * USER_TASK_PLATFORM_FEE_RATE),
+  );
+  return {
+    rewardCoins: safeReward,
+    totalSlots: safeSlots,
+    rewardPoolCoins,
+    platformFeeCoins,
+    totalCostCoins: rewardPoolCoins + platformFeeCoins,
+  };
+}
+
+export function createPaidTaskOrder(
+  profile: UserFarmProfile,
+  input: {
+    title: string;
+    subtitle?: string;
+    category: TaskCategory;
+    rewardCoins: number;
+    totalSlots: number;
+    icon: string;
+    actionUrl: string;
+  },
+  nowMs: number,
+):
+  | {
+      profile: UserFarmProfile;
+      transaction: TransactionEntry;
+      cost: PaidTaskCostBreakdown;
+    }
+  | { error: string } {
+  const cleanTitle = input.title.trim();
+  if (cleanTitle.length < 2) {
+    return { error: 'Enter a task title (at least 2 characters).' };
+  }
+  const rawReward = Math.floor(Number(input.rewardCoins) || 0);
+  if (rawReward < USER_TASK_MIN_REWARD_COINS || rawReward > USER_TASK_MAX_REWARD_COINS) {
+    return {
+      error: `Reward per user must be between ${USER_TASK_MIN_REWARD_COINS} and ${USER_TASK_MAX_REWARD_COINS.toLocaleString()} coins.`,
+    };
+  }
+  const rawSlots = Math.floor(Number(input.totalSlots) || 0);
+  if (rawSlots < USER_TASK_MIN_SLOTS || rawSlots > USER_TASK_MAX_SLOTS) {
+    return {
+      error: `Total slots must be between ${USER_TASK_MIN_SLOTS} and ${USER_TASK_MAX_SLOTS.toLocaleString()}.`,
+    };
+  }
+
+  const cost = calculatePaidTaskCost(rawReward, rawSlots);
+  if (profile.coins < cost.totalCostCoins) {
+    return {
+      error: `Need ${cost.totalCostCoins.toLocaleString()} coins to post this task (you have ${profile.coins.toLocaleString()}).`,
+    };
+  }
+
+  const nextProfile: UserFarmProfile = {
+    ...profile,
+    coins: profile.coins - cost.totalCostCoins,
+  };
+
+  const transaction: TransactionEntry = {
+    id: `tx_pubtask_${nowMs}`,
+    userId: profile.uid,
+    type: 'task',
+    title: `Posted task: ${cleanTitle}`.slice(0, 80),
+    amount: -cost.totalCostCoins,
+    currency: 'coins',
+    usdValue: coinsToUsd(cost.totalCostCoins),
+    status: 'completed',
+    createdAtMs: nowMs,
+  };
+
+  return { profile: nextProfile, transaction, cost };
+}
+
+export function claimAdNetworkReward(
+  profile: UserFarmProfile,
+  network: AdNetworkId,
+  todayStr: string,
+  nowMs: number,
+):
+  | {
+      profile: UserFarmProfile;
+      transaction: TransactionEntry;
+      rewardCoins: number;
+      networkName: string;
+      watchedToday: number;
+      dailyLimit: number;
+      unlockedChicken: boolean;
+    }
+  | { error: string } {
+  const def = AD_NETWORK_TASKS.find((n) => n.id === network);
+  if (!def) {
+    return { error: 'Unknown ad network.' };
+  }
+
+  const watchedToday = getAdNetworkClaimCountToday(profile.completedTaskIds, network, todayStr);
+  if (watchedToday >= def.dailyLimit) {
+    return { error: `${def.name} daily limit reached (${def.dailyLimit}/${def.dailyLimit} today). Come back tomorrow!` };
+  }
+
+  const nextSlot = watchedToday + 1;
+  const claimToken = `ad_${network}_${todayStr}_${nextSlot}`;
+  // Prune stale ad_ entries from earlier dates so completedTaskIds stays compact under the 50-item Firestore cap
+  const prunedIds = profile.completedTaskIds.filter(
+    (id) => !id.startsWith('ad_') || id.includes(`_${todayStr}_`),
+  );
+  const nextCompletedIds = [...prunedIds, claimToken].slice(-50);
+
+  const nextWatchCount = profile.watchedAdsCount + 1;
+  const unlockedChicken = nextWatchCount >= 10;
+  const hadNoChickens = calculateTotalChickens(profile) === 0;
+
+  const nextProfile: UserFarmProfile = {
+    ...profile,
+    coins: profile.coins + def.rewardCoins,
+    completedTaskIds: nextCompletedIds,
+    watchedAdsCount: unlockedChicken ? 0 : nextWatchCount,
+    leghornCount: unlockedChicken ? profile.leghornCount + 1 : profile.leghornCount,
+    lastCollectedAt: unlockedChicken && hadNoChickens ? nowMs : profile.lastCollectedAt,
+  };
+
+  const transaction: TransactionEntry = {
+    id: `tx_adnet_${network}_${nowMs}`,
+    userId: profile.uid,
+    type: 'task',
+    title: unlockedChicken
+      ? `${def.name} Ad (+${def.rewardCoins}c & Free Hen!)`
+      : `${def.name} Ad Reward`,
+    amount: def.rewardCoins,
+    currency: 'coins',
+    usdValue: coinsToUsd(def.rewardCoins),
+    status: 'completed',
+    createdAtMs: nowMs,
+  };
+
+  return {
+    profile: nextProfile,
+    transaction,
+    rewardCoins: def.rewardCoins,
+    networkName: def.name,
+    watchedToday: nextSlot,
+    dailyLimit: def.dailyLimit,
+    unlockedChicken,
+  };
 }
 
 export function watchAdStep(

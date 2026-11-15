@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   activateFeedBooster,
+  AD_NETWORK_TASKS,
   buildDeterministicDepositIds,
   buildEarningsChartSeries,
   buildInvitedFriendsList,
@@ -10,11 +11,13 @@ import {
   buyChickens,
   calculateBuyerPoints,
   calculateLevelYieldMultiplier,
+  calculatePaidTaskCost,
   calculatePendingEggs,
   calculateProductionRate,
   calculateReferralBonusEggs,
   calculateReferralEggCommission,
   claimAchievement,
+  claimAdNetworkReward,
   claimDailyStreak,
   claimGoldenEggDrop,
   claimPromoCode,
@@ -24,6 +27,7 @@ import {
   createDefaultProfile,
   createDefaultSeasonConfig,
   createDepositQuote,
+  createPaidTaskOrder,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
   detectTop10RankCelebration,
@@ -34,7 +38,9 @@ import {
   filterWithdrawalsByTab,
   formatReferralHandle,
   getAchievementsProgress,
+  getAdNetworkClaimCountToday,
   getChickenMilestoneReached,
+  getTaskRemainingSlots,
   getWithdrawalStatusMeta,
   GOLDEN_EGG_COOLDOWN_MS,
   GOLDEN_EGG_REWARD_COINS,
@@ -51,6 +57,7 @@ import {
   REFERRER_SIGNUP_BONUS_EGGS,
   reinvestEggs,
   SIGNUP_BONUS_COINS,
+  sortTasks,
   summarizeReferrals,
   upgradeBasket,
 } from './economy';
@@ -1614,6 +1621,273 @@ test('dynamic admin promo codes validate active status, maxUses, expiry, and def
   assert.ok(season.prizePoolCoins > 0);
   assert.ok(season.endsAtMs > NOW);
 });
+
+test('daily ad-network tasks reward 80/90/100 coins, enforce 5/day limit, prune stale dates, and unlock free Leghorn at 10 ads', () => {
+  assert.deepEqual(
+    AD_NETWORK_TASKS.map((n) => [n.id, n.rewardCoins, n.dailyLimit]),
+    [
+      ['adsgram', 80, 5],
+      ['gigapub', 90, 5],
+      ['monetag', 100, 5],
+    ],
+  );
+
+  const { profile } = createDefaultProfile('player_adnet', 'Kiran', '@kiran', NOW);
+  // Seed stale ad entry from yesterday and 9 watched ads toward the 10-ad hen unlock
+  let current = {
+    ...profile,
+    watchedAdsCount: 9,
+    completedTaskIds: ['milestone_react', 'ad_adsgram_2026-11-13_1'],
+  };
+
+  // 1st claim today on Monetag (+100 coins) also hits 10/10 watched ads -> unlocks 1 White Leghorn
+  const monetagRes = claimAdNetworkReward(current, 'monetag', '2026-11-14', NOW);
+  assert.ok(!('error' in monetagRes));
+  assert.equal(monetagRes.rewardCoins, 100);
+  assert.equal(monetagRes.watchedToday, 1);
+  assert.equal(monetagRes.unlockedChicken, true);
+  assert.equal(monetagRes.profile.coins, current.coins + 100);
+  assert.equal(monetagRes.profile.leghornCount, 1);
+  assert.equal(monetagRes.profile.watchedAdsCount, 0);
+  assert.ok(monetagRes.profile.completedTaskIds.includes('milestone_react'));
+  assert.ok(!monetagRes.profile.completedTaskIds.includes('ad_adsgram_2026-11-13_1'));
+  assert.equal(getAdNetworkClaimCountToday(monetagRes.profile.completedTaskIds, 'monetag', '2026-11-14'), 1);
+
+  // AdsGram (+80) and Gigapub (+90) track separate 5/day quotas
+  const adsgramRes = claimAdNetworkReward(monetagRes.profile, 'adsgram', '2026-11-14', NOW + 1000);
+  assert.ok(!('error' in adsgramRes));
+  assert.equal(adsgramRes.rewardCoins, 80);
+
+  const gigapubRes = claimAdNetworkReward(adsgramRes.profile, 'gigapub', '2026-11-14', NOW + 2000);
+  assert.ok(!('error' in gigapubRes));
+  assert.equal(gigapubRes.rewardCoins, 90);
+  assert.equal(gigapubRes.profile.watchedAdsCount, 2);
+
+  // Exhaust remaining 4 AdsGram claims today -> 6th claim fails
+  current = gigapubRes.profile;
+  for (let i = 0; i < 4; i += 1) {
+    const next = claimAdNetworkReward(current, 'adsgram', '2026-11-14', NOW + 3000 + i * 1000);
+    assert.ok(!('error' in next));
+    current = next.profile;
+  }
+  assert.equal(getAdNetworkClaimCountToday(current.completedTaskIds, 'adsgram', '2026-11-14'), 5);
+  const capped = claimAdNetworkReward(current, 'adsgram', '2026-11-14', NOW + 10000);
+  assert.ok('error' in capped);
+});
+
+test('task slots enforcement blocks completion when remaining slots reach 0 and merges 4 task categories', () => {
+  const { profile } = createDefaultProfile('player_slots', 'Zara', '@zara', NOW);
+  const customTasks = [
+    {
+      id: 'task_social_1',
+      category: 'social' as const,
+      title: 'Follow X',
+      rewardCoins: 120,
+      icon: 'users',
+      isCustom: true,
+      isActive: true,
+      totalSlots: 10,
+      claimedCount: 9,
+      createdAtMs: NOW,
+    },
+    {
+      id: 'task_exclusive_full',
+      category: 'exclusive' as const,
+      title: 'Sold Out VIP Drop',
+      rewardCoins: 500,
+      icon: 'gift',
+      isCustom: true,
+      isActive: true,
+      totalSlots: 50,
+      claimedCount: 50,
+      createdAtMs: NOW,
+    },
+  ];
+
+  const merged = mergeTaskDefinitions(customTasks);
+  assert.ok(merged.some((t) => t.category === 'social'));
+  assert.ok(merged.some((t) => t.category === 'daily'));
+  assert.ok(merged.some((t) => t.category === 'exclusive'));
+  assert.ok(merged.some((t) => t.category === 'partner'));
+
+  assert.equal(getTaskRemainingSlots(customTasks[0], false), 1);
+  assert.equal(getTaskRemainingSlots(customTasks[1], false), 0);
+
+  const ok = completeTask(profile, 'task_social_1', NOW, customTasks);
+  assert.ok(!('error' in ok));
+  assert.equal(ok.isCustomTask, true);
+  assert.equal(ok.rewardCoins, 120);
+
+  const builtInDone = completeTask(profile, 'daily_news', NOW, customTasks);
+  assert.ok(!('error' in builtInDone));
+  assert.equal(builtInDone.isCustomTask, false);
+
+  const fullErr = completeTask(profile, 'task_exclusive_full', NOW, customTasks);
+  assert.ok('error' in fullErr);
+});
+
+test('paid user task creation calculates pool + fee, deducts coins, validates balance, and blocks self-claim', () => {
+  // 50 coins * 10 slots = 500 pool + 50 fee (10%) = 550 total
+  const standardCost = calculatePaidTaskCost(50, 10);
+  assert.equal(standardCost.rewardPoolCoins, 500);
+  assert.equal(standardCost.platformFeeCoins, 50);
+  assert.equal(standardCost.totalCostCoins, 550);
+
+  // Small task hits minimum 25 coin fee: 10 * 5 = 50 pool + 25 fee = 75 total
+  const smallCost = calculatePaidTaskCost(10, 5);
+  assert.equal(smallCost.rewardPoolCoins, 50);
+  assert.equal(smallCost.platformFeeCoins, 25);
+  assert.equal(smallCost.totalCostCoins, 75);
+
+  const { profile } = createDefaultProfile('player_creator1', 'Aarav', '@aarav', NOW);
+  assert.equal(profile.coins, 1000);
+
+  // Too expensive for 1,000 coins balance (100 * 20 = 2000 + 200 = 2200)
+  const tooExpensive = createPaidTaskOrder(
+    profile,
+    {
+      title: 'Join My Channel',
+      category: 'partner',
+      rewardCoins: 100,
+      totalSlots: 20,
+      icon: 'send',
+      actionUrl: 'https://t.me/test',
+    },
+    NOW,
+  );
+  assert.ok('error' in tooExpensive);
+
+  // Invalid slots (0) rejected
+  const zeroSlots = createPaidTaskOrder(
+    profile,
+    {
+      title: 'Zero Slots',
+      category: 'social',
+      rewardCoins: 50,
+      totalSlots: 0,
+      icon: 'send',
+      actionUrl: '',
+    },
+    NOW,
+  );
+  assert.ok('error' in zeroSlots);
+
+  // Valid paid task deducts 550 coins and emits negative coin transaction
+  const ok = createPaidTaskOrder(
+    profile,
+    {
+      title: 'Join My Channel',
+      category: 'partner',
+      rewardCoins: 50,
+      totalSlots: 10,
+      icon: 'send',
+      actionUrl: 'https://t.me/test',
+    },
+    NOW,
+  );
+  assert.ok(!('error' in ok));
+  assert.equal(ok.cost.totalCostCoins, 550);
+  assert.equal(ok.profile.coins, 450);
+  assert.equal(ok.transaction.amount, -550);
+  assert.equal(ok.transaction.currency, 'coins');
+
+  // Creator cannot claim their own posted task, while another player can
+  const ownTask = {
+    id: 'task_user_paid_1',
+    category: 'partner' as const,
+    title: 'Join My Channel',
+    rewardCoins: 50,
+    icon: 'send',
+    actionUrl: 'https://t.me/test',
+    totalSlots: 10,
+    claimedCount: 0,
+    creatorUid: 'player_creator1',
+    paidCoins: 550,
+    isCustom: true,
+    isActive: true,
+    createdAtMs: NOW,
+  };
+
+  const selfClaim = completeTask(ok.profile, 'task_user_paid_1', NOW + 1000, [ownTask]);
+  assert.ok('error' in selfClaim);
+
+  const { profile: otherUser } = createDefaultProfile('player_other2', 'Meera', '@meera', NOW);
+  const otherClaim = completeTask(otherUser, 'task_user_paid_1', NOW + 1000, [ownTask]);
+  assert.ok(!('error' in otherClaim));
+  assert.equal(otherClaim.rewardCoins, 50);
+  assert.equal(otherClaim.profile.coins, otherUser.coins + 50);
+});
+
+test('sortTasks orders tasks accurately by Most Reward, Newest, and Ending Soon', () => {
+  const sampleTasks = [
+    {
+      id: 'task_unlimited_high',
+      category: 'partner' as const,
+      title: 'Unlimited High Reward',
+      rewardCoins: 600,
+      icon: 'link',
+      isCustom: true,
+      isActive: true,
+      createdAtMs: NOW - 5000,
+    },
+    {
+      id: 'task_low_slots_medium',
+      category: 'partner' as const,
+      title: 'Almost Gone',
+      rewardCoins: 200,
+      icon: 'flame',
+      isCustom: true,
+      isActive: true,
+      totalSlots: 50,
+      claimedCount: 47, // 3 spots left
+      createdAtMs: NOW - 2000,
+    },
+    {
+      id: 'task_brand_new',
+      category: 'partner' as const,
+      title: 'Brand New Quest',
+      rewardCoins: 350,
+      icon: 'send',
+      isCustom: true,
+      isActive: true,
+      totalSlots: 100,
+      claimedCount: 10, // 90 spots left
+      createdAtMs: NOW + 1000,
+    },
+    {
+      id: 'task_sold_out_top_reward',
+      category: 'partner' as const,
+      title: 'Sold Out Whale',
+      rewardCoins: 900,
+      icon: 'gift',
+      isCustom: true,
+      isActive: true,
+      totalSlots: 10,
+      claimedCount: 10, // 0 spots left
+      createdAtMs: NOW - 1000,
+    },
+  ];
+
+  // Most Reward: descending by rewardCoins
+  assert.deepEqual(
+    sortTasks(sampleTasks, 'most_reward').map((t) => t.id),
+    ['task_sold_out_top_reward', 'task_unlimited_high', 'task_brand_new', 'task_low_slots_medium'],
+  );
+
+  // Newest: descending by createdAtMs
+  assert.deepEqual(
+    sortTasks(sampleTasks, 'newest').map((t) => t.id),
+    ['task_brand_new', 'task_sold_out_top_reward', 'task_low_slots_medium', 'task_unlimited_high'],
+  );
+
+  // Ending Soon: fewest open spots > 0 first, then unlimited, then sold-out (0 left) last
+  assert.deepEqual(
+    sortTasks(sampleTasks, 'ending_soon').map((t) => t.id),
+    ['task_low_slots_medium', 'task_brand_new', 'task_unlimited_high', 'task_sold_out_top_reward'],
+  );
+});
+
+
 
 
 

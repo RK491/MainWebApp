@@ -2,11 +2,13 @@ import { useEffect, useState } from 'react';
 import { CheckCircle2, ExternalLink, Play, Sparkles, Timer, X } from 'lucide-react';
 import type { AdConfig } from '../types/farm';
 import clayHenMascot from '../assets/images/clay_hen_mascot_1794678825872.jpg';
-import { ChickenSprite } from './GameIcons';
+import { ChickenSprite, CoinIcon } from './GameIcons';
 
 interface RewardedAdModalProps {
   adConfig: AdConfig;
   watchedCount: number;
+  networkLabel?: string | null;
+  rewardCoins?: number | null;
   fallbackNotice?: string | null;
   onComplete: () => void;
   onClose: () => void;
@@ -15,6 +17,8 @@ interface RewardedAdModalProps {
 export function RewardedAdModal({
   adConfig,
   watchedCount,
+  networkLabel,
+  rewardCoins,
   fallbackNotice,
   onComplete,
   onClose,
@@ -35,6 +39,7 @@ export function RewardedAdModal({
   const progressPct = Math.round(((totalSeconds - secondsLeft) / totalSeconds) * 100);
   const readyToClaim = secondsLeft === 0;
   const sponsorUrl = adConfig.customUrl.trim();
+  const hasCoinReward = typeof rewardCoins === 'number' && rewardCoins > 0;
 
   const handleClaim = () => {
     if (!readyToClaim || claimed) return;
@@ -53,7 +58,11 @@ export function RewardedAdModal({
         <div className="flex items-center justify-between gap-2">
           <div className="clay-card-warm !rounded-xl inline-flex items-center gap-1.5 text-xs font-extrabold text-amber-800 dark:text-amber-300 px-3 py-1.5">
             <Sparkles className="w-3.5 h-3.5" />
-            <span>Sponsored Reward ({watchedCount + 1}/10)</span>
+            <span>
+              {networkLabel
+                ? `${networkLabel} Reward`
+                : `Sponsored Reward (${watchedCount + 1}/10)`}
+            </span>
           </div>
           <button
             type="button"
@@ -82,23 +91,36 @@ export function RewardedAdModal({
             </div>
           </div>
           <h2 id="rewarded-ad-title" className="text-base font-extrabold text-stone-900 dark:text-stone-100">
-            {adConfig.customTitle || 'Alpha Gram Sponsor Showcase'}
+            {networkLabel
+              ? `${networkLabel} Daily Ad`
+              : adConfig.customTitle || 'Alpha Gram Sponsor Showcase'}
           </h2>
           <p className="text-xs text-stone-600 dark:text-stone-300 leading-relaxed">
-            {adConfig.customDescription ||
-              'Watch until the timer ends to earn +1 progress toward a free White Leghorn.'}
+            {hasCoinReward
+              ? `Watch until the timer ends to earn +${rewardCoins} coins & +1/10 progress toward a free White Leghorn.`
+              : adConfig.customDescription ||
+                'Watch until the timer ends to earn +1 progress toward a free White Leghorn.'}
           </p>
 
+          {hasCoinReward && (
+            <div className="inline-flex items-center gap-1.5 rounded-xl bg-amber-100/80 dark:bg-amber-950/60 border border-amber-300/70 dark:border-amber-700/50 px-3 py-1 text-xs font-extrabold text-amber-800 dark:text-amber-300">
+              <CoinIcon className="w-4 h-4" />
+              <span className="font-mono-num">+{rewardCoins} coins</span>
+            </div>
+          )}
+
           {sponsorUrl && (
-            <a
-              href={sponsorUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="clay-btn clay-btn-neutral inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-extrabold text-sky-700 dark:text-sky-400"
-            >
-              <span>Visit Sponsor</span>
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
+            <div>
+              <a
+                href={sponsorUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="clay-btn clay-btn-neutral inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-extrabold text-sky-700 dark:text-sky-400"
+              >
+                <span>Visit Sponsor</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            </div>
           )}
         </div>
 
@@ -139,7 +161,11 @@ export function RewardedAdModal({
           {readyToClaim ? (
             <>
               <CheckCircle2 className="w-4 h-4" />
-              <span>Claim Ad Step ({Math.min(10, watchedCount + 1)}/10)</span>
+              <span>
+                {hasCoinReward
+                  ? `Claim +${rewardCoins} Coins`
+                  : `Claim Ad Step (${Math.min(10, watchedCount + 1)}/10)`}
+              </span>
             </>
           ) : (
             <>

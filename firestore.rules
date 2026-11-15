@@ -204,16 +204,22 @@ service cloud.firestore {
           'actionUrl', 'isActive', 'createdAtMs', 'createdAt'
         ])
         && data.keys().hasOnly([
-          'id', 'category', 'title', 'rewardCoins', 'icon',
-          'actionUrl', 'isActive', 'createdAtMs', 'createdAt'
+          'id', 'category', 'title', 'subtitle', 'rewardCoins', 'icon',
+          'actionUrl', 'totalSlots', 'claimedCount', 'creatorUid', 'paidCoins',
+          'isActive', 'createdAtMs', 'createdAt'
         ])
         && isValidId(data.id)
         && data.id == taskId
-        && data.category in ['daily', 'milestone', 'partner']
+        && data.category in ['social', 'daily', 'exclusive', 'partner', 'milestone']
         && data.title is string && data.title.size() >= 2 && data.title.size() <= 80
+        && (!('subtitle' in data) || (data.subtitle is string && data.subtitle.size() <= 120))
         && data.rewardCoins is number && data.rewardCoins >= 1 && data.rewardCoins <= 1000000
         && data.icon is string && data.icon.size() >= 1 && data.icon.size() <= 24
         && data.actionUrl is string && data.actionUrl.size() <= 256
+        && (!('totalSlots' in data) || (data.totalSlots is number && data.totalSlots >= 0 && data.totalSlots <= 1000000))
+        && (!('claimedCount' in data) || (data.claimedCount is number && data.claimedCount >= 0 && data.claimedCount <= 1000000))
+        && (!('creatorUid' in data) || isValidId(data.creatorUid))
+        && (!('paidCoins' in data) || (data.paidCoins is number && data.paidCoins >= 0 && data.paidCoins <= 100000000))
         && data.isActive is bool
         && data.createdAtMs is number && data.createdAtMs >= 0
         && data.createdAt is timestamp;
@@ -227,13 +233,14 @@ service cloud.firestore {
           'updatedAtMs', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'provider', 'adsgramBlockId', 'monetagZoneId', 'customTitle',
+          'provider', 'adsgramBlockId', 'gigapubProjectId', 'monetagZoneId', 'customTitle',
           'customDescription', 'customUrl', 'watchSeconds', 'bannerEnabled',
           'bannerTitle', 'bannerSubtitle', 'bannerCtaText', 'bannerUrl',
           'updatedAtMs', 'updatedAt'
         ])
-        && data.provider in ['countdown', 'adsgram', 'monetag', 'custom_sponsor']
+        && data.provider in ['countdown', 'adsgram', 'gigapub', 'monetag', 'custom_sponsor']
         && data.adsgramBlockId is string && data.adsgramBlockId.size() <= 64
+        && (!('gigapubProjectId' in data) || (data.gigapubProjectId is string && data.gigapubProjectId.size() <= 64))
         && data.monetagZoneId is string && data.monetagZoneId.size() <= 64
         && data.customTitle is string && data.customTitle.size() <= 80
         && data.customDescription is string && data.customDescription.size() <= 200
@@ -503,11 +510,30 @@ service cloud.firestore {
       allow list: if request.query.limit != null && request.query.limit <= 100;
       allow create: if isValidId(taskId)
         && isValidCustomTask(incoming(), taskId)
+        && (!('claimedCount' in incoming()) || incoming().claimedCount == 0)
+        && (!('creatorUid' in incoming()) || exists(/databases/$(database)/documents/players/$(incoming().creatorUid)))
         && incoming().createdAt == request.time;
       allow update: if isValidId(taskId)
         && isValidCustomTask(incoming(), taskId)
         && incoming().createdAt == existing().createdAt
-        && incoming().diff(existing()).affectedKeys().hasOnly(['category', 'title', 'rewardCoins', 'icon', 'actionUrl', 'isActive']);
+        && (
+          // Action: Admin task metadata/status update
+          incoming().diff(existing()).affectedKeys().hasOnly(['category', 'title', 'subtitle', 'rewardCoins', 'icon', 'actionUrl', 'isActive', 'totalSlots'])
+          ||
+          // Action: Player slot claim increment
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['claimedCount'])
+            && (
+              (!('claimedCount' in existing()) && incoming().claimedCount == 1)
+              || ('claimedCount' in existing() && incoming().claimedCount == existing().claimedCount + 1)
+            )
+            && (
+              !('totalSlots' in existing())
+              || existing().totalSlots == 0
+              || incoming().claimedCount <= existing().totalSlots
+            )
+          )
+        );
       allow delete: if isValidId(taskId);
     }
 

@@ -55,10 +55,12 @@ interface AdminPanelViewProps {
   ) => Promise<void>;
   onCreateTask: (input: {
     title: string;
+    subtitle?: string;
     category: TaskDefinition['category'];
     rewardCoins: number;
     icon: string;
     actionUrl: string;
+    totalSlots?: number;
   }) => Promise<void>;
   onToggleTask: (taskId: string, isActive: boolean) => Promise<void>;
   onDeleteTask: (taskId: string) => Promise<void>;
@@ -84,7 +86,8 @@ const AD_PROVIDER_CARDS: Array<{
   detail: string;
 }> = [
   { id: 'countdown', label: 'Built-in Timer', detail: 'Zero-dependency rewarded countdown' },
-  { id: 'adsgram', label: 'Adsgram SDK', detail: 'Telegram Mini App native video' },
+  { id: 'adsgram', label: 'AdsGram SDK', detail: 'Telegram Mini App native video' },
+  { id: 'gigapub', label: 'Gigapub SDK', detail: 'Interactive rewarded ad zone' },
   { id: 'monetag', label: 'Monetag Zone', detail: 'Rewarded interstitial zone SDK' },
   { id: 'custom_sponsor', label: 'Custom Sponsor', detail: 'Branded partner spotlight modal' },
 ];
@@ -150,6 +153,7 @@ export function AdminPanelView({
   const [taskTitle, setTaskTitle] = useState('');
   const [taskCategory, setTaskCategory] = useState<TaskDefinition['category']>('partner');
   const [taskCoins, setTaskCoins] = useState('250');
+  const [taskSlots, setTaskSlots] = useState('200');
   const [taskIcon, setTaskIcon] = useState('send');
   const [taskUrl, setTaskUrl] = useState('');
   const [savingTask, setSavingTask] = useState(false);
@@ -178,6 +182,7 @@ export function AdminPanelView({
   const [adDraft, setAdDraft] = useState<Omit<AdConfig, 'updatedAtMs'>>(() => ({
     provider: adConfig.provider,
     adsgramBlockId: adConfig.adsgramBlockId,
+    gigapubProjectId: adConfig.gigapubProjectId || '',
     monetagZoneId: adConfig.monetagZoneId,
     customTitle: adConfig.customTitle,
     customDescription: adConfig.customDescription,
@@ -195,6 +200,7 @@ export function AdminPanelView({
     setAdDraft({
       provider: adConfig.provider,
       adsgramBlockId: adConfig.adsgramBlockId,
+      gigapubProjectId: adConfig.gigapubProjectId || '',
       monetagZoneId: adConfig.monetagZoneId,
       customTitle: adConfig.customTitle,
       customDescription: adConfig.customDescription,
@@ -328,6 +334,7 @@ export function AdminPanelView({
         rewardCoins: Math.max(1, Number(taskCoins) || 50),
         icon: taskIcon,
         actionUrl: taskUrl.trim(),
+        totalSlots: Math.max(0, Number(taskSlots) || 0),
       });
       setTaskTitle('');
       setTaskUrl('');
@@ -924,10 +931,10 @@ export function AdminPanelView({
               />
             </div>
 
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               <div className="space-y-1">
                 <label htmlFor="admin-task-category" className="text-xs font-bold text-slate-600 dark:text-stone-300">
-                  Section
+                  Category
                 </label>
                 <select
                   id="admin-task-category"
@@ -935,9 +942,10 @@ export function AdminPanelView({
                   onChange={(e) => setTaskCategory(e.target.value as TaskDefinition['category'])}
                   className="w-full min-h-[40px] rounded-xl bg-slate-50 dark:bg-stone-800 border border-slate-200 dark:border-stone-700 px-2.5 text-xs font-semibold text-slate-900 dark:text-stone-100"
                 >
+                  <option value="social">Social</option>
                   <option value="daily">Daily</option>
-                  <option value="milestone">Chicken Land</option>
-                  <option value="partner">Partners</option>
+                  <option value="exclusive">Exclusive</option>
+                  <option value="partner">Partner</option>
                 </select>
               </div>
 
@@ -952,6 +960,21 @@ export function AdminPanelView({
                   max={1000000}
                   value={taskCoins}
                   onChange={(e) => setTaskCoins(e.target.value)}
+                  className="w-full min-h-[40px] rounded-xl bg-slate-50 dark:bg-stone-800 border border-slate-200 dark:border-stone-700 px-3 text-sm font-mono-num font-bold text-slate-900 dark:text-stone-100"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label htmlFor="admin-task-slots" className="text-xs font-bold text-slate-600 dark:text-stone-300">
+                  Slots (0=∞)
+                </label>
+                <input
+                  id="admin-task-slots"
+                  type="number"
+                  min={0}
+                  max={1000000}
+                  value={taskSlots}
+                  onChange={(e) => setTaskSlots(e.target.value)}
                   className="w-full min-h-[40px] rounded-xl bg-slate-50 dark:bg-stone-800 border border-slate-200 dark:border-stone-700 px-3 text-sm font-mono-num font-bold text-slate-900 dark:text-stone-100"
                 />
               </div>
@@ -1101,7 +1124,8 @@ export function AdminPanelView({
               className="w-full min-h-[40px] rounded-xl bg-slate-50 dark:bg-stone-800 border border-slate-200 dark:border-stone-700 px-3 text-sm font-bold text-slate-900 dark:text-stone-100"
             >
               <option value="countdown">Built-in Rewarded Timer (Always Works)</option>
-              <option value="adsgram">Adsgram (Telegram Mini App SDK)</option>
+              <option value="adsgram">AdsGram (Telegram Mini App SDK)</option>
+              <option value="gigapub">Gigapub (Interactive Rewarded SDK)</option>
               <option value="monetag">Monetag (Rewarded Zone SDK)</option>
               <option value="custom_sponsor">Custom Sponsor Ad Modal</option>
             </select>
@@ -1140,7 +1164,7 @@ export function AdminPanelView({
           {adDraft.provider === 'adsgram' && (
             <div className="space-y-1">
               <label htmlFor="admin-adsgram-id" className="text-xs font-bold text-slate-600 dark:text-stone-300">
-                Adsgram Block ID
+                AdsGram Block ID
               </label>
               <input
                 id="admin-adsgram-id"
@@ -1148,6 +1172,22 @@ export function AdminPanelView({
                 value={adDraft.adsgramBlockId}
                 onChange={(e) => setAdDraft((d) => ({ ...d, adsgramBlockId: e.target.value }))}
                 placeholder="e.g. 1234"
+                className="w-full min-h-[40px] rounded-xl bg-slate-50 dark:bg-stone-800 border border-slate-200 dark:border-stone-700 px-3 text-sm font-mono-num text-slate-900 dark:text-stone-100"
+              />
+            </div>
+          )}
+
+          {adDraft.provider === 'gigapub' && (
+            <div className="space-y-1">
+              <label htmlFor="admin-gigapub-id" className="text-xs font-bold text-slate-600 dark:text-stone-300">
+                Gigapub Project ID
+              </label>
+              <input
+                id="admin-gigapub-id"
+                type="text"
+                value={adDraft.gigapubProjectId || ''}
+                onChange={(e) => setAdDraft((d) => ({ ...d, gigapubProjectId: e.target.value }))}
+                placeholder="e.g. 5678"
                 className="w-full min-h-[40px] rounded-xl bg-slate-50 dark:bg-stone-800 border border-slate-200 dark:border-stone-700 px-3 text-sm font-mono-num text-slate-900 dark:text-stone-100"
               />
             </div>

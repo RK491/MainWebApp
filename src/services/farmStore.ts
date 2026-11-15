@@ -4,6 +4,7 @@ import {
   doc,
   getDoc,
   getDocs,
+  getDocsFromServer,
   limit,
   onSnapshot,
   orderBy,
@@ -1072,6 +1073,25 @@ export async function reviewWithdrawalInFirestore(params: {
   }
 }
 
+function parseCustomTaskDoc(id: string, d: Record<string, unknown>): TaskDefinition {
+  return {
+    id,
+    category: (d.category as TaskDefinition['category']) || 'partner',
+    title: String(d.title || 'Bonus task'),
+    subtitle: d.subtitle ? String(d.subtitle) : undefined,
+    rewardCoins: Number(d.rewardCoins ?? 50),
+    icon: String(d.icon || 'link'),
+    actionUrl: String(d.actionUrl || ''),
+    totalSlots: d.totalSlots !== undefined ? Number(d.totalSlots) : undefined,
+    claimedCount: d.claimedCount !== undefined ? Number(d.claimedCount) : 0,
+    creatorUid: d.creatorUid ? String(d.creatorUid) : undefined,
+    paidCoins: d.paidCoins !== undefined ? Number(d.paidCoins) : undefined,
+    isCustom: true,
+    isActive: d.isActive !== false,
+    createdAtMs: Number(d.createdAtMs ?? 0),
+  };
+}
+
 export function subscribeToCustomTasks(
   onUpdate: (items: TaskDefinition[]) => void,
 ): () => void {
@@ -1083,50 +1103,56 @@ export function subscribeToCustomTasks(
   return onSnapshot(
     q,
     (snap) => {
-      onUpdate(
-        snap.docs.map((docSnap) => {
-          const d = docSnap.data();
-          return {
-            id: docSnap.id,
-            category: (d.category as TaskDefinition['category']) || 'partner',
-            title: String(d.title || 'Bonus task'),
-            rewardCoins: Number(d.rewardCoins ?? 50),
-            icon: String(d.icon || 'link'),
-            actionUrl: String(d.actionUrl || ''),
-            isCustom: true,
-            isActive: d.isActive !== false,
-            createdAtMs: Number(d.createdAtMs ?? 0),
-          };
-        }),
-      );
+      onUpdate(snap.docs.map((docSnap) => parseCustomTaskDoc(docSnap.id, docSnap.data())));
     },
     (err) => handleFirestoreError(err, OperationType.LIST, 'tasks'),
   );
 }
 
+export async function fetchCustomTasksFromFirestore(): Promise<TaskDefinition[]> {
+  const q = query(
+    collection(db, 'tasks'),
+    orderBy('createdAtMs', 'desc'),
+    limit(100),
+  );
+  try {
+    const snap = await getDocsFromServer(q);
+    return snap.docs.map((docSnap) => parseCustomTaskDoc(docSnap.id, docSnap.data()));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'tasks');
+  }
+}
+
 export async function createCustomTaskInFirestore(input: {
   title: string;
+  subtitle?: string;
   category: TaskDefinition['category'];
   rewardCoins: number;
   icon: string;
   actionUrl: string;
+  totalSlots?: number;
 }): Promise<TaskDefinition> {
   const nowMs = Date.now();
   const rand = Math.random().toString(36).slice(2, 6);
   const id = `task_${nowMs}_${rand}`;
   const cleanTitle = input.title.trim().slice(0, 80);
+  const cleanSubtitle = (input.subtitle || '').trim().slice(0, 120);
   const cleanReward = Math.max(1, Math.min(1_000_000, Math.round(input.rewardCoins)));
   const cleanIcon = input.icon.trim().slice(0, 24) || 'link';
   const cleanUrl = input.actionUrl.trim().slice(0, 256);
+  const cleanTotalSlots = Math.max(0, Math.min(1_000_000, Math.round(input.totalSlots ?? 0)));
 
   try {
     await setDoc(doc(db, 'tasks', id), {
       id,
       category: input.category,
       title: cleanTitle,
+      ...(cleanSubtitle ? { subtitle: cleanSubtitle } : {}),
       rewardCoins: cleanReward,
       icon: cleanIcon,
       actionUrl: cleanUrl,
+      totalSlots: cleanTotalSlots,
+      claimedCount: 0,
       isActive: true,
       createdAtMs: nowMs,
       createdAt: serverTimestamp(),
@@ -1135,15 +1161,141 @@ export async function createCustomTaskInFirestore(input: {
       id,
       category: input.category,
       title: cleanTitle,
+      ...(cleanSubtitle ? { subtitle: cleanSubtitle } : {}),
       rewardCoins: cleanReward,
       icon: cleanIcon,
       actionUrl: cleanUrl,
+      totalSlots: cleanTotalSlots,
+      claimedCount: 0,
       isCustom: true,
       isActive: true,
       createdAtMs: nowMs,
     };
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, `tasks/${id}`);
+  }
+}
+
+export async function createPaidCustomTaskInFirestore(params: {
+  profile: UserFarmProfile;
+  transaction: TransactionEntry;
+  paidCoins: number;
+  taskInput: {
+    title: string;
+    subtitle?: string;
+    category: TaskDefinition['category'];
+    rewardCoins: number;
+    icon: string;
+    actionUrl: string;
+    totalSlots: number;
+  };
+}): Promise<{ task: TaskDefinition; profile: UserFarmProfile } | { error: string }> {
+  const uid = params.profile.uid;
+  const nowMs = params.transaction.createdAtMs || Date.now();
+  const rand = Math.random().toString(36).slice(2, 6);
+  const taskId = `task_${nowMs}_${rand}`;
+  const cleanTitle = params.taskInput.title.trim().slice(0, 80);
+  const cleanSubtitle = (params.taskInput.subtitle || '').trim().slice(0, 120);
+  const cleanReward = Math.max(10, Math.min(100_000, Math.round(params.taskInput.rewardCoins)));
+  const cleanIcon = params.taskInput.icon.trim().slice(0, 24) || 'link';
+  const cleanUrl = params.taskInput.actionUrl.trim().slice(0, 256);
+  const cleanTotalSlots = Math.max(1, Math.min(10_000, Math.round(params.taskInput.totalSlots)));
+  const paidCoins = Math.max(1, Math.round(params.paidCoins));
+  const txId = params.transaction.id.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+  const playerRef = doc(db, 'players', uid);
+  const lbRef = doc(db, 'leaderboard', uid);
+  const taskRef = doc(db, 'tasks', taskId);
+  const txRef = doc(db, 'players', uid, 'transactions', txId);
+
+  try {
+    const result = await runTransaction(db, async (tx) => {
+      const playerSnap = await tx.get(playerRef);
+      if (!playerSnap.exists()) {
+        return { error: 'Player profile not synced yet.' } as const;
+      }
+      const liveCoins = Number(playerSnap.data().coins ?? 0);
+      if (liveCoins < paidCoins) {
+        return {
+          error: `Need ${paidCoins.toLocaleString()} coins to publish this task (you have ${liveCoins.toLocaleString()}).`,
+        } as const;
+      }
+
+      const syncedProfile: UserFarmProfile = {
+        ...params.profile,
+        coins: liveCoins - paidCoins,
+      };
+
+      tx.update(playerRef, toFirestoreProfilePayload(syncedProfile, false));
+      tx.set(lbRef, toLeaderboardPayload(syncedProfile));
+      tx.set(txRef, {
+        userId: uid,
+        type: params.transaction.type,
+        title: params.transaction.title.slice(0, 80),
+        amount: params.transaction.amount,
+        currency: params.transaction.currency,
+        usdValue: params.transaction.usdValue,
+        status: params.transaction.status,
+        createdAtMs: params.transaction.createdAtMs,
+        createdAt: serverTimestamp(),
+      });
+      tx.set(taskRef, {
+        id: taskId,
+        category: params.taskInput.category,
+        title: cleanTitle,
+        ...(cleanSubtitle ? { subtitle: cleanSubtitle } : {}),
+        rewardCoins: cleanReward,
+        icon: cleanIcon,
+        actionUrl: cleanUrl,
+        totalSlots: cleanTotalSlots,
+        claimedCount: 0,
+        creatorUid: uid,
+        paidCoins,
+        isActive: true,
+        createdAtMs: nowMs,
+        createdAt: serverTimestamp(),
+      });
+
+      const task: TaskDefinition = {
+        id: taskId,
+        category: params.taskInput.category,
+        title: cleanTitle,
+        ...(cleanSubtitle ? { subtitle: cleanSubtitle } : {}),
+        rewardCoins: cleanReward,
+        icon: cleanIcon,
+        actionUrl: cleanUrl,
+        totalSlots: cleanTotalSlots,
+        claimedCount: 0,
+        creatorUid: uid,
+        paidCoins,
+        isCustom: true,
+        isActive: true,
+        createdAtMs: nowMs,
+      };
+
+      return { task, profile: syncedProfile } as const;
+    });
+
+    return result;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `tasks/${taskId}`);
+  }
+}
+
+export async function incrementTaskClaimCountInFirestore(taskId: string): Promise<void> {
+  const ref = doc(db, 'tasks', taskId);
+  try {
+    await runTransaction(db, async (transaction) => {
+      const snap = await transaction.get(ref);
+      if (!snap.exists()) return;
+      const d = snap.data();
+      const total = Number(d.totalSlots ?? 0);
+      const current = Number(d.claimedCount ?? 0);
+      if (total > 0 && current >= total) return;
+      transaction.update(ref, { claimedCount: current + 1 });
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `tasks/${taskId}`);
   }
 }
 
@@ -1175,6 +1327,7 @@ export function subscribeToAdConfig(onUpdate: (config: AdConfig) => void): () =>
       onUpdate({
         provider: (d.provider as AdConfig['provider']) || 'countdown',
         adsgramBlockId: String(d.adsgramBlockId || ''),
+        gigapubProjectId: String(d.gigapubProjectId || ''),
         monetagZoneId: String(d.monetagZoneId || ''),
         customTitle: String(d.customTitle || DEFAULT_AD_CONFIG.customTitle),
         customDescription: String(d.customDescription || DEFAULT_AD_CONFIG.customDescription),
@@ -1199,6 +1352,7 @@ export async function saveAdConfigInFirestore(
   const payload: AdConfig = {
     provider: config.provider,
     adsgramBlockId: config.adsgramBlockId.trim().slice(0, 64),
+    gigapubProjectId: (config.gigapubProjectId || '').trim().slice(0, 64),
     monetagZoneId: config.monetagZoneId.trim().slice(0, 64),
     customTitle: config.customTitle.trim().slice(0, 80) || DEFAULT_AD_CONFIG.customTitle,
     customDescription: config.customDescription.trim().slice(0, 200),

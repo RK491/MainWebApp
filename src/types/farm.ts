@@ -172,14 +172,22 @@ export interface LeaderboardEntry {
   isCurrentUser?: boolean;
 }
 
+export type TaskCategory = 'social' | 'daily' | 'exclusive' | 'partner' | 'milestone';
+
+export type TaskSortOption = 'most_reward' | 'newest' | 'ending_soon';
+
 export interface TaskDefinition {
   id: string;
-  category: 'daily' | 'milestone' | 'partner';
+  category: TaskCategory;
   title: string;
   subtitle?: string;
   rewardCoins: number;
   icon: string;
   actionUrl?: string;
+  totalSlots?: number;
+  claimedCount?: number;
+  creatorUid?: string;
+  paidCoins?: number;
   isCustom?: boolean;
   isActive?: boolean;
   createdAtMs?: number;
@@ -214,11 +222,14 @@ export interface SeasonConfig {
   updatedAtMs: number;
 }
 
-export type AdProviderType = 'countdown' | 'adsgram' | 'monetag' | 'custom_sponsor';
+export type AdNetworkId = 'adsgram' | 'gigapub' | 'monetag';
+
+export type AdProviderType = 'countdown' | 'adsgram' | 'gigapub' | 'monetag' | 'custom_sponsor';
 
 export interface AdConfig {
   provider: AdProviderType;
   adsgramBlockId: string;
+  gigapubProjectId?: string;
   monetagZoneId: string;
   customTitle: string;
   customDescription: string;

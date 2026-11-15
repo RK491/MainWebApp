@@ -1,4 +1,4 @@
-import type { AdConfig } from '../types/farm';
+import type { AdConfig, AdNetworkId } from '../types/farm';
 
 interface AdsgramController {
   show: () => Promise<{ done?: boolean; description?: string }>;
@@ -9,6 +9,7 @@ declare global {
     Adsgram?: {
       init: (opts: { blockId: string }) => AdsgramController;
     };
+    showGiga?: () => Promise<unknown>;
     [key: string]: unknown;
   }
 }
@@ -45,10 +46,11 @@ function loadScriptOnce(id: string, src: string, attrs?: Record<string, string>)
   });
 }
 
-export async function tryRunExternalRewardedAd(
+export async function tryRunAdNetwork(
+  network: AdNetworkId,
   config: AdConfig,
 ): Promise<{ handled: boolean; rewarded: boolean; message?: string }> {
-  if (config.provider === 'adsgram' && config.adsgramBlockId.trim()) {
+  if (network === 'adsgram' && config.adsgramBlockId.trim()) {
     try {
       await loadScriptOnce('adsgram-sdk', 'https://sad.adsgram.ai/js/sad.min.js');
       if (window.Adsgram) {
@@ -60,12 +62,32 @@ export async function tryRunExternalRewardedAd(
       return {
         handled: false,
         rewarded: false,
-        message: 'Adsgram SDK unavailable in this browser — using built-in rewarded player.',
+        message: 'AdsGram SDK unavailable in this browser — using built-in rewarded player.',
       };
     }
   }
 
-  if (config.provider === 'monetag' && config.monetagZoneId.trim()) {
+  if (network === 'gigapub' && config.gigapubProjectId?.trim()) {
+    const projectId = config.gigapubProjectId.trim().replace(/[^a-zA-Z0-9_-]/g, '');
+    try {
+      await loadScriptOnce(
+        `gigapub-sdk-${projectId}`,
+        `https://ad.gigapub.tech/script?id=${encodeURIComponent(projectId)}`,
+      );
+      if (typeof window.showGiga === 'function') {
+        await window.showGiga();
+        return { handled: true, rewarded: true };
+      }
+    } catch {
+      return {
+        handled: false,
+        rewarded: false,
+        message: 'Gigapub SDK unavailable in this browser — using built-in rewarded player.',
+      };
+    }
+  }
+
+  if (network === 'monetag' && config.monetagZoneId.trim()) {
     const zoneId = config.monetagZoneId.trim().replace(/[^a-zA-Z0-9_-]/g, '');
     const fnName = `show_${zoneId}`;
     try {
@@ -87,5 +109,14 @@ export async function tryRunExternalRewardedAd(
     }
   }
 
+  return { handled: false, rewarded: false };
+}
+
+export async function tryRunExternalRewardedAd(
+  config: AdConfig,
+): Promise<{ handled: boolean; rewarded: boolean; message?: string }> {
+  if (config.provider === 'adsgram' || config.provider === 'gigapub' || config.provider === 'monetag') {
+    return tryRunAdNetwork(config.provider, config);
+  }
   return { handled: false, rewarded: false };
 }

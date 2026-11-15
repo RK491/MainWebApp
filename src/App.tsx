@@ -13,11 +13,13 @@ import { AnimatePresence, motion } from 'motion/react';
 import { testFirestoreConnection } from './firebase';
 import {
   activateFeedBooster,
+  AD_NETWORK_TASKS,
   buildLeaderboardRankings,
   buyChickens,
   calculatePendingEggs,
   calculateProductionRate,
   claimAchievement,
+  claimAdNetworkReward,
   claimDailyStreak,
   claimGoldenEggDrop,
   claimPromoCode,
@@ -26,6 +28,7 @@ import {
   completeTask,
   createDefaultProfile,
   createDefaultSeasonConfig,
+  createPaidTaskOrder,
   DEFAULT_AD_CONFIG,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
@@ -46,13 +49,16 @@ import {
   applyReferralCodeInFirestore,
   commitPlayerMutation,
   createCustomTaskInFirestore,
+  createPaidCustomTaskInFirestore,
   createPromoCodeInFirestore,
   deleteCustomTaskInFirestore,
   deletePromoCodeInFirestore,
   distributeSeasonPrizesInFirestore,
   ensurePlayerInFirestore,
+  fetchCustomTasksFromFirestore,
   getStoredPlayerId,
   incrementPromoCodeUseInFirestore,
+  incrementTaskClaimCountInFirestore,
   resolveActivePlayerIdentity,
   reviewWithdrawalInFirestore,
   saveAdConfigInFirestore,
@@ -69,6 +75,7 @@ import {
 } from './services/farmStore';
 import type {
   AdConfig,
+  AdNetworkId,
   ChickenBreedId,
   DepositOrder,
   DynamicPromoCode,
@@ -78,13 +85,14 @@ import type {
   ReferralRecord,
   SeasonConfig,
   SubView,
+  TaskCategory,
   TaskDefinition,
   TransactionEntry,
   UserFarmProfile,
   WithdrawalOrder,
   WithdrawRequestRecord,
 } from './types/farm';
-import { tryRunExternalRewardedAd } from './utils/ads';
+import { tryRunAdNetwork, tryRunExternalRewardedAd } from './utils/ads';
 import { getStoredLanguage, setStoredLanguage, t } from './utils/i18n';
 import {
   type BrowserNotificationPermission,
@@ -181,9 +189,15 @@ export default function App() {
   });
   const [showSettings, setShowSettings] = useState(false);
   const [watchingAdLoading, setWatchingAdLoading] = useState(false);
-  const [adModalState, setAdModalState] = useState<{ open: boolean; notice?: string | null }>({
+  const [activeAdNetwork, setActiveAdNetwork] = useState<AdNetworkId | null>(null);
+  const [adModalState, setAdModalState] = useState<{
+    open: boolean;
+    notice?: string | null;
+    network?: AdNetworkId | null;
+  }>({
     open: false,
     notice: null,
+    network: null,
   });
   const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => getStoredAudioSettings());
   const musicEnabled = audioSettings.musicEnabled;
@@ -916,10 +930,12 @@ export default function App() {
 
   const handleCreateCustomTask = async (input: {
     title: string;
-    category: TaskDefinition['category'];
+    subtitle?: string;
+    category: TaskCategory;
     rewardCoins: number;
     icon: string;
     actionUrl: string;
+    totalSlots?: number;
   }) => {
     try {
       await createCustomTaskInFirestore(input);
@@ -928,6 +944,78 @@ export default function App() {
       showToast('Failed to add custom task.');
     }
   };
+
+  const handleCreatePaidUserTask = async (input: {
+    title: string;
+    subtitle?: string;
+    category: TaskCategory;
+    rewardCoins: number;
+    icon: string;
+    actionUrl: string;
+    totalSlots: number;
+  }): Promise<boolean> => {
+    await ensurePromiseRef.current;
+    const current = latestProfileRef.current;
+    const now = Date.now();
+    const order = createPaidTaskOrder(current, input, now);
+    if ('error' in order) {
+      showToast(order.error);
+      return false;
+    }
+
+    try {
+      const committed = await createPaidCustomTaskInFirestore({
+        profile: order.profile,
+        transaction: order.transaction,
+        paidCoins: order.cost.totalCostCoins,
+        taskInput: {
+          title: input.title,
+          subtitle: input.subtitle,
+          category: input.category,
+          rewardCoins: order.cost.rewardCoins,
+          icon: input.icon,
+          actionUrl: input.actionUrl,
+          totalSlots: order.cost.totalSlots,
+        },
+      });
+      if ('error' in committed) {
+        showToast(committed.error);
+        return false;
+      }
+
+      latestProfileRef.current = committed.profile;
+      setProfile(committed.profile);
+      setTransactions((prev) => [order.transaction, ...prev].slice(0, 60));
+      playCoinChimeSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      showToast(`Task published! -${order.cost.totalCostCoins.toLocaleString()} coins`);
+      return true;
+    } catch {
+      showToast('Failed to publish paid task.');
+      return false;
+    }
+  };
+
+  const handleRefreshTasks = useCallback(
+    async (silent = false): Promise<boolean> => {
+      try {
+        const items = await fetchCustomTasksFromFirestore();
+        setCustomTasks(items);
+        if (!silent) {
+          playSoftTapSound(soundsEnabled);
+          triggerHapticFeedback('light');
+          showToast('Task slots refreshed');
+        }
+        return true;
+      } catch {
+        if (!silent) {
+          showToast('Could not refresh tasks — please retry');
+        }
+        return false;
+      }
+    },
+    [showToast, soundsEnabled],
+  );
 
   const handleToggleCustomTask = async (taskId: string, isActive: boolean) => {
     try {
@@ -1063,6 +1151,9 @@ export default function App() {
       nextProfile: res.profile,
       transaction: res.transaction,
     });
+    if (res.isCustomTask) {
+      void incrementTaskClaimCountInFirestore(taskId);
+    }
     showToast(`Task complete: +${res.rewardCoins} coins!`);
   };
 
@@ -1082,9 +1173,31 @@ export default function App() {
     }
   };
 
+  const handleClaimAdNetwork = (network: AdNetworkId) => {
+    const now = Date.now();
+    const current = latestProfileRef.current;
+    const res = claimAdNetworkReward(current, network, todayStr, now);
+    if ('error' in res) {
+      showToast(res.error);
+      return;
+    }
+    playClaimSound(soundsEnabled);
+    triggerHapticFeedback('success');
+    void persistMutation({
+      nextProfile: res.profile,
+      transaction: res.transaction,
+    });
+    if (res.unlockedChicken) {
+      showToast(`${res.networkName}: +${res.rewardCoins} coins & +1 Free White Leghorn!`);
+    } else {
+      showToast(`${res.networkName}: +${res.rewardCoins} coins (${res.watchedToday}/${res.dailyLimit} today)`);
+    }
+  };
+
   const handleTriggerWatchAd = async () => {
     if (watchingAdLoading) return;
     setWatchingAdLoading(true);
+    setActiveAdNetwork(null);
     try {
       const external = await tryRunExternalRewardedAd(adConfig);
       if (external.handled) {
@@ -1095,9 +1208,34 @@ export default function App() {
         }
         return;
       }
-      setAdModalState({ open: true, notice: external.message ?? null });
+      setAdModalState({ open: true, notice: external.message ?? null, network: null });
     } finally {
       setWatchingAdLoading(false);
+    }
+  };
+
+  const handleTriggerAdNetwork = async (network: AdNetworkId) => {
+    if (watchingAdLoading) return;
+    setWatchingAdLoading(true);
+    setActiveAdNetwork(network);
+    try {
+      const external = await tryRunAdNetwork(network, adConfig);
+      if (external.handled) {
+        if (external.rewarded) {
+          handleClaimAdNetwork(network);
+        } else {
+          showToast('Watch the full ad to earn your coins.');
+        }
+        return;
+      }
+      setAdModalState({
+        open: true,
+        notice: external.message ?? null,
+        network,
+      });
+    } finally {
+      setWatchingAdLoading(false);
+      setActiveAdNetwork(null);
     }
   };
 
@@ -1337,11 +1475,16 @@ export default function App() {
           adConfig={adConfig}
           payoutChannelUrl={getTelegramChannelUrl(payoutChannel)}
           watchingAd={watchingAdLoading}
+          activeAdNetwork={activeAdNetwork}
           onTabTap={() => playTabTapSound(soundsEnabled)}
           onClaimPromo={handleClaimPromo}
           onClaimDaily={handleClaimDaily}
           onCompleteTask={handleCompleteTask}
           onTriggerWatchAd={() => void handleTriggerWatchAd()}
+          onTriggerAdNetwork={(net) => void handleTriggerAdNetwork(net)}
+          onOpenDeposit={() => openSubView('deposit')}
+          onCreateTask={handleCreatePaidUserTask}
+          onRefreshTasks={handleRefreshTasks}
         />
       );
     }
@@ -1653,18 +1796,30 @@ export default function App() {
         />
       )}
 
-      {adModalState.open && (
-        <RewardedAdModal
-          adConfig={adConfig}
-          watchedCount={profile.watchedAdsCount}
-          fallbackNotice={adModalState.notice}
-          onComplete={() => {
-            setAdModalState({ open: false, notice: null });
-            handleWatchAd();
-          }}
-          onClose={() => setAdModalState({ open: false, notice: null })}
-        />
-      )}
+      {adModalState.open && (() => {
+        const netDef = adModalState.network
+          ? AD_NETWORK_TASKS.find((n) => n.id === adModalState.network)
+          : null;
+        return (
+          <RewardedAdModal
+            adConfig={adConfig}
+            watchedCount={profile.watchedAdsCount}
+            networkLabel={netDef?.name ?? null}
+            rewardCoins={netDef?.rewardCoins ?? null}
+            fallbackNotice={adModalState.notice}
+            onComplete={() => {
+              const net = adModalState.network;
+              setAdModalState({ open: false, notice: null, network: null });
+              if (net) {
+                handleClaimAdNetwork(net);
+              } else {
+                handleWatchAd();
+              }
+            }}
+            onClose={() => setAdModalState({ open: false, notice: null, network: null })}
+          />
+        );
+      })()}
 
       {showSettings && (
         <SettingsModal
