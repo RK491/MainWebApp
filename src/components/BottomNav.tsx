@@ -1,4 +1,5 @@
 import { CheckSquare, Gift, Home, Package, Wallet } from 'lucide-react';
+import { motion } from 'motion/react';
 import type { NavTab } from '../types/farm';
 
 interface BottomNavProps {
@@ -43,13 +44,24 @@ export function BottomNav({
               type="button"
               onClick={() => onSelectTab(item.id)}
               aria-current={active ? 'page' : undefined}
-              className={`clay-btn relative flex flex-col items-center justify-center min-h-[48px] rounded-2xl px-1 transition-all ${
+              className={`relative flex flex-col items-center justify-center min-h-[48px] rounded-2xl px-1 cursor-pointer transition-colors ${
                 active
-                  ? 'clay-btn-amber -translate-y-0.5'
-                  : 'text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-100 hover:bg-white/60 dark:hover:bg-stone-800/60'
+                  ? 'text-amber-950'
+                  : 'text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-100 hover:bg-white/50 dark:hover:bg-stone-800/50'
               }`}
             >
-              <div className="relative">
+              {active && (
+                <motion.div
+                  layoutId="alpha-bottom-nav-active"
+                  transition={{ type: 'spring', stiffness: 420, damping: 30 }}
+                  className="clay-btn-amber absolute inset-0 rounded-2xl -z-10"
+                />
+              )}
+              <motion.div
+                animate={{ scale: active ? 1.08 : 1, y: active ? -1 : 0 }}
+                transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                className="relative"
+              >
                 <Icon className={`w-5 h-5 ${active ? 'stroke-[2.5]' : 'stroke-[2]'}`} />
                 {item.badge && (
                   <span
@@ -57,7 +69,7 @@ export function BottomNav({
                     aria-label="Tasks available"
                   />
                 )}
-              </div>
+              </motion.div>
               <span className="text-[11px] font-extrabold mt-0.5 whitespace-nowrap">
                 {item.label}
               </span>

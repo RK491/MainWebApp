@@ -183,7 +183,7 @@ export function FriendsView({
           {!heroImgFailed ? (
             <img
               src={clayHenMascot}
-              alt="Clay ChickenLand mascot"
+              alt="Clay Alpha Gram mascot"
               referrerPolicy="no-referrer"
               onError={() => setHeroImgFailed(true)}
               className="w-full h-full object-cover rounded-[1.25rem]"

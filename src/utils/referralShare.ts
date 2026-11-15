@@ -31,8 +31,8 @@ export function buildReferralShareData(
   const codeFragment = referralCode.trim() ? ` using code ${referralCode.trim()}` : '';
 
   return {
-    title: 'Join my ChickenLand Farm!',
-    text: `Join ${possessiveOwner} ChickenLand farm${codeFragment} and claim +1,000 sign-up bonus coins!`,
+    title: 'Join Alpha Gram!',
+    text: `Join ${possessiveOwner} Alpha Gram farm${codeFragment} and claim +1,000 sign-up bonus coins!`,
     url: referralUrl,
   };
 }

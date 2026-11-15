@@ -342,7 +342,7 @@ export const DEFAULT_AD_CONFIG: AdConfig = {
   provider: 'countdown',
   adsgramBlockId: '',
   monetagZoneId: '',
-  customTitle: 'ChickenLand Partner Spotlight',
+  customTitle: 'Alpha Gram Partner Spotlight',
   customDescription: 'Watch this short sponsor showcase to earn 1 step toward a free White Leghorn.',
   customUrl: 'https://t.me/AIRDROP_GALAXYS',
   watchSeconds: 5,
@@ -610,6 +610,9 @@ export function collectEggs(
   | { error: string } {
   const pending = explicitAmount !== undefined ? explicitAmount : calculatePendingEggs(profile, nowMs);
   if (pending <= 0) {
+    if (calculateTotalChickens(profile) <= 0) {
+      return { error: 'Buy your first chicken in Packs to start egg mining!' };
+    }
     return { error: 'No eggs ready in basket yet. Wait for your hens to lay!' };
   }
   const collected = Math.min(profile.basketCapacity, Math.floor(pending));
@@ -662,6 +665,7 @@ export function buyChickens(
 
   const { level, xp } = addXp(profile.level, profile.xp, pack.leaderboardPoints * quantity * 2);
   const shouldActivateReferral = Boolean(profile.referredBy && !profile.referralActivated);
+  const hadNoChickens = calculateTotalChickens(profile) === 0;
 
   const nextProfile: UserFarmProfile = {
     ...profile,
@@ -672,6 +676,7 @@ export function buyChickens(
     australorpCount: profile.australorpCount + (breed === 'australorp' ? quantity : 0),
     boughtThisWeek: profile.boughtThisWeek + quantity,
     referralActivated: true,
+    lastCollectedAt: hadNoChickens ? nowMs : profile.lastCollectedAt,
     level,
     xp,
   };
@@ -1104,10 +1109,12 @@ export function watchAdStep(
 ): { profile: UserFarmProfile; transaction?: TransactionEntry; unlockedChicken: boolean } {
   const nextCount = profile.watchedAdsCount + 1;
   if (nextCount >= 10) {
+    const hadNoChickens = calculateTotalChickens(profile) === 0;
     const nextProfile: UserFarmProfile = {
       ...profile,
       watchedAdsCount: 0,
       leghornCount: profile.leghornCount + 1,
+      lastCollectedAt: hadNoChickens ? nowMs : profile.lastCollectedAt,
     };
     const transaction: TransactionEntry = {
       id: `tx_ad_${nowMs}`,
@@ -1203,11 +1210,11 @@ export function createDefaultProfile(
     totalWithdrawnUsd: 0,
     basketCapacity: 300,
     basketTierHours: 8,
-    leghornCount: 2,
+    leghornCount: 0,
     rhodeCount: 0,
     orpingtonCount: 0,
     australorpCount: 0,
-    boughtThisWeek: 2,
+    boughtThisWeek: 0,
     dailyStreak: 0,
     lastDailyClaimDate: '',
     completedTaskIds: [],
@@ -1305,6 +1312,9 @@ export function activateFeedBooster(
   profile: UserFarmProfile,
   nowMs: number,
 ): { profile: UserFarmProfile; transaction: TransactionEntry } | { error: string } {
+  if (calculateTotalChickens(profile) <= 0) {
+    return { error: 'Buy at least 1 chicken first to start mining before activating 2× Feed.' };
+  }
   if (isFeedBoosterActive(profile, nowMs)) {
     return { error: '2× Laying Feed booster is already active on your farm!' };
   }
@@ -1354,6 +1364,9 @@ export function claimGoldenEggDrop(
       xpGained: number;
     }
   | { error: string } {
+  if (calculateTotalChickens(profile) <= 0) {
+    return { error: 'Buy at least 1 chicken first to start mining!' };
+  }
   if (!isGoldenEggReady(profile, nowMs)) {
     const secsLeft = Math.ceil(
       (GOLDEN_EGG_COOLDOWN_MS - (nowMs - Number(profile.lastGoldenEggAtMs ?? 0))) / 1000,
@@ -1543,10 +1556,12 @@ export function claimReferralMilestone(
     return { error: `${crate.title} already claimed.` };
   }
 
+  const hadNoChickens = calculateTotalChickens(profile) === 0;
   const nextProfile: UserFarmProfile = {
     ...profile,
     coins: profile.coins + crate.rewardCoins,
     leghornCount: profile.leghornCount + crate.bonusLeghorns,
+    lastCollectedAt: hadNoChickens && crate.bonusLeghorns > 0 ? nowMs : profile.lastCollectedAt,
     claimedReferralMilestones: [...claimed, targetActive].slice(-20),
   };
 

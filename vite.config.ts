@@ -14,11 +14,11 @@ export default defineConfig(() => {
         includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'pwa-maskable-512x512.png'],
         manifest: {
           id: '/',
-          name: 'ChickenLand Farm',
-          short_name: 'ChickenLand',
-          description: 'Build your ChickenLand poultry farm, collect eggs 24/7, climb the Top 10 leaderboard, and manage GRAM deposits & withdrawals.',
+          name: 'Alpha Gram',
+          short_name: 'Alpha Gram',
+          description: 'Build your Alpha Gram poultry farm, collect eggs 24/7, climb the Top 10 leaderboard, and manage GRAM deposits & withdrawals.',
           theme_color: '#F59E0B',
-          background_color: '#F4F7EE',
+          background_color: '#F7F6F2',
           display: 'standalone',
           start_url: '/',
           scope: '/',
@@ -90,6 +90,7 @@ export default defineConfig(() => {
       },
     },
     server: {
+      allowedHosts: true as const,
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modify—file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',

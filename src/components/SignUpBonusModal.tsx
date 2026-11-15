@@ -30,7 +30,7 @@ export function SignUpBonusModal({ onClaim }: SignUpBonusModalProps) {
               {!imgFailed ? (
                 <img
                   src={clayHenMascot}
-                  alt="Claymorphism ChickenLand hen mascot with coin and egg"
+                  alt="Claymorphism Alpha Gram hen mascot with coin and egg"
                   referrerPolicy="no-referrer"
                   onError={() => setImgFailed(true)}
                   className="w-full h-full object-cover rounded-[1.4rem]"
@@ -42,10 +42,10 @@ export function SignUpBonusModal({ onClaim }: SignUpBonusModalProps) {
           </div>
 
           <h2 id="signup-bonus-title" className="text-xl font-extrabold text-stone-900 dark:text-stone-100">
-            Welcome to ChickenLand!
+            Welcome to Alpha Gram!
           </h2>
           <p className="text-xs font-medium text-stone-600 dark:text-stone-300">
-            Your 2 starter hens &amp; 1,000 sign-up bonus coins have been credited to your farm.
+            Your 1,000 sign-up bonus coins have been credited to your account.
           </p>
 
           <div className="clay-card-mint !rounded-2xl mx-auto inline-flex items-center gap-2 px-5 py-2.5">
@@ -58,7 +58,7 @@ export function SignUpBonusModal({ onClaim }: SignUpBonusModalProps) {
 
         <div className="px-5 pb-5 pt-1 space-y-3">
           <div className="clay-inset px-3.5 py-2.5 text-xs text-stone-600 dark:text-stone-300 text-center">
-            Use your 1,000 coins right away to buy another chicken or grow your daily egg yield!
+            Use your 1,000 coins in Packs to buy your first chicken and start mining eggs 24/7!
           </div>
 
           <button

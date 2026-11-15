@@ -63,7 +63,7 @@ export function WithdrawView({
     setErrorMsg(null);
     onConfirmWithdraw(numericEggs, walletAddress, memo);
     setSuccessMsg(
-      `Withdrawal submitted for ${numericEggs.toLocaleString()} eggs (${receiveGram} GRAM) — Pending Admin approval (notified @AG_PAYOUTS)!`,
+      `Withdrawal submitted for ${numericEggs.toLocaleString()} eggs (${receiveGram} GRAM) — Pending Admin approval!`,
     );
     const remaining = profile.eggs - numericEggs;
     setAmountInput(remaining >= MIN_WITHDRAW_EGGS ? String(Math.min(remaining, 100)) : '');
@@ -83,7 +83,7 @@ export function WithdrawView({
         </button>
         <div>
           <h1 className="text-xl font-extrabold text-stone-900 dark:text-stone-100">Withdraw</h1>
-          <p className="text-xs text-stone-500 dark:text-stone-400">Convert eggs to GRAM on TON · Notifies @AG_PAYOUTS</p>
+          <p className="text-xs text-stone-500 dark:text-stone-400">Convert eggs to GRAM on TON</p>
         </div>
       </div>
 
@@ -116,7 +116,7 @@ export function WithdrawView({
           <span aria-hidden="true">·</span>
           <span className="text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1">
             <ShieldCheck className="w-3.5 h-3.5" />
-            Notifies @AG_PAYOUTS
+            Admin Verified Payouts
           </span>
         </div>
       </div>

@@ -94,18 +94,36 @@ import {
 
 const NOW = 1_794_580_000_000;
 
-test('production rate and offline egg calculation cap at basketCapacity', () => {
+test('mining does not start before buying a chicken, and starts cleanly after purchase with basketCapacity cap', () => {
   const { profile } = createDefaultProfile('player_test1', 'RK', '@rk', NOW);
-  assert.equal(profile.leghornCount, 2);
-  assert.equal(calculateProductionRate(profile), 16); // 2 * 8 = 16 eggs/h
-  assert.equal(calculateBuyerPoints(profile), 2);
+  assert.equal(profile.leghornCount, 0);
+  assert.equal(profile.boughtThisWeek, 0);
+  assert.equal(calculateProductionRate(profile), 0);
+  assert.equal(calculateBuyerPoints(profile), 0);
+
+  // Even 24 hours later, zero eggs are mined until a chicken/miner is bought
+  const withoutMiner = NOW + 24 * 60 * 60 * 1000;
+  assert.equal(calculatePendingEggs(profile, withoutMiner), 0);
+  assert.ok('error' in collectEggs(profile, withoutMiner));
+
+  // Buying 1st chicken at `withoutMiner` starts mining from `withoutMiner` (0 retroactive eggs)
+  const firstBuy = buyChickens(profile, 'leghorn', 1, withoutMiner);
+  assert.ok(!('error' in firstBuy));
+  assert.equal(firstBuy.profile.lastCollectedAt, withoutMiner);
+  assert.equal(calculatePendingEggs(firstBuy.profile, withoutMiner), 0);
+  assert.equal(calculateProductionRate(firstBuy.profile), 8);
+
+  // With 2 Leghorns, 4 hours produces 64 eggs and caps at basketCapacity
+  const twoHensProfile = { ...firstBuy.profile, leghornCount: 2, lastCollectedAt: NOW };
+  assert.equal(calculateProductionRate(twoHensProfile), 16); // 2 * 8 = 16 eggs/h
+  assert.equal(calculateBuyerPoints(twoHensProfile), 2);
 
   const later = NOW + 4 * 60 * 60 * 1000;
-  const pending = calculatePendingEggs(profile, later);
+  const pending = calculatePendingEggs(twoHensProfile, later);
   assert.equal(pending, 64);
 
-  const capped = calculatePendingEggs(profile, NOW + 100 * 60 * 60 * 1000);
-  assert.equal(capped, profile.basketCapacity);
+  const capped = calculatePendingEggs(twoHensProfile, NOW + 100 * 60 * 60 * 1000);
+  assert.equal(capped, twoHensProfile.basketCapacity);
 });
 
 test('collectEggs increments balance, resets timer, and computes 5% lifetime referral egg commission', () => {
@@ -139,8 +157,8 @@ test('buyChickens deducts coins and increases production', () => {
   const res = buyChickens(profile, 'leghorn', 1, NOW);
   assert.ok(!('error' in res));
   assert.equal(res.profile.coins, 0);
-  assert.equal(res.profile.leghornCount, 3);
-  assert.equal(calculateProductionRate(res.profile), 24);
+  assert.equal(res.profile.leghornCount, 1);
+  assert.equal(calculateProductionRate(res.profile), 8);
 
   const fail = buyChickens(res.profile, 'orpington', 1, NOW);
   assert.ok('error' in fail);
@@ -1175,7 +1193,7 @@ test('referralShare builds personal referral URL, invokes Web Share API, and han
   assert.equal(buildPersonalReferralUrl('', 'https://chickenland.app/'), 'https://chickenland.app');
 
   const payload = buildReferralShareData('CL-778899', url, 'Rahul');
-  assert.equal(payload.title, 'Join my ChickenLand Farm!');
+  assert.equal(payload.title, 'Join Alpha Gram!');
   assert.equal(payload.url, url);
   assert.ok(payload.text?.includes('CL-778899'));
   assert.ok(payload.text?.includes('+1,000'));
@@ -1401,7 +1419,11 @@ test('level yield multiplier (+2%/lvl above Level 1) and 2x Laying Feed booster 
   const { profile } = createDefaultProfile('player_boost1', 'Karan', '@karan', NOW);
   assert.equal(calculateLevelYieldMultiplier(1), 1.0);
   assert.equal(calculateLevelYieldMultiplier(6), 1.1); // +10%
-  assert.equal(calculateProductionRate(profile, NOW), 16); // 2 * 8
+  assert.equal(calculateProductionRate(profile, NOW), 0);
+  assert.ok('error' in activateFeedBooster(profile, NOW));
+
+  const starterProfile = { ...profile, leghornCount: 2 };
+  assert.equal(calculateProductionRate(starterProfile, NOW), 16); // 2 * 8
 
   const lv6Profile = { ...profile, level: 6, leghornCount: 10 };
   assert.equal(calculateProductionRate(lv6Profile, NOW), 88); // 80 * 1.1
@@ -1421,15 +1443,18 @@ test('level yield multiplier (+2%/lvl above Level 1) and 2x Laying Feed booster 
   assert.equal(calculateProductionRate(activated.profile, afterExpiry), 88);
 });
 
-test('golden egg drops reward bonus coins + XP and enforce cooldown', () => {
+test('golden egg drops require at least 1 chicken, reward bonus coins + XP, and enforce cooldown', () => {
   const { profile } = createDefaultProfile('player_gold1', 'Meera', '@meera', NOW);
-  assert.equal(isGoldenEggReady(profile, NOW), true);
+  assert.ok('error' in claimGoldenEggDrop(profile, NOW));
 
-  const drop = claimGoldenEggDrop(profile, NOW);
+  const activeFarm = { ...profile, leghornCount: 1 };
+  assert.equal(isGoldenEggReady(activeFarm, NOW), true);
+
+  const drop = claimGoldenEggDrop(activeFarm, NOW);
   assert.ok(!('error' in drop));
   assert.equal(drop.bonusCoins, GOLDEN_EGG_REWARD_COINS);
   assert.equal(drop.xpGained, GOLDEN_EGG_REWARD_XP);
-  assert.equal(drop.profile.coins, profile.coins + GOLDEN_EGG_REWARD_COINS);
+  assert.equal(drop.profile.coins, activeFarm.coins + GOLDEN_EGG_REWARD_COINS);
   assert.equal(drop.profile.goldenEggsFound, 1);
 
   assert.equal(isGoldenEggReady(drop.profile, NOW + 10_000), false);

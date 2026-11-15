@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -590,10 +591,10 @@ async function startServer() {
 
     const lines = [
       status === 'approved'
-        ? '💸 <b>ChickenLand Payout Approved</b>'
+        ? '💸 <b>Alpha Gram Payout Approved</b>'
         : status === 'rejected'
-          ? '⚠️ <b>ChickenLand Payout Rejected</b>'
-          : '🐔 <b>ChickenLand Payout Request</b>',
+          ? '⚠️ <b>Alpha Gram Payout Rejected</b>'
+          : '🐔 <b>Alpha Gram Payout Request</b>',
       '',
       `👤 <b>User:</b> ${displayName} (${handle})`,
       `🥚 <b>Eggs:</b> ${eggsAmount.toLocaleString()}`,
@@ -636,23 +637,30 @@ async function startServer() {
   });
 
   if (process.env.NODE_ENV !== 'production') {
+    const httpServer = http.createServer(app);
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        ws: { server: httpServer },
+        hmr: process.env.DISABLE_HMR !== 'true',
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
+    httpServer.listen(PORT, '0.0.0.0', () => {
+      console.log(`Alpha Gram server running on http://0.0.0.0:${PORT}`);
+    });
   } else {
     const distDir = path.resolve(__dirname, 'dist');
     app.use(express.static(distDir));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distDir, 'index.html'));
     });
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`Alpha Gram server running on http://0.0.0.0:${PORT}`);
+    });
   }
-
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`ChickenLand server running on http://0.0.0.0:${PORT}`);
-  });
 }
 
 startServer();

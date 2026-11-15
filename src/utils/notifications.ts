@@ -109,7 +109,7 @@ export function dispatchBasketFullNotification(params: {
   if (getBrowserNotificationPermission() !== 'granted') return false;
   try {
     const notification = new window.Notification('Egg Basket Full! Collect Your Eggs', {
-      body: `Your basket reached ${params.pendingEggs.toLocaleString()}/${params.basketCapacity.toLocaleString()} eggs. Open ChickenLand to collect and keep laying!`,
+      body: `Your basket reached ${params.pendingEggs.toLocaleString()}/${params.basketCapacity.toLocaleString()} eggs. Open Alpha Gram to collect and keep laying!`,
       tag: 'chickenland-basket-full',
     });
     notification.onclick = () => {

@@ -71,7 +71,7 @@ export function RewardedAdModal({
               {!imgFailed ? (
                 <img
                   src={clayHenMascot}
-                  alt="Clay ChickenLand mascot"
+                  alt="Clay Alpha Gram mascot"
                   referrerPolicy="no-referrer"
                   onError={() => setImgFailed(true)}
                   className="w-full h-full object-cover rounded-xl"
@@ -82,7 +82,7 @@ export function RewardedAdModal({
             </div>
           </div>
           <h2 id="rewarded-ad-title" className="text-base font-extrabold text-stone-900 dark:text-stone-100">
-            {adConfig.customTitle || 'ChickenLand Sponsor Showcase'}
+            {adConfig.customTitle || 'Alpha Gram Sponsor Showcase'}
           </h2>
           <p className="text-xs text-stone-600 dark:text-stone-300 leading-relaxed">
             {adConfig.customDescription ||

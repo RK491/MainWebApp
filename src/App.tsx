@@ -9,6 +9,7 @@ import {
   Trophy,
   Users,
 } from 'lucide-react';
+import { AnimatePresence, motion } from 'motion/react';
 import { testFirestoreConnection } from './firebase';
 import {
   activateFeedBooster,
@@ -865,11 +866,9 @@ export default function App() {
           status: 'pending',
         }),
       });
-      const notifyData = (await notifyRes.json()) as { sent?: boolean; channel?: string };
+      const notifyData = (await notifyRes.json()) as { sent?: boolean };
       if (notifyData.sent) {
-        showToast(
-          `Withdrawal pending Admin approval — notified ${notifyData.channel || '@AG_PAYOUTS'}!`,
-        );
+        showToast(`Withdrawal submitted (${res.withdrawal.gramAmount} GRAM) — Pending Admin approval`);
         return;
       }
     } catch {
@@ -1375,39 +1374,46 @@ export default function App() {
     // Desktop right-column overview when Farm tab is active
     const productionRate = calculateProductionRate(profile);
     return (
-      <div className="animate-clay-enter space-y-4">
+      <div className="space-y-4">
         <div className="clay-card p-5 space-y-4">
           <div className="flex items-center justify-between gap-3">
-            <div>
-              <h2 className="text-xl font-extrabold text-stone-900 dark:text-stone-100">Farm Economy Overview</h2>
-              <p className="text-xs text-stone-500 dark:text-stone-400">
-                Auto-saved live to Firestore · User ID{' '}
-                <span className="font-mono-num font-bold text-stone-700 dark:text-stone-200">
-                  {getPrimaryDepositMemo(profile.uid)}
-                </span>
-              </p>
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="alpha-brand-crest w-11 h-11 rounded-2xl text-base font-extrabold flex items-center justify-center shrink-0">
+                αG
+              </div>
+              <div className="min-w-0">
+                <h2 className="text-xl font-extrabold text-stone-900 dark:text-stone-100 truncate">
+                  Alpha Gram Overview
+                </h2>
+                <p className="text-xs text-stone-500 dark:text-stone-400">
+                  Live Cloud Sync · User ID{' '}
+                  <span className="font-mono-num font-bold text-stone-700 dark:text-stone-200">
+                    {getPrimaryDepositMemo(profile.uid)}
+                  </span>
+                </p>
+              </div>
             </div>
             <span className="clay-card-mint !rounded-xl inline-flex items-center gap-1 text-xs font-extrabold text-emerald-700 dark:text-emerald-300 px-3 py-1.5 shrink-0">
               <CheckCircle2 className="w-4 h-4" />
-              <span>Database Live</span>
+              <span>Cloud Synced</span>
             </span>
           </div>
 
           <div className="grid grid-cols-3 gap-3">
-            <div className="clay-card-warm !rounded-2xl p-3">
+            <div className="clay-card-warm clay-hover-lift !rounded-2xl p-3">
               <div className="text-xs font-bold text-stone-500 dark:text-stone-400">Production</div>
               <div className="text-lg font-extrabold text-stone-900 dark:text-stone-100 font-mono-num mt-0.5">
                 {productionRate} /h
               </div>
             </div>
-            <div className="clay-card-mint !rounded-2xl p-3">
+            <div className="clay-card-mint clay-hover-lift !rounded-2xl p-3">
               <div className="text-xs font-bold text-stone-500 dark:text-stone-400">Referrals</div>
               <div className="text-lg font-extrabold text-stone-900 dark:text-stone-100 font-mono-num mt-0.5 flex items-center gap-1">
                 <Users className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                 <span>{profile.referralCount}</span>
               </div>
             </div>
-            <div className="clay-inset !rounded-2xl p-3">
+            <div className="clay-inset clay-hover-lift !rounded-2xl p-3">
               <div className="text-xs font-bold text-stone-500 dark:text-stone-400">Buyer Rank</div>
               <div className="text-lg font-extrabold text-stone-900 dark:text-stone-100 font-mono-num mt-0.5">
                 #{rankings.userBuyerRank}
@@ -1416,38 +1422,42 @@ export default function App() {
           </div>
 
           <div className="grid grid-cols-4 gap-2">
-            <button
+            <motion.button
               type="button"
+              whileTap={{ scale: 0.96 }}
               onClick={() => navigateTab('packs')}
               className="clay-btn clay-btn-amber min-h-[44px] rounded-2xl font-extrabold text-xs flex items-center justify-center gap-1.5"
             >
               <Package className="w-4 h-4" />
               <span>Buy Hens</span>
-            </button>
-            <button
+            </motion.button>
+            <motion.button
               type="button"
+              whileTap={{ scale: 0.96 }}
               onClick={() => openSubView('deposit')}
               className="clay-btn clay-btn-emerald min-h-[44px] rounded-2xl font-extrabold text-xs flex items-center justify-center gap-1.5"
             >
               <ArrowDownLeft className="w-4 h-4" />
               <span>{strings.deposit}</span>
-            </button>
-            <button
+            </motion.button>
+            <motion.button
               type="button"
+              whileTap={{ scale: 0.96 }}
               onClick={() => openSubView('withdraw')}
               className="clay-btn clay-btn-sky min-h-[44px] rounded-2xl font-extrabold text-xs flex items-center justify-center gap-1.5"
             >
               <ArrowUpRight className="w-4 h-4" />
               <span>{strings.withdraw}</span>
-            </button>
-            <button
+            </motion.button>
+            <motion.button
               type="button"
+              whileTap={{ scale: 0.96 }}
               onClick={() => openSubView('leaderboard')}
               className="clay-btn clay-btn-neutral min-h-[44px] rounded-2xl text-stone-800 dark:text-stone-100 font-extrabold text-xs flex items-center justify-center gap-1.5"
             >
               <Trophy className="w-4 h-4 text-amber-600 dark:text-amber-400" />
               <span>{strings.top10}</span>
-            </button>
+            </motion.button>
           </div>
         </div>
 
@@ -1544,15 +1554,22 @@ export default function App() {
       />
 
       {/* Unified non-overlapping Clay Feedback Toast */}
-      {toastText && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="animate-clay-toast clay-card-dark fixed bottom-20 left-1/2 z-50 !rounded-2xl text-white px-4 py-2.5 text-xs sm:text-sm font-bold whitespace-nowrap"
-        >
-          {toastText}
-        </div>
-      )}
+      <AnimatePresence>
+        {toastText && (
+          <motion.div
+            key={toastText}
+            role="status"
+            aria-live="polite"
+            initial={{ opacity: 0, y: 14, scale: 0.94 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 8, scale: 0.96 }}
+            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+            className="clay-card-dark fixed bottom-20 left-1/2 -translate-x-1/2 z-50 !rounded-2xl text-white px-4 py-2.5 text-xs sm:text-sm font-bold whitespace-nowrap"
+          >
+            {toastText}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <main className="max-w-6xl mx-auto px-3 sm:px-5 pt-3 sm:pt-5">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
@@ -1572,12 +1589,23 @@ export default function App() {
               }}
               onGoldenEggDrop={handleGoldenEggTap}
               onActivateBooster={handleActivateBooster}
+              onBuyChickens={() => navigateTab('packs')}
             />
           </div>
 
           {/* Right / Active Workspace View */}
           <div className={`lg:col-span-7 ${showFarmOnMobile ? 'hidden lg:block' : 'block'}`}>
-            {renderContextualPanel()}
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={subView !== 'none' ? `sub-${subView}` : `tab-${activeTab}`}
+                initial={{ opacity: 0, y: 8, scale: 0.99 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -6, scale: 0.99 }}
+                transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+              >
+                {renderContextualPanel()}
+              </motion.div>
+            </AnimatePresence>
           </div>
         </div>
       </main>
@@ -1609,7 +1637,7 @@ export default function App() {
             } catch {
               // ignore storage errors
             }
-            showToast('+1,000 Sign-Up Bonus Coins ready!');
+            showToast('+1,000 coins ready! Buy your first chicken in Packs to start mining.');
           }}
         />
       )}

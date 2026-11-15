@@ -16,7 +16,7 @@ export function PWAInstallButton({ compact = false }: { compact?: boolean }) {
       <button
         type="button"
         onClick={() => void install()}
-        aria-label="Install ChickenLand Farm app"
+        aria-label="Install Alpha Gram app"
         className={`clay-btn clay-btn-emerald flex items-center justify-center gap-1.5 font-extrabold ${
           compact
             ? 'h-10 px-3 rounded-2xl text-xs whitespace-nowrap'
@@ -35,7 +35,7 @@ export function PWAInstallButton({ compact = false }: { compact?: boolean }) {
         <button
           type="button"
           onClick={() => setShowIOSGuide(true)}
-          aria-label="Install ChickenLand Farm on iOS"
+          aria-label="Install Alpha Gram on iOS"
           className={`clay-btn clay-btn-neutral flex items-center justify-center gap-1.5 font-extrabold text-stone-700 dark:text-stone-200 ${
             compact
               ? 'h-10 px-2.5 rounded-2xl text-xs whitespace-nowrap'
@@ -72,7 +72,7 @@ export function PWAInstallButton({ compact = false }: { compact?: boolean }) {
                 <br />
                 2. Scroll down and tap <strong>Add to Home Screen</strong>.
                 <br />
-                3. Launch ChickenLand Farm full-screen anytime!
+                3. Launch Alpha Gram full-screen anytime!
               </p>
               <button
                 type="button"
