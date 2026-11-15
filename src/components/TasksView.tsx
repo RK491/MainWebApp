@@ -38,18 +38,23 @@ import {
   sortTasks,
   USER_TASK_MAX_REWARD_COINS,
   USER_TASK_MAX_SLOTS,
+  USER_TASK_MIN_FEE_COINS,
   USER_TASK_MIN_REWARD_COINS,
   USER_TASK_MIN_SLOTS,
+  USER_TASK_MIN_TOTAL_COST_COINS,
 } from '../game/economy';
 import type {
   AdConfig,
   AdNetworkId,
+  ChannelVerificationResult,
   TaskCategory,
   TaskDefinition,
   TaskSortOption,
   UserFarmProfile,
 } from '../types/farm';
 import { getTelegramChannelUrl, notifyTelegramOpenLink } from '../utils/telegram';
+import { hasConfiguredAdNetworkSdk } from '../utils/ads';
+import { ChannelCheckCard } from './ChannelCheckPanel';
 import { ChickenSprite, CoinIcon } from './GameIcons';
 
 type FilterTab = 'social' | 'daily' | 'exclusive' | 'partner';
@@ -63,6 +68,9 @@ interface TasksViewProps {
   payoutChannelUrl?: string;
   watchingAd?: boolean;
   activeAdNetwork?: AdNetworkId | null;
+  channelVerification?: ChannelVerificationResult | null;
+  checkingChannels?: boolean;
+  onCheckChannels?: () => Promise<ChannelVerificationResult | null> | void;
   onTabTap?: () => void;
   onClaimPromo: (code: string) => void;
   onClaimDaily: () => void;
@@ -95,6 +103,9 @@ export function TasksView({
   payoutChannelUrl = DEFAULT_PAYOUT_CHANNEL_URL,
   watchingAd = false,
   activeAdNetwork = null,
+  channelVerification = null,
+  checkingChannels = false,
+  onCheckChannels,
   onTabTap,
   onClaimPromo,
   onClaimDaily,
@@ -124,8 +135,8 @@ export function TasksView({
   const [newTitle, setNewTitle] = useState('');
   const [newSubtitle, setNewSubtitle] = useState('');
   const [newCategory, setNewCategory] = useState<FilterTab>('partner');
-  const [newRewardCoins, setNewRewardCoins] = useState('50');
-  const [newTotalSlots, setNewTotalSlots] = useState('10');
+  const [newRewardCoins, setNewRewardCoins] = useState(String(USER_TASK_MIN_REWARD_COINS));
+  const [newTotalSlots, setNewTotalSlots] = useState(String(USER_TASK_MIN_SLOTS));
   const [newIcon, setNewIcon] = useState('send');
   const [newActionUrl, setNewActionUrl] = useState('');
   const [creatingTask, setCreatingTask] = useState(false);
@@ -330,8 +341,36 @@ export function TasksView({
     }, TASK_VERIFY_DELAY_MS);
   };
 
-  const handleClaimCheckedTask = (task: TaskDefinition) => {
+  const handleClaimCheckedTask = async (task: TaskDefinition) => {
     if (profile.completedTaskIds.includes(task.id)) return;
+    if (
+      task.actionUrl &&
+      onCheckChannels &&
+      channelVerification?.verificationMode === 'telegram_bot'
+    ) {
+      const normalizedUrl = task.actionUrl.toLowerCase();
+      const targetHandle = normalizedUrl.includes('airdrop_galaxys')
+        ? '@AIRDROP_GALAXYS'
+        : normalizedUrl.includes('ag_payouts')
+          ? '@AG_PAYOUTS'
+          : null;
+      if (targetHandle) {
+        const fresh = (await onCheckChannels()) || channelVerification;
+        if (fresh?.verificationMode === 'telegram_bot') {
+          const matched = fresh.channels.find(
+            (ch) => ch.handle.toUpperCase() === targetHandle,
+          );
+          if (matched && !matched.joined) {
+            setTaskStages((prev) => {
+              const next = { ...prev };
+              delete next[task.id];
+              return next;
+            });
+            return;
+          }
+        }
+      }
+    }
     onCompleteTask(task.id);
     setTaskStages((prev) => {
       const next = { ...prev };
@@ -389,7 +428,7 @@ export function TasksView({
       return (
         <button
           type="button"
-          onClick={() => handleClaimCheckedTask(task)}
+          onClick={() => void handleClaimCheckedTask(task)}
           className="clay-btn clay-btn-emerald min-h-[42px] min-w-[84px] px-4 rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1 shrink-0 animate-pulse"
         >
           <Check className="w-3.5 h-3.5" />
@@ -630,8 +669,10 @@ export function TasksView({
     parsedRewardCoins <= USER_TASK_MAX_REWARD_COINS &&
     parsedTotalSlots >= USER_TASK_MIN_SLOTS &&
     parsedTotalSlots <= USER_TASK_MAX_SLOTS;
-  const canAffordTask = profile.coins >= taskCost.totalCostCoins;
-  const coinsShort = Math.max(0, taskCost.totalCostCoins - profile.coins);
+  const canAffordTask =
+    profile.coins >= USER_TASK_MIN_TOTAL_COST_COINS && profile.coins >= taskCost.totalCostCoins;
+  const requiredCoins = Math.max(USER_TASK_MIN_TOTAL_COST_COINS, taskCost.totalCostCoins);
+  const coinsShort = Math.max(0, requiredCoins - profile.coins);
 
   const handleCreateTaskSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -774,6 +815,17 @@ export function TasksView({
         </div>
       )}
 
+      {onCheckChannels && (
+        <ChannelCheckCard
+          verification={channelVerification}
+          checking={checkingChannels}
+          onCheckChannels={() => {
+            onTabTap?.();
+            void onCheckChannels();
+          }}
+        />
+      )}
+
       {/* Promo Code Card */}
       <div className="clay-card p-4 space-y-3">
         <div className="flex items-start justify-between gap-2">
@@ -782,8 +834,10 @@ export function TasksView({
               <Ticket className="w-5 h-5" />
             </div>
             <div>
-              <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100">Promo code</div>
-              <div className="text-xs text-stone-500 dark:text-stone-400">New codes drop every day</div>
+              <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100">Gift &amp; Promo Code</div>
+              <div className="text-xs text-stone-500 dark:text-stone-400">
+                Redeem coins, eggs &amp; free hens · Watch 1 short ad to unlock claim
+              </div>
             </div>
           </div>
           <a
@@ -815,7 +869,7 @@ export function TasksView({
             type="text"
             value={promoInput}
             onChange={(e) => setPromoInput(e.target.value)}
-            placeholder="Enter your code"
+            placeholder="Enter gift or promo code"
             aria-label="Promo code"
             className="clay-inset flex-1 min-h-[44px] px-3.5 text-sm font-semibold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 dark:placeholder:text-stone-500 focus:outline-none focus:ring-2 focus:ring-amber-400"
           />
@@ -1005,6 +1059,7 @@ export function TasksView({
               const leftToday = Math.max(0, network.dailyLimit - watchedToday);
               const isBusy = watchingAd && activeAdNetwork === network.id;
               const maxedOut = leftToday === 0;
+              const sdkConfigured = hasConfiguredAdNetworkSdk(network.id, adConfig);
 
               return (
                 <div
@@ -1016,12 +1071,21 @@ export function TasksView({
                       {renderAdNetworkIcon(network.id)}
                     </div>
                     <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         <span className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
                           {network.name}
                         </span>
                         <span className="rounded-md bg-stone-100 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 px-1.5 py-0.5 text-[10px] font-bold text-stone-600 dark:text-stone-300">
                           {network.badge}
+                        </span>
+                        <span
+                          className={`rounded-md border px-1.5 py-0.5 text-[10px] font-extrabold ${
+                            sdkConfigured
+                              ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800/60 text-emerald-700 dark:text-emerald-300'
+                              : 'bg-sky-50 dark:bg-sky-950/60 border-sky-200 dark:border-sky-800/60 text-sky-700 dark:text-sky-300'
+                          }`}
+                        >
+                          {sdkConfigured ? 'SDK Live' : 'Timer Ad'}
                         </span>
                       </div>
                       <div className="text-[11px] text-stone-500 dark:text-stone-400 truncate mt-0.5">
@@ -1188,7 +1252,7 @@ export function TasksView({
                   Post a Paid Task
                 </h2>
                 <p className="text-xs text-stone-500 dark:text-stone-400">
-                  Uses your coins to fund rewards + 10% platform fee
+                  Min {USER_TASK_MIN_TOTAL_COST_COINS.toLocaleString()} coins · {USER_TASK_MIN_SLOTS}+ joins · {USER_TASK_MIN_REWARD_COINS}+ coins/join · 10% fee
                 </p>
               </div>
               <button
@@ -1338,7 +1402,7 @@ export function TasksView({
                 <span className="font-mono-num font-bold">{taskCost.rewardPoolCoins.toLocaleString()} coins</span>
               </div>
               <div className="flex items-center justify-between text-stone-600 dark:text-stone-300">
-                <span>Posting Fee (10%, min 25)</span>
+                <span>Posting Fee (10%, min {USER_TASK_MIN_FEE_COINS.toLocaleString()})</span>
                 <span className="font-mono-num font-bold">+{taskCost.platformFeeCoins.toLocaleString()} coins</span>
               </div>
               <div className="border-t border-amber-300/60 dark:border-amber-800/50 pt-1.5 flex items-center justify-between font-extrabold text-stone-900 dark:text-stone-100">
@@ -1352,7 +1416,11 @@ export function TasksView({
 
             {!canAffordTask && (
               <div className="rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 px-3 py-2 flex items-center justify-between gap-2 text-xs font-bold text-rose-700 dark:text-rose-300">
-                <span>Need {coinsShort.toLocaleString()} more coins to publish.</span>
+                <span>
+                  {profile.coins < USER_TASK_MIN_TOTAL_COST_COINS
+                    ? `Minimum ${USER_TASK_MIN_TOTAL_COST_COINS.toLocaleString()} coins required (${coinsShort.toLocaleString()} short).`
+                    : `Need ${coinsShort.toLocaleString()} more coins to publish.`}
+                </span>
                 {onOpenDeposit && (
                   <button
                     type="button"

@@ -1,7 +1,7 @@
 import type { AdConfig, AdNetworkId } from '../types/farm';
 
 interface AdsgramController {
-  show: () => Promise<{ done?: boolean; description?: string }>;
+  show: () => Promise<{ done?: boolean; description?: string; error?: boolean }>;
 }
 
 declare global {
@@ -12,6 +12,42 @@ declare global {
     showGiga?: () => Promise<unknown>;
     [key: string]: unknown;
   }
+}
+
+function getClientEnvVar(key: string): string {
+  try {
+    const meta = import.meta as unknown as { env?: Record<string, string | undefined> };
+    return (meta?.env?.[key] || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+export function resolveEffectiveAdConfig(config: AdConfig): AdConfig {
+  return {
+    ...config,
+    adsgramBlockId: config.adsgramBlockId.trim() || getClientEnvVar('VITE_ADSGRAM_BLOCK_ID'),
+    gigapubProjectId:
+      (config.gigapubProjectId || '').trim() || getClientEnvVar('VITE_GIGAPUB_PROJECT_ID'),
+    monetagZoneId: config.monetagZoneId.trim() || getClientEnvVar('VITE_MONETAG_ZONE_ID'),
+  };
+}
+
+export function hasConfiguredAdNetworkSdk(network: AdNetworkId, config: AdConfig): boolean {
+  const effective = resolveEffectiveAdConfig(config);
+  if (network === 'adsgram') return Boolean(effective.adsgramBlockId);
+  if (network === 'gigapub') return Boolean(effective.gigapubProjectId);
+  return Boolean(effective.monetagZoneId);
+}
+
+function isExternalAdCompleted(result: unknown): boolean {
+  if (result === false) return false;
+  if (typeof result === 'object' && result !== null) {
+    const rec = result as { done?: unknown; error?: unknown };
+    if (rec.error === true) return false;
+    if (rec.done === false) return false;
+  }
+  return true;
 }
 
 function loadScriptOnce(id: string, src: string, attrs?: Record<string, string>): Promise<void> {
@@ -50,45 +86,50 @@ export async function tryRunAdNetwork(
   network: AdNetworkId,
   config: AdConfig,
 ): Promise<{ handled: boolean; rewarded: boolean; message?: string }> {
-  if (network === 'adsgram' && config.adsgramBlockId.trim()) {
+  const effective = resolveEffectiveAdConfig(config);
+
+  if (network === 'adsgram' && effective.adsgramBlockId) {
     try {
       await loadScriptOnce('adsgram-sdk', 'https://sad.adsgram.ai/js/sad.min.js');
       if (window.Adsgram) {
-        const controller = window.Adsgram.init({ blockId: config.adsgramBlockId.trim() });
+        const controller = window.Adsgram.init({ blockId: effective.adsgramBlockId });
         const result = await controller.show();
-        return { handled: true, rewarded: Boolean(result?.done ?? true) };
+        return {
+          handled: true,
+          rewarded: result?.done === true && result?.error !== true,
+        };
       }
     } catch {
       return {
         handled: false,
         rewarded: false,
-        message: 'AdsGram SDK unavailable in this browser — using built-in rewarded player.',
+        message: 'AdsGram SDK unavailable in this browser — using verified timer ad.',
       };
     }
   }
 
-  if (network === 'gigapub' && config.gigapubProjectId?.trim()) {
-    const projectId = config.gigapubProjectId.trim().replace(/[^a-zA-Z0-9_-]/g, '');
+  if (network === 'gigapub' && effective.gigapubProjectId) {
+    const projectId = effective.gigapubProjectId.replace(/[^a-zA-Z0-9_-]/g, '');
     try {
       await loadScriptOnce(
         `gigapub-sdk-${projectId}`,
         `https://ad.gigapub.tech/script?id=${encodeURIComponent(projectId)}`,
       );
       if (typeof window.showGiga === 'function') {
-        await window.showGiga();
-        return { handled: true, rewarded: true };
+        const result = await window.showGiga();
+        return { handled: true, rewarded: isExternalAdCompleted(result) };
       }
     } catch {
       return {
         handled: false,
         rewarded: false,
-        message: 'Gigapub SDK unavailable in this browser — using built-in rewarded player.',
+        message: 'Gigapub SDK unavailable in this browser — using verified timer ad.',
       };
     }
   }
 
-  if (network === 'monetag' && config.monetagZoneId.trim()) {
-    const zoneId = config.monetagZoneId.trim().replace(/[^a-zA-Z0-9_-]/g, '');
+  if (network === 'monetag' && effective.monetagZoneId) {
+    const zoneId = effective.monetagZoneId.replace(/[^a-zA-Z0-9_-]/g, '');
     const fnName = `show_${zoneId}`;
     try {
       await loadScriptOnce(`monetag-sdk-${zoneId}`, '//libtl.com/sdk.js', {
@@ -97,14 +138,14 @@ export async function tryRunAdNetwork(
       });
       const showFn = window[fnName];
       if (typeof showFn === 'function') {
-        await (showFn as () => Promise<unknown>)();
-        return { handled: true, rewarded: true };
+        const result = await (showFn as () => Promise<unknown>)();
+        return { handled: true, rewarded: isExternalAdCompleted(result) };
       }
     } catch {
       return {
         handled: false,
         rewarded: false,
-        message: 'Monetag SDK blocked or unavailable — using built-in rewarded player.',
+        message: 'Monetag SDK blocked or unavailable — using verified timer ad.',
       };
     }
   }
@@ -115,8 +156,13 @@ export async function tryRunAdNetwork(
 export async function tryRunExternalRewardedAd(
   config: AdConfig,
 ): Promise<{ handled: boolean; rewarded: boolean; message?: string }> {
-  if (config.provider === 'adsgram' || config.provider === 'gigapub' || config.provider === 'monetag') {
-    return tryRunAdNetwork(config.provider, config);
+  const effective = resolveEffectiveAdConfig(config);
+  if (
+    effective.provider === 'adsgram' ||
+    effective.provider === 'gigapub' ||
+    effective.provider === 'monetag'
+  ) {
+    return tryRunAdNetwork(effective.provider, effective);
   }
   return { handled: false, rewarded: false };
 }

@@ -1,5 +1,6 @@
 import type {
   AdConfig,
+  AdGateActionType,
   AdNetworkId,
   ChickenBreedId,
   ChickenPack,
@@ -7,6 +8,7 @@ import type {
   DepositOrder,
   DynamicPromoCode,
   LeaderboardEntry,
+  PromoRewardType,
   ReferralRecord,
   SeasonConfig,
   TaskCategory,
@@ -25,6 +27,7 @@ export const COINS_PER_GRAM = Math.round(GRAM_USD_PRICE * COINS_PER_USD);
 export const MIN_DEPOSIT_COINS = 1000;
 export const MAX_DEPOSIT_COINS = 15000;
 export const MIN_WITHDRAW_EGGS = 100;
+export const MIN_WITHDRAW_ADS_WATCHED = 30;
 export const MIN_REINVEST_EGGS = 100;
 export const SIGNUP_BONUS_COINS = 1000;
 export const REFERRER_SIGNUP_BONUS_COINS = 150;
@@ -1065,11 +1068,39 @@ export function reinvestEggs(
   return { profile: nextProfile, transaction, coinsReceived: totalCoins };
 }
 
+export function getTotalAdsWatched(
+  profile: Partial<Pick<UserFarmProfile, 'watchedAdsCount' | 'totalAdsWatched'>>,
+): number {
+  return Math.max(0, Math.floor(Number(profile.totalAdsWatched ?? profile.watchedAdsCount ?? 0)));
+}
+
+export function getWithdrawAdGateStatus(
+  profile: Partial<Pick<UserFarmProfile, 'watchedAdsCount' | 'totalAdsWatched'>>,
+): {
+  watched: number;
+  required: number;
+  remaining: number;
+  unlocked: boolean;
+} {
+  const watched = getTotalAdsWatched(profile);
+  const remaining = Math.max(0, MIN_WITHDRAW_ADS_WATCHED - watched);
+  return {
+    watched,
+    required: MIN_WITHDRAW_ADS_WATCHED,
+    remaining,
+    unlocked: watched >= MIN_WITHDRAW_ADS_WATCHED,
+  };
+}
+
 export function validateWithdrawalInput(
-  profile: Pick<UserFarmProfile, 'eggs'>,
+  profile: Pick<UserFarmProfile, 'eggs'> & Partial<Pick<UserFarmProfile, 'watchedAdsCount' | 'totalAdsWatched'>>,
   eggsAmount: number,
   walletAddress: string,
 ): string | null {
+  const adGate = getWithdrawAdGateStatus(profile);
+  if (!adGate.unlocked) {
+    return `Watch at least ${adGate.required} ads before withdrawing (${adGate.watched}/${adGate.required} watched).`;
+  }
   const trimmed = walletAddress.trim();
   if (trimmed.length < 6) {
     return 'Enter a valid TON wallet address (at least 6 characters, e.g. UQ...).';
@@ -1172,41 +1203,99 @@ export function claimPromoCode(
   rawCode: string,
   nowMs: number,
   dynamicPromos: DynamicPromoCode[] = [],
-): { profile: UserFarmProfile; transaction: TransactionEntry; rewardCoins: number; label: string; dynamicPromoCode?: string } | { error: string } {
+):
+  | {
+      profile: UserFarmProfile;
+      transaction: TransactionEntry;
+      rewardCoins: number;
+      rewardEggs: number;
+      rewardChickenBreed?: ChickenBreedId;
+      rewardChickenQty: number;
+      rewardSummary: string;
+      label: string;
+      dynamicPromoCode?: string;
+    }
+  | { error: string } {
   const code = rawCode.trim().toUpperCase();
   if (!code) {
-    return { error: 'Enter a promo code first.' };
+    return { error: 'Enter a gift or promo code first.' };
   }
   if (profile.claimedPromoCodes.includes(code)) {
-    return { error: `Promo code ${code} was already claimed.` };
+    return { error: `Gift code ${code} was already claimed.` };
   }
 
   const dynamicMatch = dynamicPromos.find((p) => p.code.trim().toUpperCase() === code);
   if (dynamicMatch) {
     if (!dynamicMatch.isActive) {
-      return { error: `Promo code ${code} is paused.` };
+      return { error: `Gift code ${code} is paused.` };
     }
     if (dynamicMatch.expiresAtMs > 0 && nowMs > dynamicMatch.expiresAtMs) {
-      return { error: `Promo code ${code} has expired.` };
+      return { error: `Gift code ${code} has expired.` };
     }
     if (dynamicMatch.maxUses > 0 && dynamicMatch.usedCount >= dynamicMatch.maxUses) {
-      return { error: `Promo code ${code} reached its maximum redemption limit.` };
+      return { error: `Gift code ${code} reached its maximum redemption limit.` };
+    }
+
+    const decoded =
+      dynamicMatch.rewardType !== undefined
+        ? {
+            label: dynamicMatch.label,
+            rewardType: dynamicMatch.rewardType,
+            coins: Math.max(0, Math.round(dynamicMatch.coins || 0)),
+            eggs: Math.max(0, Math.round(dynamicMatch.eggs || 0)),
+            chickenBreed: dynamicMatch.chickenBreed,
+            chickenQty: Math.max(0, Math.round(dynamicMatch.chickenQty || 0)),
+          }
+        : decodePromoLabelMeta(dynamicMatch.label, dynamicMatch.coins);
+
+    const rewardCoins = decoded.coins;
+    const rewardEggs = decoded.eggs;
+    const rewardChickenBreed = decoded.chickenBreed;
+    const rewardChickenQty = decoded.chickenQty;
+
+    const hadNoChickens = calculateTotalChickens(profile) === 0;
+    let nextLeghorns = profile.leghornCount;
+    let nextRhode = profile.rhodeCount;
+    let nextOrpington = profile.orpingtonCount;
+    let nextAustralorp = profile.australorpCount;
+
+    if (rewardChickenQty > 0 && rewardChickenBreed) {
+      if (rewardChickenBreed === 'leghorn') nextLeghorns += rewardChickenQty;
+      else if (rewardChickenBreed === 'rhode') nextRhode += rewardChickenQty;
+      else if (rewardChickenBreed === 'orpington') nextOrpington += rewardChickenQty;
+      else if (rewardChickenBreed === 'australorp') nextAustralorp += rewardChickenQty;
     }
 
     const nextProfile: UserFarmProfile = {
       ...profile,
-      coins: profile.coins + dynamicMatch.coins,
+      coins: profile.coins + rewardCoins,
+      eggs: profile.eggs + rewardEggs,
+      leghornCount: nextLeghorns,
+      rhodeCount: nextRhode,
+      orpingtonCount: nextOrpington,
+      australorpCount: nextAustralorp,
+      lastCollectedAt: hadNoChickens && rewardChickenQty > 0 ? nowMs : profile.lastCollectedAt,
       claimedPromoCodes: [...profile.claimedPromoCodes, code].slice(-50),
     };
+
+    const rewardSummary = formatPromoRewardSummary(decoded);
+    const txCurrency: 'eggs' | 'coins' =
+      decoded.rewardType === 'eggs' && rewardEggs > 0 ? 'eggs' : 'coins';
+    const txAmount =
+      txCurrency === 'eggs' ? rewardEggs : rewardCoins;
+    const txUsdValue =
+      txCurrency === 'eggs'
+        ? Number((rewardEggs * USD_PER_EGG).toFixed(6))
+        : coinsToUsd(rewardCoins);
 
     const transaction: TransactionEntry = {
       id: `tx_promo_${nowMs}`,
       userId: profile.uid,
       type: 'promo',
-      title: `Promo code ${code}`,
-      amount: dynamicMatch.coins,
-      currency: 'coins',
-      usdValue: coinsToUsd(dynamicMatch.coins),
+      title: `Gift ${code}: ${rewardSummary}`.slice(0, 80),
+      amount: txAmount,
+      currency: txCurrency,
+      usdValue: txUsdValue,
       status: 'completed',
       createdAtMs: nowMs,
     };
@@ -1214,15 +1303,19 @@ export function claimPromoCode(
     return {
       profile: nextProfile,
       transaction,
-      rewardCoins: dynamicMatch.coins,
-      label: dynamicMatch.label,
+      rewardCoins,
+      rewardEggs,
+      rewardChickenBreed,
+      rewardChickenQty,
+      rewardSummary,
+      label: decoded.label,
       dynamicPromoCode: code,
     };
   }
 
   const promo = PROMO_CODES[code];
   if (!promo) {
-    return { error: 'Invalid promo code. Get latest codes in @AIRDROP_GALAXYS.' };
+    return { error: 'Invalid gift code. Get latest codes in @AIRDROP_GALAXYS.' };
   }
 
   const nextProfile: UserFarmProfile = {
@@ -1243,7 +1336,15 @@ export function claimPromoCode(
     createdAtMs: nowMs,
   };
 
-  return { profile: nextProfile, transaction, rewardCoins: promo.coins, label: promo.label };
+  return {
+    profile: nextProfile,
+    transaction,
+    rewardCoins: promo.coins,
+    rewardEggs: 0,
+    rewardChickenQty: 0,
+    rewardSummary: `+${promo.coins.toLocaleString()} coins`,
+    label: promo.label,
+  };
 }
 
 export function completeTask(
@@ -1294,12 +1395,13 @@ export function completeTask(
   };
 }
 
-export const USER_TASK_MIN_REWARD_COINS = 10;
+export const USER_TASK_MIN_REWARD_COINS = 150;
 export const USER_TASK_MAX_REWARD_COINS = 100_000;
-export const USER_TASK_MIN_SLOTS = 1;
+export const USER_TASK_MIN_SLOTS = 30;
 export const USER_TASK_MAX_SLOTS = 10_000;
 export const USER_TASK_PLATFORM_FEE_RATE = 0.1;
-export const USER_TASK_MIN_FEE_COINS = 25;
+export const USER_TASK_MIN_FEE_COINS = 500;
+export const USER_TASK_MIN_TOTAL_COST_COINS = 5000;
 
 export interface PaidTaskCostBreakdown {
   rewardCoins: number;
@@ -1361,20 +1463,20 @@ export function createPaidTaskOrder(
   const rawReward = Math.floor(Number(input.rewardCoins) || 0);
   if (rawReward < USER_TASK_MIN_REWARD_COINS || rawReward > USER_TASK_MAX_REWARD_COINS) {
     return {
-      error: `Reward per user must be between ${USER_TASK_MIN_REWARD_COINS} and ${USER_TASK_MAX_REWARD_COINS.toLocaleString()} coins.`,
+      error: `Reward per user must be between ${USER_TASK_MIN_REWARD_COINS.toLocaleString()} and ${USER_TASK_MAX_REWARD_COINS.toLocaleString()} coins.`,
     };
   }
   const rawSlots = Math.floor(Number(input.totalSlots) || 0);
   if (rawSlots < USER_TASK_MIN_SLOTS || rawSlots > USER_TASK_MAX_SLOTS) {
     return {
-      error: `Total slots must be between ${USER_TASK_MIN_SLOTS} and ${USER_TASK_MAX_SLOTS.toLocaleString()}.`,
+      error: `Total slots must be between ${USER_TASK_MIN_SLOTS.toLocaleString()} and ${USER_TASK_MAX_SLOTS.toLocaleString()} joins.`,
     };
   }
 
   const cost = calculatePaidTaskCost(rawReward, rawSlots);
-  if (profile.coins < cost.totalCostCoins) {
+  if (profile.coins < USER_TASK_MIN_TOTAL_COST_COINS || profile.coins < cost.totalCostCoins) {
     return {
-      error: `Need ${cost.totalCostCoins.toLocaleString()} coins to post this task (you have ${profile.coins.toLocaleString()}).`,
+      error: `Need at least ${Math.max(USER_TASK_MIN_TOTAL_COST_COINS, cost.totalCostCoins).toLocaleString()} coins to post this task (you have ${profile.coins.toLocaleString()}).`,
     };
   }
 
@@ -1435,12 +1537,14 @@ export function claimAdNetworkReward(
   const nextWatchCount = profile.watchedAdsCount + 1;
   const unlockedChicken = nextWatchCount >= 10;
   const hadNoChickens = calculateTotalChickens(profile) === 0;
+  const nextTotalAdsWatched = getTotalAdsWatched(profile) + 1;
 
   const nextProfile: UserFarmProfile = {
     ...profile,
     coins: profile.coins + def.rewardCoins,
     completedTaskIds: nextCompletedIds,
     watchedAdsCount: unlockedChicken ? 0 : nextWatchCount,
+    totalAdsWatched: nextTotalAdsWatched,
     leghornCount: unlockedChicken ? profile.leghornCount + 1 : profile.leghornCount,
     lastCollectedAt: unlockedChicken && hadNoChickens ? nowMs : profile.lastCollectedAt,
   };
@@ -1475,11 +1579,13 @@ export function watchAdStep(
   nowMs: number,
 ): { profile: UserFarmProfile; transaction?: TransactionEntry; unlockedChicken: boolean } {
   const nextCount = profile.watchedAdsCount + 1;
+  const nextTotalAdsWatched = getTotalAdsWatched(profile) + 1;
   if (nextCount >= 10) {
     const hadNoChickens = calculateTotalChickens(profile) === 0;
     const nextProfile: UserFarmProfile = {
       ...profile,
       watchedAdsCount: 0,
+      totalAdsWatched: nextTotalAdsWatched,
       leghornCount: profile.leghornCount + 1,
       lastCollectedAt: hadNoChickens ? nowMs : profile.lastCollectedAt,
     };
@@ -1501,6 +1607,7 @@ export function watchAdStep(
     profile: {
       ...profile,
       watchedAdsCount: nextCount,
+      totalAdsWatched: nextTotalAdsWatched,
     },
     unlockedChicken: false,
   };
@@ -1587,6 +1694,7 @@ export function createDefaultProfile(
     completedTaskIds: [],
     claimedPromoCodes: [],
     watchedAdsCount: 0,
+    totalAdsWatched: 0,
     referralCode: createReferralCodeFromUid(uid),
     referredBy: '',
     referralActivated: false,
@@ -2004,6 +2112,363 @@ export function createDefaultSeasonConfig(nowMs = Date.now()): SeasonConfig {
     endsAtMs: nowMs + 4 * 86_400_000,
     lastWinners: [],
     updatedAtMs: nowMs,
+  };
+}
+
+const ADS_TOKEN_PREFIX = '__ads:';
+const TASK_META_PREFIX = '__m:';
+const TASK_SUBTITLE_MAX_LEN = 120;
+
+export function encodeAchievementsWithAds(
+  claimedAchievementIds: string[] = [],
+  totalAdsWatched = 0,
+): string[] {
+  const safeAds = Math.max(0, Math.floor(Number(totalAdsWatched) || 0));
+  const cleanIds: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of claimedAchievementIds) {
+    const id = String(raw || '').trim();
+    if (!id || id.startsWith(ADS_TOKEN_PREFIX) || seen.has(id) || id.length > 64) {
+      continue;
+    }
+    seen.add(id);
+    cleanIds.push(id);
+  }
+  if (safeAds > 0) {
+    return [...cleanIds.slice(-49), `${ADS_TOKEN_PREFIX}${safeAds}`];
+  }
+  return cleanIds.slice(-50);
+}
+
+export function decodeAchievementsAndAds(
+  rawClaimedIds: unknown,
+  explicitTotalAds?: unknown,
+  fallbackWatchedAdsCount?: unknown,
+): { claimedAchievementIds: string[]; totalAdsWatched: number } {
+  const arr = Array.isArray(rawClaimedIds) ? rawClaimedIds : [];
+  const cleanIds: string[] = [];
+  const seen = new Set<string>();
+  let tokenAds = 0;
+
+  for (const item of arr) {
+    const str = String(item || '').trim();
+    if (!str) continue;
+    if (str.startsWith(ADS_TOKEN_PREFIX)) {
+      const parsed = Math.floor(Number(str.slice(ADS_TOKEN_PREFIX.length)));
+      if (Number.isFinite(parsed) && parsed > tokenAds) {
+        tokenAds = parsed;
+      }
+      continue;
+    }
+    if (!seen.has(str)) {
+      seen.add(str);
+      cleanIds.push(str);
+    }
+  }
+
+  const explicitNum = Math.max(0, Math.floor(Number(explicitTotalAds ?? 0) || 0));
+  const fallbackNum = Math.max(0, Math.floor(Number(fallbackWatchedAdsCount ?? 0) || 0));
+  return {
+    claimedAchievementIds: cleanIds,
+    totalAdsWatched: Math.max(tokenAds, explicitNum, fallbackNum),
+  };
+}
+
+export interface TaskSubtitleMetaInput {
+  subtitle?: string;
+  totalSlots?: number;
+  claimedCount?: number;
+  creatorUid?: string;
+  paidCoins?: number;
+}
+
+export interface DecodedTaskSubtitleMeta {
+  subtitle?: string;
+  totalSlots?: number;
+  claimedCount?: number;
+  creatorUid?: string;
+  paidCoins?: number;
+}
+
+export function encodeTaskSubtitleMeta(input: TaskSubtitleMetaInput): string | undefined {
+  const cleanSub = (input.subtitle || '').replace(/\n?__m:[^\n]*/g, '').trim();
+  const totalSlots = Math.max(0, Math.floor(Number(input.totalSlots ?? 0) || 0));
+  const claimedCount = Math.max(0, Math.floor(Number(input.claimedCount ?? 0) || 0));
+  const creatorUid = (input.creatorUid || '').replace(/[:\n\r]/g, '').trim();
+  const paidCoins = Math.max(0, Math.floor(Number(input.paidCoins ?? 0) || 0));
+
+  const hasMeta = totalSlots > 0 || Boolean(creatorUid) || paidCoins > 0;
+  if (!hasMeta) {
+    return cleanSub ? cleanSub.slice(0, TASK_SUBTITLE_MAX_LEN) : undefined;
+  }
+
+  const suffix =
+    creatorUid || paidCoins > 0
+      ? `${TASK_META_PREFIX}${totalSlots}:${claimedCount}:${creatorUid}:${paidCoins}`
+      : `${TASK_META_PREFIX}${totalSlots}:${claimedCount}`;
+
+  if (suffix.length >= TASK_SUBTITLE_MAX_LEN) {
+    const compact = `${TASK_META_PREFIX}${totalSlots}:${claimedCount}:${creatorUid.slice(0, 64)}`;
+    return compact.slice(0, TASK_SUBTITLE_MAX_LEN);
+  }
+
+  if (!cleanSub) {
+    return suffix;
+  }
+
+  const available = TASK_SUBTITLE_MAX_LEN - suffix.length - 1;
+  if (available <= 0) {
+    return suffix;
+  }
+  return `${cleanSub.slice(0, available).trimEnd()}\n${suffix}`;
+}
+
+export function decodeTaskSubtitleMeta(rawSubtitle?: string): DecodedTaskSubtitleMeta {
+  const raw = (rawSubtitle || '').trim();
+  if (!raw) return {};
+
+  const match = raw.match(/(?:^|\n)__m:(\d+):(\d+)(?::([^:\n]*))?(?::(\d+))?\s*$/);
+  if (!match) {
+    return { subtitle: raw };
+  }
+
+  const cleanSub = raw.slice(0, match.index).trim();
+  const totalSlots = Math.max(0, Math.floor(Number(match[1]) || 0));
+  const claimedCount = Math.max(0, Math.floor(Number(match[2]) || 0));
+  const creatorUid = match[3] ? match[3].trim() : undefined;
+  const paidCoins =
+    match[4] !== undefined ? Math.max(0, Math.floor(Number(match[4]) || 0)) : undefined;
+
+  return {
+    ...(cleanSub ? { subtitle: cleanSub } : {}),
+    ...(totalSlots > 0 ? { totalSlots } : {}),
+    claimedCount,
+    ...(creatorUid ? { creatorUid } : {}),
+    ...(paidCoins !== undefined && paidCoins > 0 ? { paidCoins } : {}),
+  };
+}
+
+const PROMO_LABEL_MAX_LEN = 60;
+const PROMO_REWARD_REGEX = /(?:^|\n)__r:(?:(e):(\d+)(?::(\d+))?|(c):(leghorn|rhode|orpington|australorp):(\d+)(?::(\d+))?)\s*$/;
+const GIFT_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+
+export interface PromoRewardMetaInput {
+  label?: string;
+  rewardType?: PromoRewardType;
+  coins?: number;
+  eggs?: number;
+  chickenBreed?: ChickenBreedId;
+  chickenQty?: number;
+}
+
+export interface DecodedPromoRewardMeta {
+  label: string;
+  rewardType: PromoRewardType;
+  coins: number;
+  eggs: number;
+  chickenBreed?: ChickenBreedId;
+  chickenQty: number;
+}
+
+export function generateGiftCodeString(prefix = 'GIFT'): string {
+  const cleanPrefix = prefix
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, '')
+    .slice(0, 12) || 'GIFT';
+  let suffix = '';
+  for (let i = 0; i < 6; i += 1) {
+    const idx = Math.floor(Math.random() * GIFT_CODE_ALPHABET.length);
+    suffix += GIFT_CODE_ALPHABET[idx];
+  }
+  return `${cleanPrefix}-${suffix}`.slice(0, 32);
+}
+
+export function encodePromoLabelMeta(input: PromoRewardMetaInput): {
+  encodedLabel: string;
+  firestoreCoins: number;
+} {
+  const cleanLabel = (input.label || '')
+    .replace(/\n?__r:[^\n]*/g, '')
+    .replace(/[\r\n]+/g, ' ')
+    .trim();
+  const rewardType: PromoRewardType = input.rewardType || 'coins';
+
+  if (rewardType === 'eggs') {
+    const safeEggs = Math.max(1, Math.min(10_000_000, Math.round(Number(input.eggs) || 100)));
+    const bonusCoins = Math.max(0, Math.min(1_000_000, Math.round(Number(input.coins) || 0)));
+    const marker = bonusCoins > 0 ? `__r:e:${safeEggs}:${bonusCoins}` : `__r:e:${safeEggs}`;
+    const firestoreCoins = bonusCoins > 0 ? bonusCoins : 1;
+    const baseLabel = cleanLabel || 'Egg Gift Drop';
+    const available = PROMO_LABEL_MAX_LEN - marker.length - 1;
+    const encodedLabel =
+      available >= 3
+        ? `${baseLabel.slice(0, available).trimEnd()}\n${marker}`
+        : marker.slice(0, PROMO_LABEL_MAX_LEN);
+    return { encodedLabel, firestoreCoins };
+  }
+
+  if (rewardType === 'chicken') {
+    const breed: ChickenBreedId =
+      input.chickenBreed && CHICKEN_PACKS.some((p) => p.id === input.chickenBreed)
+        ? input.chickenBreed
+        : 'leghorn';
+    const safeQty = Math.max(1, Math.min(100, Math.round(Number(input.chickenQty) || 1)));
+    const bonusCoins = Math.max(0, Math.min(1_000_000, Math.round(Number(input.coins) || 0)));
+    const marker =
+      bonusCoins > 0 ? `__r:c:${breed}:${safeQty}:${bonusCoins}` : `__r:c:${breed}:${safeQty}`;
+    const firestoreCoins = bonusCoins > 0 ? bonusCoins : 1;
+    const baseLabel = cleanLabel || 'Hen Gift Drop';
+    const available = PROMO_LABEL_MAX_LEN - marker.length - 1;
+    const encodedLabel =
+      available >= 3
+        ? `${baseLabel.slice(0, available).trimEnd()}\n${marker}`
+        : marker.slice(0, PROMO_LABEL_MAX_LEN);
+    return { encodedLabel, firestoreCoins };
+  }
+
+  const safeCoins = Math.max(1, Math.min(1_000_000, Math.round(Number(input.coins) || 100)));
+  return {
+    encodedLabel: (cleanLabel || 'Gift Drop').slice(0, PROMO_LABEL_MAX_LEN),
+    firestoreCoins: safeCoins,
+  };
+}
+
+export function decodePromoLabelMeta(rawLabel: string, rawCoins: number): DecodedPromoRewardMeta {
+  const raw = String(rawLabel || '').trim();
+  const safeRawCoins = Math.max(0, Math.round(Number(rawCoins) || 0));
+  const match = raw.match(PROMO_REWARD_REGEX);
+
+  if (!match) {
+    return {
+      label: raw || 'Gift Drop',
+      rewardType: 'coins',
+      coins: Math.max(1, safeRawCoins),
+      eggs: 0,
+      chickenQty: 0,
+    };
+  }
+
+  const cleanLabel = raw.slice(0, match.index).trim();
+  if (match[1] === 'e') {
+    const eggs = Math.max(1, Math.round(Number(match[2]) || 0));
+    const bonusCoins = match[3] ? Math.max(0, Math.round(Number(match[3]) || 0)) : 0;
+    return {
+      label: cleanLabel || 'Egg Gift Drop',
+      rewardType: 'eggs',
+      coins: bonusCoins,
+      eggs,
+      chickenQty: 0,
+    };
+  }
+
+  const chickenBreed = (match[5] || 'leghorn') as ChickenBreedId;
+  const chickenQty = Math.max(1, Math.round(Number(match[6]) || 1));
+  const bonusCoins = match[7] ? Math.max(0, Math.round(Number(match[7]) || 0)) : 0;
+  return {
+    label: cleanLabel || 'Hen Gift Drop',
+    rewardType: 'chicken',
+    coins: bonusCoins,
+    eggs: 0,
+    chickenBreed,
+    chickenQty,
+  };
+}
+
+export function formatPromoRewardSummary(input: {
+  rewardType?: PromoRewardType;
+  coins?: number;
+  eggs?: number;
+  chickenBreed?: ChickenBreedId;
+  chickenQty?: number;
+}): string {
+  const rewardType = input.rewardType || 'coins';
+  const coins = Math.max(0, Math.round(Number(input.coins) || 0));
+  const eggs = Math.max(0, Math.round(Number(input.eggs) || 0));
+  const qty = Math.max(0, Math.round(Number(input.chickenQty) || 0));
+
+  if (rewardType === 'eggs' && eggs > 0) {
+    const parts = [`+${eggs.toLocaleString()} eggs`];
+    if (coins > 0) parts.push(`+${coins.toLocaleString()} coins`);
+    return parts.join(' & ');
+  }
+
+  if (rewardType === 'chicken' && qty > 0 && input.chickenBreed) {
+    const packName = CHICKEN_PACKS.find((p) => p.id === input.chickenBreed)?.name || 'Chicken';
+    const parts = [`+${qty} ${packName}`];
+    if (coins > 0) parts.push(`+${coins.toLocaleString()} coins`);
+    return parts.join(' & ');
+  }
+
+  return `+${Math.max(1, coins).toLocaleString()} coins`;
+}
+
+export interface RequiredTelegramChannel {
+  id: string;
+  handle: string;
+  title: string;
+  description: string;
+  url: string;
+}
+
+export const REQUIRED_TELEGRAM_CHANNELS: RequiredTelegramChannel[] = [
+  {
+    id: 'airdrop_galaxys',
+    handle: '@AIRDROP_GALAXYS',
+    title: 'Alpha Gram News & Drops',
+    description: 'Daily gift codes, announcements & community events',
+    url: 'https://t.me/AIRDROP_GALAXYS',
+  },
+  {
+    id: 'ag_payouts',
+    handle: '@AG_PAYOUTS',
+    title: 'Alpha Gram Payout Proofs',
+    description: 'Live verified TON / GRAM withdrawal proofs',
+    url: 'https://t.me/AG_PAYOUTS',
+  },
+];
+
+export function extractTelegramNumericUserId(rawPlayerOrUserId: unknown): string | null {
+  const s = String(rawPlayerOrUserId || '').trim();
+  if (!s) return null;
+  const tgMatch = s.match(/^(?:tg_)?(\d{4,20})$/);
+  return tgMatch ? tgMatch[1] : null;
+}
+
+export function isTelegramMemberStatusJoined(status: unknown, isMemberFlag?: unknown): boolean {
+  const s = String(status || '').trim().toLowerCase();
+  if (s === 'member' || s === 'administrator' || s === 'creator') {
+    return true;
+  }
+  if (s === 'restricted' && isMemberFlag === true) {
+    return true;
+  }
+  return false;
+}
+
+export const AD_GATED_ACTIONS: readonly AdGateActionType[] = [
+  'startup',
+  'collect_eggs',
+  'claim_promo',
+  'ad_network',
+  'watch_ad',
+];
+
+export const AD_EXEMPT_ACTIONS: readonly AdGateActionType[] = [
+  'task',
+  'withdraw',
+  'deposit',
+  'buy_chicken',
+];
+
+export function shouldRequireAdForAction(action: AdGateActionType): boolean {
+  return AD_GATED_ACTIONS.includes(action);
+}
+
+export function recordCompletedGateAd(profile: UserFarmProfile): UserFarmProfile {
+  return {
+    ...profile,
+    totalAdsWatched: getTotalAdsWatched(profile) + 1,
   };
 }
 

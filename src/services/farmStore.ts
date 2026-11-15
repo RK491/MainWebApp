@@ -23,17 +23,30 @@ import {
   calculateTotalChickens,
   createDefaultProfile,
   createDefaultSeasonConfig,
+  decodeAchievementsAndAds,
+  decodePromoLabelMeta,
+  decodeTaskSubtitleMeta,
   DEFAULT_AD_CONFIG,
   eggsToUsd,
+  encodeAchievementsWithAds,
+  encodePromoLabelMeta,
+  encodeTaskSubtitleMeta,
   formatReferralHandle,
   REFERRED_WELCOME_BONUS_COINS,
   REFERRER_SIGNUP_BONUS_COINS,
+  USER_TASK_MAX_REWARD_COINS,
+  USER_TASK_MAX_SLOTS,
+  USER_TASK_MIN_REWARD_COINS,
+  USER_TASK_MIN_SLOTS,
+  USER_TASK_MIN_TOTAL_COST_COINS,
 } from '../game/economy';
 import type {
   AdConfig,
+  ChickenBreedId,
   DepositOrder,
   DynamicPromoCode,
   LeaderboardEntry,
+  PromoRewardType,
   ReferralRecord,
   SeasonConfig,
   SeasonWinnerRecord,
@@ -112,11 +125,25 @@ export function resolveActivePlayerIdentity(): DetectedUserIdentity {
   };
 }
 
+function isFirestorePermissionDenied(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return String(error || '').toLowerCase().includes('missing or insufficient permissions');
+  }
+  const rec = error as { code?: unknown; message?: unknown };
+  const code = String(rec.code || '').toLowerCase();
+  const msg = String(rec.message || '').toLowerCase();
+  return code === 'permission-denied' || msg.includes('missing or insufficient permissions');
+}
+
 function toFirestoreProfilePayload(profile: UserFarmProfile, isCreate: boolean) {
+  const cumulativeAds = Math.max(
+    0,
+    Math.floor(Number(profile.totalAdsWatched ?? profile.watchedAdsCount ?? 0)),
+  );
   const base = {
     uid: profile.uid,
-    displayName: profile.displayName.slice(0, 60),
-    handle: profile.handle.slice(0, 40),
+    displayName: profile.displayName.slice(0, 60) || 'Farmer',
+    handle: profile.handle.slice(0, 40) || '@farmer',
     photoUrl: (profile.photoUrl || '').slice(0, 512),
     avatarColor: profile.avatarColor.slice(0, 20),
     level: profile.level,
@@ -150,7 +177,10 @@ function toFirestoreProfilePayload(profile: UserFarmProfile, isCreate: boolean) 
     feedBoostUntilMs: Math.max(0, Number(profile.feedBoostUntilMs ?? 0)),
     lastGoldenEggAtMs: Math.max(0, Number(profile.lastGoldenEggAtMs ?? 0)),
     goldenEggsFound: Math.max(0, Math.floor(Number(profile.goldenEggsFound ?? 0))),
-    claimedAchievementIds: (profile.claimedAchievementIds ?? []).slice(0, 50),
+    claimedAchievementIds: encodeAchievementsWithAds(
+      profile.claimedAchievementIds ?? [],
+      cumulativeAds,
+    ),
     claimedReferralMilestones: (profile.claimedReferralMilestones ?? []).slice(0, 20),
     updatedAt: serverTimestamp(),
   };
@@ -167,8 +197,8 @@ function toFirestoreProfilePayload(profile: UserFarmProfile, isCreate: boolean) 
 function toLeaderboardPayload(profile: UserFarmProfile) {
   return {
     uid: profile.uid,
-    displayName: profile.displayName.slice(0, 60),
-    handle: profile.handle.slice(0, 40),
+    displayName: profile.displayName.slice(0, 60) || 'Farmer',
+    handle: profile.handle.slice(0, 40) || '@farmer',
     photoUrl: (profile.photoUrl || '').slice(0, 512),
     avatarColor: profile.avatarColor.slice(0, 20),
     referralCode: profile.referralCode.slice(0, 32),
@@ -182,6 +212,11 @@ function toLeaderboardPayload(profile: UserFarmProfile) {
 }
 
 function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFarmProfile {
+  const { claimedAchievementIds, totalAdsWatched } = decodeAchievementsAndAds(
+    d.claimedAchievementIds,
+    d.totalAdsWatched,
+    d.watchedAdsCount,
+  );
   return {
     uid: String(d.uid || fallbackId),
     displayName: String(d.displayName || 'Farmer'),
@@ -207,6 +242,7 @@ function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFa
     completedTaskIds: Array.isArray(d.completedTaskIds) ? (d.completedTaskIds as string[]) : [],
     claimedPromoCodes: Array.isArray(d.claimedPromoCodes) ? (d.claimedPromoCodes as string[]) : [],
     watchedAdsCount: Number(d.watchedAdsCount ?? 0),
+    totalAdsWatched,
     referralCode: String(d.referralCode ?? `CL-${fallbackId.slice(-6).toUpperCase()}`),
     referredBy: String(d.referredBy ?? ''),
     referralActivated: Boolean(d.referralActivated),
@@ -219,9 +255,7 @@ function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFa
     feedBoostUntilMs: Number(d.feedBoostUntilMs ?? 0),
     lastGoldenEggAtMs: Number(d.lastGoldenEggAtMs ?? 0),
     goldenEggsFound: Number(d.goldenEggsFound ?? 0),
-    claimedAchievementIds: Array.isArray(d.claimedAchievementIds)
-      ? (d.claimedAchievementIds as string[])
-      : [],
+    claimedAchievementIds,
     claimedReferralMilestones: Array.isArray(d.claimedReferralMilestones)
       ? (d.claimedReferralMilestones as number[])
       : [],
@@ -1074,18 +1108,29 @@ export async function reviewWithdrawalInFirestore(params: {
 }
 
 function parseCustomTaskDoc(id: string, d: Record<string, unknown>): TaskDefinition {
+  const decoded = decodeTaskSubtitleMeta(d.subtitle ? String(d.subtitle) : undefined);
+  const totalSlots =
+    d.totalSlots !== undefined ? Number(d.totalSlots) : decoded.totalSlots;
+  const claimedCount =
+    d.claimedCount !== undefined
+      ? Number(d.claimedCount)
+      : (decoded.claimedCount ?? 0);
+  const creatorUid = d.creatorUid ? String(d.creatorUid) : decoded.creatorUid;
+  const paidCoins =
+    d.paidCoins !== undefined ? Number(d.paidCoins) : decoded.paidCoins;
+
   return {
     id,
     category: (d.category as TaskDefinition['category']) || 'partner',
     title: String(d.title || 'Bonus task'),
-    subtitle: d.subtitle ? String(d.subtitle) : undefined,
+    subtitle: decoded.subtitle,
     rewardCoins: Number(d.rewardCoins ?? 50),
     icon: String(d.icon || 'link'),
     actionUrl: String(d.actionUrl || ''),
-    totalSlots: d.totalSlots !== undefined ? Number(d.totalSlots) : undefined,
-    claimedCount: d.claimedCount !== undefined ? Number(d.claimedCount) : 0,
-    creatorUid: d.creatorUid ? String(d.creatorUid) : undefined,
-    paidCoins: d.paidCoins !== undefined ? Number(d.paidCoins) : undefined,
+    ...(totalSlots !== undefined ? { totalSlots } : {}),
+    claimedCount,
+    ...(creatorUid ? { creatorUid } : {}),
+    ...(paidCoins !== undefined ? { paidCoins } : {}),
     isCustom: true,
     isActive: d.isActive !== false,
     createdAtMs: Number(d.createdAtMs ?? 0),
@@ -1136,23 +1181,26 @@ export async function createCustomTaskInFirestore(input: {
   const rand = Math.random().toString(36).slice(2, 6);
   const id = `task_${nowMs}_${rand}`;
   const cleanTitle = input.title.trim().slice(0, 80);
-  const cleanSubtitle = (input.subtitle || '').trim().slice(0, 120);
+  const displaySubtitle = (input.subtitle || '').trim().slice(0, 120);
   const cleanReward = Math.max(1, Math.min(1_000_000, Math.round(input.rewardCoins)));
   const cleanIcon = input.icon.trim().slice(0, 24) || 'link';
   const cleanUrl = input.actionUrl.trim().slice(0, 256);
   const cleanTotalSlots = Math.max(0, Math.min(1_000_000, Math.round(input.totalSlots ?? 0)));
+  const encodedSubtitle = encodeTaskSubtitleMeta({
+    subtitle: displaySubtitle,
+    totalSlots: cleanTotalSlots,
+    claimedCount: 0,
+  });
 
   try {
     await setDoc(doc(db, 'tasks', id), {
       id,
       category: input.category,
       title: cleanTitle,
-      ...(cleanSubtitle ? { subtitle: cleanSubtitle } : {}),
+      ...(encodedSubtitle ? { subtitle: encodedSubtitle } : {}),
       rewardCoins: cleanReward,
       icon: cleanIcon,
       actionUrl: cleanUrl,
-      totalSlots: cleanTotalSlots,
-      claimedCount: 0,
       isActive: true,
       createdAtMs: nowMs,
       createdAt: serverTimestamp(),
@@ -1161,7 +1209,7 @@ export async function createCustomTaskInFirestore(input: {
       id,
       category: input.category,
       title: cleanTitle,
-      ...(cleanSubtitle ? { subtitle: cleanSubtitle } : {}),
+      ...(displaySubtitle ? { subtitle: displaySubtitle } : {}),
       rewardCoins: cleanReward,
       icon: cleanIcon,
       actionUrl: cleanUrl,
@@ -1195,12 +1243,25 @@ export async function createPaidCustomTaskInFirestore(params: {
   const rand = Math.random().toString(36).slice(2, 6);
   const taskId = `task_${nowMs}_${rand}`;
   const cleanTitle = params.taskInput.title.trim().slice(0, 80);
-  const cleanSubtitle = (params.taskInput.subtitle || '').trim().slice(0, 120);
-  const cleanReward = Math.max(10, Math.min(100_000, Math.round(params.taskInput.rewardCoins)));
+  const displaySubtitle = (params.taskInput.subtitle || '').trim().slice(0, 120);
+  const cleanReward = Math.max(
+    USER_TASK_MIN_REWARD_COINS,
+    Math.min(USER_TASK_MAX_REWARD_COINS, Math.round(params.taskInput.rewardCoins)),
+  );
   const cleanIcon = params.taskInput.icon.trim().slice(0, 24) || 'link';
   const cleanUrl = params.taskInput.actionUrl.trim().slice(0, 256);
-  const cleanTotalSlots = Math.max(1, Math.min(10_000, Math.round(params.taskInput.totalSlots)));
-  const paidCoins = Math.max(1, Math.round(params.paidCoins));
+  const cleanTotalSlots = Math.max(
+    USER_TASK_MIN_SLOTS,
+    Math.min(USER_TASK_MAX_SLOTS, Math.round(params.taskInput.totalSlots)),
+  );
+  const paidCoins = Math.max(USER_TASK_MIN_TOTAL_COST_COINS, Math.round(params.paidCoins));
+  const encodedSubtitle = encodeTaskSubtitleMeta({
+    subtitle: displaySubtitle,
+    totalSlots: cleanTotalSlots,
+    claimedCount: 0,
+    creatorUid: uid,
+    paidCoins,
+  });
   const txId = params.transaction.id.replace(/[^a-zA-Z0-9_-]/g, '_');
 
   const playerRef = doc(db, 'players', uid);
@@ -1215,9 +1276,9 @@ export async function createPaidCustomTaskInFirestore(params: {
         return { error: 'Player profile not synced yet.' } as const;
       }
       const liveCoins = Number(playerSnap.data().coins ?? 0);
-      if (liveCoins < paidCoins) {
+      if (liveCoins < USER_TASK_MIN_TOTAL_COST_COINS || liveCoins < paidCoins) {
         return {
-          error: `Need ${paidCoins.toLocaleString()} coins to publish this task (you have ${liveCoins.toLocaleString()}).`,
+          error: `Need at least ${Math.max(USER_TASK_MIN_TOTAL_COST_COINS, paidCoins).toLocaleString()} coins to publish this task (you have ${liveCoins.toLocaleString()}).`,
         } as const;
       }
 
@@ -1243,14 +1304,10 @@ export async function createPaidCustomTaskInFirestore(params: {
         id: taskId,
         category: params.taskInput.category,
         title: cleanTitle,
-        ...(cleanSubtitle ? { subtitle: cleanSubtitle } : {}),
+        ...(encodedSubtitle ? { subtitle: encodedSubtitle } : {}),
         rewardCoins: cleanReward,
         icon: cleanIcon,
         actionUrl: cleanUrl,
-        totalSlots: cleanTotalSlots,
-        claimedCount: 0,
-        creatorUid: uid,
-        paidCoins,
         isActive: true,
         createdAtMs: nowMs,
         createdAt: serverTimestamp(),
@@ -1260,7 +1317,7 @@ export async function createPaidCustomTaskInFirestore(params: {
         id: taskId,
         category: params.taskInput.category,
         title: cleanTitle,
-        ...(cleanSubtitle ? { subtitle: cleanSubtitle } : {}),
+        ...(displaySubtitle ? { subtitle: displaySubtitle } : {}),
         rewardCoins: cleanReward,
         icon: cleanIcon,
         actionUrl: cleanUrl,
@@ -1289,12 +1346,35 @@ export async function incrementTaskClaimCountInFirestore(taskId: string): Promis
       const snap = await transaction.get(ref);
       if (!snap.exists()) return;
       const d = snap.data();
-      const total = Number(d.totalSlots ?? 0);
-      const current = Number(d.claimedCount ?? 0);
-      if (total > 0 && current >= total) return;
-      transaction.update(ref, { claimedCount: current + 1 });
+      const parsed = parseCustomTaskDoc(snap.id, d);
+      const total = Number(parsed.totalSlots ?? 0);
+      if (!Number.isFinite(total) || total <= 0) {
+        return;
+      }
+      const current = Math.max(0, Math.floor(Number(parsed.claimedCount ?? 0)));
+      if (current >= total) return;
+
+      const nextClaimed = current + 1;
+      if (d.totalSlots !== undefined) {
+        transaction.update(ref, { claimedCount: nextClaimed });
+        return;
+      }
+
+      const nextSubtitle = encodeTaskSubtitleMeta({
+        subtitle: parsed.subtitle,
+        totalSlots: total,
+        claimedCount: nextClaimed,
+        creatorUid: parsed.creatorUid,
+        paidCoins: parsed.paidCoins,
+      });
+      if (nextSubtitle) {
+        transaction.update(ref, { subtitle: nextSubtitle });
+      }
     });
   } catch (error) {
+    if (isFirestorePermissionDenied(error)) {
+      return;
+    }
     handleFirestoreError(error, OperationType.UPDATE, `tasks/${taskId}`);
   }
 }
@@ -1423,10 +1503,18 @@ export function subscribeToPromoCodes(
       onUpdate(
         snap.docs.map((docSnap) => {
           const d = docSnap.data();
+          const decoded = decodePromoLabelMeta(
+            String(d.label || 'Gift Drop'),
+            Number(d.coins ?? 50),
+          );
           return {
             code: String(d.code || docSnap.id),
-            label: String(d.label || 'Promo Bonus'),
-            coins: Number(d.coins ?? 50),
+            label: decoded.label,
+            coins: decoded.coins,
+            rewardType: decoded.rewardType,
+            eggs: decoded.eggs,
+            chickenBreed: decoded.chickenBreed,
+            chickenQty: decoded.chickenQty,
             maxUses: Number(d.maxUses ?? 0),
             usedCount: Number(d.usedCount ?? 0),
             expiresAtMs: Number(d.expiresAtMs ?? 0),
@@ -1444,16 +1532,27 @@ export async function createPromoCodeInFirestore(input: {
   code: string;
   label: string;
   coins: number;
+  rewardType?: PromoRewardType;
+  eggs?: number;
+  chickenBreed?: ChickenBreedId;
+  chickenQty?: number;
   maxUses: number;
   expiresInHours: number;
 }): Promise<DynamicPromoCode> {
   const cleanCode = input.code.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 32);
   if (cleanCode.length < 3) {
-    throw new Error('Promo code must be at least 3 letters/numbers.');
+    throw new Error('Gift code must be at least 3 letters/numbers.');
   }
   const nowMs = Date.now();
-  const cleanLabel = input.label.trim().slice(0, 60) || `${cleanCode} Bonus`;
-  const cleanCoins = Math.max(1, Math.min(1_000_000, Math.round(input.coins)));
+  const { encodedLabel, firestoreCoins } = encodePromoLabelMeta({
+    label: input.label.trim() || `${cleanCode} Gift`,
+    rewardType: input.rewardType,
+    coins: input.coins,
+    eggs: input.eggs,
+    chickenBreed: input.chickenBreed,
+    chickenQty: input.chickenQty,
+  });
+  const decoded = decodePromoLabelMeta(encodedLabel, firestoreCoins);
   const cleanMaxUses = Math.max(0, Math.min(1_000_000, Math.round(input.maxUses)));
   const cleanExpiresAtMs =
     input.expiresInHours > 0 ? nowMs + Math.round(input.expiresInHours * 3_600_000) : 0;
@@ -1461,8 +1560,8 @@ export async function createPromoCodeInFirestore(input: {
   try {
     await setDoc(doc(db, 'promo_codes', cleanCode), {
       code: cleanCode,
-      label: cleanLabel,
-      coins: cleanCoins,
+      label: encodedLabel,
+      coins: firestoreCoins,
       maxUses: cleanMaxUses,
       usedCount: 0,
       expiresAtMs: cleanExpiresAtMs,
@@ -1472,8 +1571,12 @@ export async function createPromoCodeInFirestore(input: {
     });
     return {
       code: cleanCode,
-      label: cleanLabel,
-      coins: cleanCoins,
+      label: decoded.label,
+      coins: decoded.coins,
+      rewardType: decoded.rewardType,
+      eggs: decoded.eggs,
+      chickenBreed: decoded.chickenBreed,
+      chickenQty: decoded.chickenQty,
       maxUses: cleanMaxUses,
       usedCount: 0,
       expiresAtMs: cleanExpiresAtMs,

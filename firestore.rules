@@ -45,7 +45,7 @@ service cloud.firestore {
           'totalWithdrawnUsd', 'basketCapacity', 'basketTierHours',
           'leghornCount', 'rhodeCount', 'orpingtonCount', 'australorpCount',
           'boughtThisWeek', 'dailyStreak', 'lastDailyClaimDate',
-          'completedTaskIds', 'claimedPromoCodes', 'watchedAdsCount',
+          'completedTaskIds', 'claimedPromoCodes', 'watchedAdsCount', 'totalAdsWatched',
           'referralCode', 'referredBy', 'referralActivated', 'referralCount', 'referralCoinsEarned',
           'firstDepositBonusUsed', 'language', 'lastCollectedAt', 'createdAtMs',
           'feedBoostUntilMs', 'lastGoldenEggAtMs', 'goldenEggsFound',
@@ -77,6 +77,7 @@ service cloud.firestore {
         && isBoundedStringList(data.completedTaskIds, 50)
         && isBoundedStringList(data.claimedPromoCodes, 50)
         && data.watchedAdsCount is number && data.watchedAdsCount >= 0 && data.watchedAdsCount <= 10
+        && (!('totalAdsWatched' in data) || (data.totalAdsWatched is number && data.totalAdsWatched >= 0))
         && data.referralCode is string && data.referralCode.size() >= 3 && data.referralCode.size() <= 32
         && data.referredBy is string && data.referredBy.size() <= 64
         && data.referralActivated is bool
@@ -220,6 +221,11 @@ service cloud.firestore {
         && (!('claimedCount' in data) || (data.claimedCount is number && data.claimedCount >= 0 && data.claimedCount <= 1000000))
         && (!('creatorUid' in data) || isValidId(data.creatorUid))
         && (!('paidCoins' in data) || (data.paidCoins is number && data.paidCoins >= 0 && data.paidCoins <= 100000000))
+        && (!('creatorUid' in data) || (
+          data.rewardCoins >= 150
+          && 'totalSlots' in data && data.totalSlots >= 30
+          && 'paidCoins' in data && data.paidCoins >= 5000
+        ))
         && data.isActive is bool
         && data.createdAtMs is number && data.createdAtMs >= 0
         && data.createdAt is timestamp;
@@ -380,7 +386,7 @@ service cloud.firestore {
             'totalWithdrawnUsd', 'basketCapacity', 'basketTierHours',
             'leghornCount', 'rhodeCount', 'orpingtonCount', 'australorpCount',
             'boughtThisWeek', 'dailyStreak', 'lastDailyClaimDate',
-            'completedTaskIds', 'claimedPromoCodes', 'watchedAdsCount',
+            'completedTaskIds', 'claimedPromoCodes', 'watchedAdsCount', 'totalAdsWatched',
             'referredBy', 'referralActivated', 'referralCount', 'referralCoinsEarned',
             'firstDepositBonusUsed', 'language', 'lastCollectedAt',
             'feedBoostUntilMs', 'lastGoldenEggAtMs', 'goldenEggsFound',

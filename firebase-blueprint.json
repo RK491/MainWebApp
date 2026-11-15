@@ -29,6 +29,7 @@
         "completedTaskIds": { "type": "array" },
         "claimedPromoCodes": { "type": "array" },
         "watchedAdsCount": { "type": "number" },
+        "totalAdsWatched": { "type": "number" },
         "referralCode": { "type": "string", "minLength": 3, "maxLength": 32 },
         "referredBy": { "type": "string", "maxLength": 64 },
         "referralActivated": { "type": "boolean" },

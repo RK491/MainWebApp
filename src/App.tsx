@@ -36,6 +36,8 @@ import {
   executeDeposit,
   executeWithdrawal,
   formatAwayDuration,
+  formatPromoRewardSummary,
+  recordCompletedGateAd,
   reinvestEggs,
   upgradeBasket,
   watchAdStep,
@@ -76,12 +78,14 @@ import {
 import type {
   AdConfig,
   AdNetworkId,
+  ChannelVerificationResult,
   ChickenBreedId,
   DepositOrder,
   DynamicPromoCode,
   LanguageCode,
   LeaderboardEntry,
   NavTab,
+  PromoRewardType,
   ReferralRecord,
   SeasonConfig,
   SubView,
@@ -126,6 +130,7 @@ import { getTelegramChannelUrl, getTelegramInitData, triggerHapticFeedback } fro
 import { applyThemeToDocument, getStoredTheme, setStoredTheme, type ThemeMode } from './utils/theme';
 import { AdminPanelView } from './components/AdminPanelView';
 import { BottomNav } from './components/BottomNav';
+import { ChannelCheckModal } from './components/ChannelCheckPanel';
 import { DepositView } from './components/DepositView';
 import { FarmMeadow } from './components/FarmMeadow';
 import { FriendsView } from './components/FriendsView';
@@ -134,7 +139,7 @@ import { LeaderboardView } from './components/LeaderboardView';
 import { PacksView } from './components/PacksView';
 import { ProfileView, SettingsModal, YourFarmView } from './components/ProfileAndFarmViews';
 import { OfflineIndicator } from './components/PWAControls';
-import { RewardedAdModal } from './components/RewardedAdModal';
+import { type ModalAdActionKind, RewardedAdModal } from './components/RewardedAdModal';
 import { SignUpBonusModal } from './components/SignUpBonusModal';
 import { SplashScreen } from './components/SplashScreen';
 import { TasksView } from './components/TasksView';
@@ -192,13 +197,20 @@ export default function App() {
   const [activeAdNetwork, setActiveAdNetwork] = useState<AdNetworkId | null>(null);
   const [adModalState, setAdModalState] = useState<{
     open: boolean;
+    kind: ModalAdActionKind;
     notice?: string | null;
     network?: AdNetworkId | null;
+    pendingEggs?: number | null;
+    promoCode?: string | null;
+    promoRewardSummary?: string | null;
+    mandatory?: boolean;
   }>({
     open: false,
+    kind: 'watch_ad',
     notice: null,
     network: null,
   });
+  const startupAdTriggeredRef = useRef(false);
   const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => getStoredAudioSettings());
   const musicEnabled = audioSettings.musicEnabled;
   const soundsEnabled = audioSettings.soundsEnabled;
@@ -215,6 +227,24 @@ export default function App() {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [showWelcomeModal, setShowWelcomeModal] = useState(false);
   const [showSignUpBonusModal, setShowSignUpBonusModal] = useState(false);
+
+  const [channelVerification, setChannelVerification] = useState<ChannelVerificationResult | null>(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const raw = localStorage.getItem(`chickenland_channels_verified_v1_${activePlayerId}`);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as ChannelVerificationResult;
+      if (parsed?.allJoined && Date.now() - Number(parsed.checkedAtMs || 0) < 6 * 60 * 60 * 1000) {
+        return parsed;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  });
+  const [checkingChannels, setCheckingChannels] = useState(false);
+  const [showChannelGateModal, setShowChannelGateModal] = useState(false);
+  const autoCheckedChannelsRef = useRef<string | null>(null);
 
   const skipWelcome = useMemo(() => {
     if (typeof window === 'undefined') return false;
@@ -319,6 +349,94 @@ export default function App() {
       // Non-fatal outside Telegram signed WebApp context
     });
   }, []);
+
+  const handleCheckChannels = useCallback(
+    async (opts?: { silent?: boolean }): Promise<ChannelVerificationResult | null> => {
+      setCheckingChannels(true);
+      try {
+        const res = await fetch('/api/telegram/check-channels', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            playerId: latestProfileRef.current.uid,
+            initData: getTelegramInitData(),
+          }),
+        });
+        if (!res.ok) {
+          if (!opts?.silent) {
+            showToast('Could not verify channels right now. Please retry.');
+          }
+          return null;
+        }
+        const data = (await res.json()) as ChannelVerificationResult;
+        setChannelVerification(data);
+
+        if (data.verificationMode === 'telegram_bot') {
+          if (data.allJoined) {
+            try {
+              localStorage.setItem(
+                `chickenland_channels_verified_v1_${latestProfileRef.current.uid}`,
+                JSON.stringify(data),
+              );
+            } catch {
+              // ignore storage errors
+            }
+            setShowChannelGateModal(false);
+            if (!opts?.silent) {
+              playClaimSound(soundsEnabled);
+              triggerHapticFeedback('success');
+              showToast('Verified! Both @AIRDROP_GALAXYS & @AG_PAYOUTS joined.');
+            }
+          } else {
+            try {
+              localStorage.removeItem(
+                `chickenland_channels_verified_v1_${latestProfileRef.current.uid}`,
+              );
+            } catch {
+              // ignore storage errors
+            }
+            const missing = data.channels
+              .filter((c) => !c.joined)
+              .map((c) => c.handle)
+              .join(' & ');
+            if (!opts?.silent) {
+              triggerHapticFeedback('warning');
+              showToast(`Join required: ${missing || '@AIRDROP_GALAXYS & @AG_PAYOUTS'}`);
+            }
+          }
+        } else if (!opts?.silent) {
+          if (data.verificationMode === 'guest_browser') {
+            showToast('Open in Telegram Mini App for live bot channel check.');
+          } else {
+            showToast('Bot verification pending TELEGRAM_BOT_TOKEN on server.');
+          }
+        }
+
+        return data;
+      } catch {
+        if (!opts?.silent) {
+          showToast('Network error while checking Telegram channels.');
+        }
+        return null;
+      } finally {
+        setCheckingChannels(false);
+      }
+    },
+    [showToast, soundsEnabled],
+  );
+
+  useEffect(() => {
+    if (skipWelcome) return;
+    if (!detectedIdentity.isTelegramDetected) return;
+    if (autoCheckedChannelsRef.current === activePlayerId) return;
+    autoCheckedChannelsRef.current = activePlayerId;
+
+    void handleCheckChannels({ silent: true }).then((result) => {
+      if (result && result.verificationMode === 'telegram_bot' && !result.allJoined) {
+        setShowChannelGateModal(true);
+      }
+    });
+  }, [activePlayerId, detectedIdentity.isTelegramDetected, handleCheckChannels, skipWelcome]);
 
   const handleToggleMuteAll = useCallback(() => {
     const next = computeMuteAllToggle(audioSettings);
@@ -748,24 +866,67 @@ export default function App() {
   const hasClaimableTasks = profile.lastDailyClaimDate !== todayStr;
   const strings = t(profile.language);
 
+  const executeCollectEggs = useCallback(
+    (countCompletedAd = false) => {
+      const now = Date.now();
+      const current = latestProfileRef.current;
+      const pending = calculatePendingEggs(current, now);
+      const res = collectEggs(current, now, pending);
+      if ('error' in res) {
+        showToast(res.error);
+        return;
+      }
+      const nextProfile = countCompletedAd ? recordCompletedGateAd(res.profile) : res.profile;
+      playClaimSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      setShowWelcomeModal(false);
+      setNowMs(now);
+      void persistMutation({
+        nextProfile,
+        transaction: res.transaction,
+        referralEggCommission: res.referralEggCommission,
+      });
+      showToast(`+${res.collected.toLocaleString()} eggs collected`);
+    },
+    [persistMutation, showToast, soundsEnabled],
+  );
+
   const handleCollectEggs = () => {
+    if (watchingAdLoading) return;
     const now = Date.now();
-    const pending = calculatePendingEggs(profile, now);
-    const res = collectEggs(profile, now, pending);
-    if ('error' in res) {
-      showToast(res.error);
+    const current = latestProfileRef.current;
+    const pending = calculatePendingEggs(current, now);
+    const precheck = collectEggs(current, now, pending);
+    if ('error' in precheck) {
+      showToast(precheck.error);
       return;
     }
-    playClaimSound(soundsEnabled);
-    triggerHapticFeedback('success');
-    setShowWelcomeModal(false);
-    setNowMs(now);
-    void persistMutation({
-      nextProfile: res.profile,
-      transaction: res.transaction,
-      referralEggCommission: res.referralEggCommission,
-    });
-    showToast(`+${res.collected.toLocaleString()} eggs collected`);
+
+    void (async () => {
+      setWatchingAdLoading(true);
+      setActiveAdNetwork(null);
+      try {
+        const external = await tryRunExternalRewardedAd(adConfig);
+        if (external.handled) {
+          if (external.rewarded) {
+            executeCollectEggs(true);
+          } else {
+            showToast('Complete the ad to collect your eggs.');
+          }
+          return;
+        }
+        setAdModalState({
+          open: true,
+          kind: 'collect_eggs',
+          pendingEggs: pending,
+          notice: external.message ?? null,
+          network: null,
+          mandatory: false,
+        });
+      } finally {
+        setWatchingAdLoading(false);
+      }
+    })();
   };
 
   const handleBuyChickens = async (breed: ChickenBreedId, qty: number) => {
@@ -1049,14 +1210,20 @@ export default function App() {
     code: string;
     label: string;
     coins: number;
+    rewardType?: PromoRewardType;
+    eggs?: number;
+    chickenBreed?: ChickenBreedId;
+    chickenQty?: number;
     maxUses: number;
     expiresInHours: number;
-  }) => {
+  }): Promise<DynamicPromoCode | null> => {
     try {
       const created = await createPromoCodeInFirestore(input);
-      showToast(`Promo code ${created.code} created (+${created.coins} coins)!`);
+      showToast(`Gift code ${created.code} ready (${formatPromoRewardSummary(created)})!`);
+      return created;
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to create promo code.');
+      showToast(err instanceof Error ? err.message : 'Failed to create gift code.');
+      return null;
     }
   };
 
@@ -1119,24 +1286,98 @@ export default function App() {
     showToast(`Daily login claimed: +${res.rewardCoins} coins!`);
   };
 
+  const executeClaimPromo = useCallback(
+    (code: string, countCompletedAd = false) => {
+      const now = Date.now();
+      const current = latestProfileRef.current;
+      const res = claimPromoCode(current, code, now, promoCodes);
+      if ('error' in res) {
+        showToast(res.error);
+        return;
+      }
+      const nextProfile = countCompletedAd ? recordCompletedGateAd(res.profile) : res.profile;
+      playClaimSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      void persistMutation({
+        nextProfile,
+        transaction: res.transaction,
+      });
+      if (res.dynamicPromoCode) {
+        void incrementPromoCodeUseInFirestore(res.dynamicPromoCode).catch(() => {});
+      }
+      showToast(`Gift claimed: ${res.rewardSummary} (${res.label})!`);
+    },
+    [persistMutation, promoCodes, showToast, soundsEnabled],
+  );
+
   const handleClaimPromo = (code: string) => {
+    if (watchingAdLoading) return;
     const now = Date.now();
-    const res = claimPromoCode(profile, code, now, promoCodes);
-    if ('error' in res) {
-      showToast(res.error);
+    const current = latestProfileRef.current;
+    const dryRun = claimPromoCode(current, code, now, promoCodes);
+    if ('error' in dryRun) {
+      showToast(dryRun.error);
       return;
     }
-    playClaimSound(soundsEnabled);
-    triggerHapticFeedback('success');
-    void persistMutation({
-      nextProfile: res.profile,
-      transaction: res.transaction,
-    });
-    if (res.dynamicPromoCode) {
-      void incrementPromoCodeUseInFirestore(res.dynamicPromoCode);
-    }
-    showToast(`Promo claimed: +${res.rewardCoins} coins (${res.label})!`);
+
+    const cleanCode = code.trim().toUpperCase();
+    void (async () => {
+      setWatchingAdLoading(true);
+      setActiveAdNetwork(null);
+      try {
+        const external = await tryRunExternalRewardedAd(adConfig);
+        if (external.handled) {
+          if (external.rewarded) {
+            executeClaimPromo(cleanCode, true);
+          } else {
+            showToast('Complete the ad to claim your gift code.');
+          }
+          return;
+        }
+        setAdModalState({
+          open: true,
+          kind: 'claim_promo',
+          promoCode: cleanCode,
+          promoRewardSummary: dryRun.rewardSummary,
+          notice: external.message ?? null,
+          network: null,
+          mandatory: false,
+        });
+      } finally {
+        setWatchingAdLoading(false);
+      }
+    })();
   };
+
+  useEffect(() => {
+    if (skipWelcome || showSplash) return;
+    if (subView === 'admin') return;
+    if (startupAdTriggeredRef.current) return;
+    startupAdTriggeredRef.current = true;
+
+    void (async () => {
+      setWatchingAdLoading(true);
+      try {
+        const external = await tryRunExternalRewardedAd(adConfig);
+        if (external.handled && external.rewarded) {
+          const updated = recordCompletedGateAd(latestProfileRef.current);
+          void persistMutation({ nextProfile: updated });
+          return;
+        }
+        setAdModalState({
+          open: true,
+          kind: 'startup',
+          notice: external.handled
+            ? 'Complete the launch ad to enter Alpha Gram.'
+            : (external.message ?? null),
+          network: null,
+          mandatory: true,
+        });
+      } finally {
+        setWatchingAdLoading(false);
+      }
+    })();
+  }, [adConfig, persistMutation, showSplash, skipWelcome, subView]);
 
   const handleCompleteTask = (taskId: string) => {
     const now = Date.now();
@@ -1152,14 +1393,14 @@ export default function App() {
       transaction: res.transaction,
     });
     if (res.isCustomTask) {
-      void incrementTaskClaimCountInFirestore(taskId);
+      void incrementTaskClaimCountInFirestore(taskId).catch(() => {});
     }
     showToast(`Task complete: +${res.rewardCoins} coins!`);
   };
 
   const handleWatchAd = () => {
     const now = Date.now();
-    const res = watchAdStep(profile, now);
+    const res = watchAdStep(latestProfileRef.current, now);
     playClaimSound(soundsEnabled);
     triggerHapticFeedback('success');
     void persistMutation({
@@ -1204,11 +1445,17 @@ export default function App() {
         if (external.rewarded) {
           handleWatchAd();
         } else {
-          showToast('Watch the full ad to earn your reward.');
+          showToast('Ad closed early — reward not claimed.');
         }
         return;
       }
-      setAdModalState({ open: true, notice: external.message ?? null, network: null });
+      setAdModalState({
+        open: true,
+        kind: 'watch_ad',
+        notice: external.message ?? null,
+        network: null,
+        mandatory: false,
+      });
     } finally {
       setWatchingAdLoading(false);
     }
@@ -1224,14 +1471,16 @@ export default function App() {
         if (external.rewarded) {
           handleClaimAdNetwork(network);
         } else {
-          showToast('Watch the full ad to earn your coins.');
+          showToast('Ad closed early — reward not claimed.');
         }
         return;
       }
       setAdModalState({
         open: true,
+        kind: 'ad_network',
         notice: external.message ?? null,
         network,
+        mandatory: false,
       });
     } finally {
       setWatchingAdLoading(false);
@@ -1450,7 +1699,14 @@ export default function App() {
         <WithdrawView
           profile={profile}
           withdrawals={withdrawals}
+          channelVerification={channelVerification}
+          checkingChannels={checkingChannels}
+          onCheckChannels={() => void handleCheckChannels()}
           onBack={() => setSubView('none')}
+          onGoToTasks={() => {
+            setSubView('none');
+            setActiveTab('tasks');
+          }}
           onConfirmWithdraw={handleConfirmWithdraw}
         />
       );
@@ -1476,6 +1732,9 @@ export default function App() {
           payoutChannelUrl={getTelegramChannelUrl(payoutChannel)}
           watchingAd={watchingAdLoading}
           activeAdNetwork={activeAdNetwork}
+          channelVerification={channelVerification}
+          checkingChannels={checkingChannels}
+          onCheckChannels={() => handleCheckChannels()}
           onTabTap={() => playTabTapSound(soundsEnabled)}
           onClaimPromo={handleClaimPromo}
           onClaimDaily={handleClaimDaily}
@@ -1770,7 +2029,7 @@ export default function App() {
 
       {showSplash && <SplashScreen onComplete={handleSplashComplete} />}
 
-      {!showSplash && showSignUpBonusModal && (
+      {!showSplash && !adModalState.open && showSignUpBonusModal && (
         <SignUpBonusModal
           onClaim={() => {
             playClaimSound(soundsEnabled);
@@ -1785,7 +2044,7 @@ export default function App() {
         />
       )}
 
-      {!showSplash && showWelcomeModal && !showSignUpBonusModal && (
+      {!showSplash && !adModalState.open && showWelcomeModal && !showSignUpBonusModal && (
         <WelcomeBackModal
           pendingEggs={pendingEggs}
           awayLabel={formatAwayDuration(nowMs - profile.lastCollectedAt)}
@@ -1793,6 +2052,15 @@ export default function App() {
           onDismiss={() => setShowWelcomeModal(false)}
           headingText={strings.welcomeBack}
           collectLabel={strings.collect}
+        />
+      )}
+
+      {!showSplash && !adModalState.open && !showSignUpBonusModal && showChannelGateModal && (
+        <ChannelCheckModal
+          verification={channelVerification}
+          checking={checkingChannels}
+          onCheckChannels={() => void handleCheckChannels()}
+          onClose={() => setShowChannelGateModal(false)}
         />
       )}
 
@@ -1804,19 +2072,43 @@ export default function App() {
           <RewardedAdModal
             adConfig={adConfig}
             watchedCount={profile.watchedAdsCount}
+            actionKind={adModalState.kind}
             networkLabel={netDef?.name ?? null}
             rewardCoins={netDef?.rewardCoins ?? null}
+            pendingEggs={adModalState.pendingEggs ?? null}
+            promoCode={adModalState.promoCode ?? null}
+            promoRewardSummary={adModalState.promoRewardSummary ?? null}
             fallbackNotice={adModalState.notice}
+            mandatory={adModalState.mandatory}
             onComplete={() => {
-              const net = adModalState.network;
-              setAdModalState({ open: false, notice: null, network: null });
-              if (net) {
-                handleClaimAdNetwork(net);
+              const currentModal = adModalState;
+              setAdModalState({ open: false, kind: 'watch_ad', notice: null, network: null });
+              if (currentModal.kind === 'startup') {
+                const updated = recordCompletedGateAd(latestProfileRef.current);
+                void persistMutation({ nextProfile: updated });
+                playSoftTapSound(soundsEnabled);
+              } else if (currentModal.kind === 'collect_eggs') {
+                executeCollectEggs(true);
+              } else if (currentModal.kind === 'claim_promo' && currentModal.promoCode) {
+                executeClaimPromo(currentModal.promoCode, true);
+              } else if (currentModal.kind === 'ad_network' && currentModal.network) {
+                handleClaimAdNetwork(currentModal.network);
               } else {
                 handleWatchAd();
               }
             }}
-            onClose={() => setAdModalState({ open: false, notice: null, network: null })}
+            onClose={() => {
+              if (adModalState.mandatory) return;
+              const cancelledKind = adModalState.kind;
+              setAdModalState({ open: false, kind: 'watch_ad', notice: null, network: null });
+              if (cancelledKind === 'collect_eggs') {
+                showToast('Ad cancelled — eggs were not collected.');
+              } else if (cancelledKind === 'claim_promo') {
+                showToast('Ad cancelled — gift code was not claimed.');
+              } else {
+                showToast('Ad closed early — reward not claimed.');
+              }
+            }}
           />
         );
       })()}

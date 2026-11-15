@@ -22,9 +22,12 @@ import {
 import {
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
+  extractTelegramNumericUserId,
+  isTelegramMemberStatusJoined,
   MAX_DEPOSIT_COINS,
   MIN_DEPOSIT_COINS,
   PROMO_CODES,
+  REQUIRED_TELEGRAM_CHANNELS,
 } from './src/game/economy.ts';
 import {
   buildAcceptedDepositMemos,
@@ -288,8 +291,116 @@ async function startServer() {
       minDepositCoins: MIN_DEPOSIT_COINS,
       maxDepositCoins: MAX_DEPOSIT_COINS,
       payoutChannel: TELEGRAM_PAYOUT_CHANNEL,
+      requiredChannels: REQUIRED_TELEGRAM_CHANNELS.map((c) => c.handle),
       telegramBotConfigured: Boolean(TELEGRAM_BOT_TOKEN),
       persistentLedgerEnabled: Boolean(serverDb),
+    });
+  });
+
+  app.post('/api/telegram/check-channels', async (req, res) => {
+    const body = req.body as {
+      initData?: string;
+      playerId?: string;
+    };
+    const rawInitData = String(body.initData || '').trim();
+    const rawPlayerId = String(body.playerId || '').trim();
+
+    let numericUserId: string | null = null;
+    if (rawInitData && TELEGRAM_BOT_TOKEN) {
+      const verifiedInit = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN);
+      if (verifiedInit.valid && verifiedInit.playerId) {
+        numericUserId = extractTelegramNumericUserId(verifiedInit.playerId);
+      }
+    }
+    if (!numericUserId) {
+      numericUserId = extractTelegramNumericUserId(rawPlayerId);
+    }
+
+    if (!numericUserId) {
+      res.json({
+        ok: true,
+        allJoined: false,
+        verificationMode: 'guest_browser',
+        telegramUserId: null,
+        channels: REQUIRED_TELEGRAM_CHANNELS.map((ch) => ({
+          ...ch,
+          joined: false,
+          status: 'no_telegram_user',
+          error: 'Open inside Telegram Mini App to verify membership',
+        })),
+        checkedAtMs: Date.now(),
+      });
+      return;
+    }
+
+    if (!TELEGRAM_BOT_TOKEN) {
+      res.json({
+        ok: true,
+        allJoined: false,
+        verificationMode: 'bot_unconfigured',
+        telegramUserId: numericUserId,
+        channels: REQUIRED_TELEGRAM_CHANNELS.map((ch) => ({
+          ...ch,
+          joined: false,
+          status: 'bot_unconfigured',
+          error: 'TELEGRAM_BOT_TOKEN not configured on server',
+        })),
+        checkedAtMs: Date.now(),
+      });
+      return;
+    }
+
+    const checks = await Promise.all(
+      REQUIRED_TELEGRAM_CHANNELS.map(async (ch) => {
+        try {
+          const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChatMember?chat_id=${encodeURIComponent(
+            ch.handle,
+          )}&user_id=${encodeURIComponent(numericUserId)}`;
+          const tgRes = await fetch(url, { signal: AbortSignal.timeout(7000) });
+          const tgData = (await tgRes.json()) as {
+            ok?: boolean;
+            description?: string;
+            result?: {
+              status?: string;
+              is_member?: boolean;
+            };
+          };
+
+          if (!tgData.ok || !tgData.result) {
+            return {
+              ...ch,
+              joined: false,
+              status: 'api_error',
+              error: tgData.description || 'Make sure the bot is admin in this channel',
+            };
+          }
+
+          const status = String(tgData.result.status || 'left');
+          const joined = isTelegramMemberStatusJoined(status, tgData.result.is_member);
+          return {
+            ...ch,
+            joined,
+            status,
+          };
+        } catch (err) {
+          return {
+            ...ch,
+            joined: false,
+            status: 'network_error',
+            error: err instanceof Error ? err.message : 'Telegram API timeout',
+          };
+        }
+      }),
+    );
+
+    const allJoined = checks.every((c) => c.joined);
+    res.json({
+      ok: true,
+      allJoined,
+      verificationMode: 'telegram_bot',
+      telegramUserId: numericUserId,
+      channels: checks,
+      checkedAtMs: Date.now(),
     });
   });
 

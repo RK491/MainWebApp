@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   activateFeedBooster,
+  AD_EXEMPT_ACTIONS,
+  AD_GATED_ACTIONS,
   AD_NETWORK_TASKS,
   buildDeterministicDepositIds,
   buildEarningsChartSeries,
@@ -28,39 +30,57 @@ import {
   createDefaultSeasonConfig,
   createDepositQuote,
   createPaidTaskOrder,
+  decodeAchievementsAndAds,
+  decodePromoLabelMeta,
+  decodeTaskSubtitleMeta,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
   detectTop10RankCelebration,
+  encodeAchievementsWithAds,
+  encodePromoLabelMeta,
+  encodeTaskSubtitleMeta,
   executeDeposit,
   executeWithdrawal,
+  extractTelegramNumericUserId,
   FEED_BOOSTER_COST_COINS,
   FEED_BOOSTER_DURATION_MS,
   filterWithdrawalsByTab,
+  formatPromoRewardSummary,
   formatReferralHandle,
+  generateGiftCodeString,
   getAchievementsProgress,
   getAdNetworkClaimCountToday,
   getChickenMilestoneReached,
   getTaskRemainingSlots,
+  getTotalAdsWatched,
   getWithdrawalStatusMeta,
+  getWithdrawAdGateStatus,
   GOLDEN_EGG_COOLDOWN_MS,
   GOLDEN_EGG_REWARD_COINS,
   GOLDEN_EGG_REWARD_XP,
   gramToCoins,
   isFeedBoosterActive,
   isGoldenEggReady,
+  isTelegramMemberStatusJoined,
   MAX_DEPOSIT_COINS,
   mergeTaskDefinitions,
   MIN_DEPOSIT_COINS,
+  MIN_WITHDRAW_ADS_WATCHED,
   REFERRAL_MILESTONE_CRATES,
   REFERRER_LIFETIME_EGG_COMMISSION_RATE,
   REFERRER_SIGNUP_BONUS_COINS,
   REFERRER_SIGNUP_BONUS_EGGS,
   reinvestEggs,
+  recordCompletedGateAd,
+  REQUIRED_TELEGRAM_CHANNELS,
+  shouldRequireAdForAction,
   SIGNUP_BONUS_COINS,
   sortTasks,
   summarizeReferrals,
   upgradeBasket,
+  watchAdStep,
 } from './economy';
+import { hasConfiguredAdNetworkSdk, resolveEffectiveAdConfig } from '../utils/ads';
 import {
   buildAcceptedDepositMemos,
   buildGramTransferUrl,
@@ -219,9 +239,20 @@ test('reinvestEggs converts eggs to coins with 20% bonus', () => {
   assert.equal(res.profile.coins, 1042);
 });
 
-test('executeWithdrawal validates address, balance, and records withdrawal', () => {
+test('executeWithdrawal enforces 30-ad watch gate, validates address and balance, and records withdrawal', () => {
   const { profile } = createDefaultProfile('player_test1', 'RK', '@rk', NOW);
-  const fundedProfile = { ...profile, eggs: 500 };
+  const unwatchedProfile = { ...profile, eggs: 500, totalAdsWatched: 29 };
+  const blockedByAds = executeWithdrawal(
+    unwatchedProfile,
+    200,
+    'UQB06dO9oc06d-1c8DF03FLdCznEHz_aLIA69fxzITcunwpr',
+    '',
+    NOW,
+  );
+  assert.ok('error' in blockedByAds);
+  assert.match(blockedByAds.error, /30 ads/i);
+
+  const fundedProfile = { ...profile, eggs: 500, totalAdsWatched: MIN_WITHDRAW_ADS_WATCHED };
   const badAddr = executeWithdrawal(fundedProfile, 200, 'abc', '', NOW);
   assert.ok('error' in badAddr);
 
@@ -1726,69 +1757,92 @@ test('task slots enforcement blocks completion when remaining slots reach 0 and 
   assert.ok('error' in fullErr);
 });
 
-test('paid user task creation calculates pool + fee, deducts coins, validates balance, and blocks self-claim', () => {
-  // 50 coins * 10 slots = 500 pool + 50 fee (10%) = 550 total
-  const standardCost = calculatePaidTaskCost(50, 10);
-  assert.equal(standardCost.rewardPoolCoins, 500);
-  assert.equal(standardCost.platformFeeCoins, 50);
-  assert.equal(standardCost.totalCostCoins, 550);
+test('paid user task creation enforces 5k min (30 joins, 150/join, 10% fee min 500), deducts coins, and blocks self-claim', () => {
+  // Minimum criteria: 150 coins * 30 slots = 4,500 pool + 500 fee (10% of 5,000 budget) = 5,000 total
+  const minCost = calculatePaidTaskCost(150, 30);
+  assert.equal(minCost.rewardPoolCoins, 4500);
+  assert.equal(minCost.platformFeeCoins, 500);
+  assert.equal(minCost.totalCostCoins, 5000);
 
-  // Small task hits minimum 25 coin fee: 10 * 5 = 50 pool + 25 fee = 75 total
-  const smallCost = calculatePaidTaskCost(10, 5);
-  assert.equal(smallCost.rewardPoolCoins, 50);
-  assert.equal(smallCost.platformFeeCoins, 25);
-  assert.equal(smallCost.totalCostCoins, 75);
+  // Scaling above minimum: 200 coins * 40 slots = 8,000 pool + 800 fee (10%) = 8,800 total
+  const scaledCost = calculatePaidTaskCost(200, 40);
+  assert.equal(scaledCost.rewardPoolCoins, 8000);
+  assert.equal(scaledCost.platformFeeCoins, 800);
+  assert.equal(scaledCost.totalCostCoins, 8800);
+
+  // Inputs below minimums clamp safely to 150 reward / 30 slots / 5,000 total
+  const clampedCost = calculatePaidTaskCost(50, 10);
+  assert.equal(clampedCost.rewardCoins, 150);
+  assert.equal(clampedCost.totalSlots, 30);
+  assert.equal(clampedCost.totalCostCoins, 5000);
 
   const { profile } = createDefaultProfile('player_creator1', 'Aarav', '@aarav', NOW);
   assert.equal(profile.coins, 1000);
 
-  // Too expensive for 1,000 coins balance (100 * 20 = 2000 + 200 = 2200)
-  const tooExpensive = createPaidTaskOrder(
-    profile,
+  // Under 5,000 coins balance cannot publish even minimum task
+  const under5k = createPaidTaskOrder(
+    { ...profile, coins: 4999 },
     {
       title: 'Join My Channel',
       category: 'partner',
-      rewardCoins: 100,
-      totalSlots: 20,
+      rewardCoins: 150,
+      totalSlots: 30,
       icon: 'send',
       actionUrl: 'https://t.me/test',
     },
     NOW,
   );
-  assert.ok('error' in tooExpensive);
+  assert.ok('error' in under5k);
 
-  // Invalid slots (0) rejected
-  const zeroSlots = createPaidTaskOrder(
-    profile,
+  const fundedCreator = { ...profile, coins: 6000 };
+
+  // Below min reward (< 150) rejected
+  const lowReward = createPaidTaskOrder(
+    fundedCreator,
     {
-      title: 'Zero Slots',
+      title: 'Low Reward Task',
       category: 'social',
-      rewardCoins: 50,
-      totalSlots: 0,
+      rewardCoins: 100,
+      totalSlots: 30,
       icon: 'send',
       actionUrl: '',
     },
     NOW,
   );
-  assert.ok('error' in zeroSlots);
+  assert.ok('error' in lowReward);
 
-  // Valid paid task deducts 550 coins and emits negative coin transaction
+  // Below min slots (< 30) rejected
+  const lowSlots = createPaidTaskOrder(
+    fundedCreator,
+    {
+      title: 'Low Slots Task',
+      category: 'social',
+      rewardCoins: 150,
+      totalSlots: 29,
+      icon: 'send',
+      actionUrl: '',
+    },
+    NOW,
+  );
+  assert.ok('error' in lowSlots);
+
+  // Valid minimum paid task deducts 5,000 coins and emits negative coin transaction
   const ok = createPaidTaskOrder(
-    profile,
+    fundedCreator,
     {
       title: 'Join My Channel',
       category: 'partner',
-      rewardCoins: 50,
-      totalSlots: 10,
+      rewardCoins: 150,
+      totalSlots: 30,
       icon: 'send',
       actionUrl: 'https://t.me/test',
     },
     NOW,
   );
   assert.ok(!('error' in ok));
-  assert.equal(ok.cost.totalCostCoins, 550);
-  assert.equal(ok.profile.coins, 450);
-  assert.equal(ok.transaction.amount, -550);
+  assert.equal(ok.cost.totalCostCoins, 5000);
+  assert.equal(ok.profile.coins, 1000);
+  assert.equal(ok.transaction.amount, -5000);
   assert.equal(ok.transaction.currency, 'coins');
 
   // Creator cannot claim their own posted task, while another player can
@@ -1796,13 +1850,13 @@ test('paid user task creation calculates pool + fee, deducts coins, validates ba
     id: 'task_user_paid_1',
     category: 'partner' as const,
     title: 'Join My Channel',
-    rewardCoins: 50,
+    rewardCoins: 150,
     icon: 'send',
     actionUrl: 'https://t.me/test',
-    totalSlots: 10,
+    totalSlots: 30,
     claimedCount: 0,
     creatorUid: 'player_creator1',
-    paidCoins: 550,
+    paidCoins: 5000,
     isCustom: true,
     isActive: true,
     createdAtMs: NOW,
@@ -1814,8 +1868,8 @@ test('paid user task creation calculates pool + fee, deducts coins, validates ba
   const { profile: otherUser } = createDefaultProfile('player_other2', 'Meera', '@meera', NOW);
   const otherClaim = completeTask(otherUser, 'task_user_paid_1', NOW + 1000, [ownTask]);
   assert.ok(!('error' in otherClaim));
-  assert.equal(otherClaim.rewardCoins, 50);
-  assert.equal(otherClaim.profile.coins, otherUser.coins + 50);
+  assert.equal(otherClaim.rewardCoins, 150);
+  assert.equal(otherClaim.profile.coins, otherUser.coins + 150);
 });
 
 test('sortTasks orders tasks accurately by Most Reward, Newest, and Ending Soon', () => {
@@ -1887,16 +1941,294 @@ test('sortTasks orders tasks accurately by Most Reward, Newest, and Ending Soon'
   );
 });
 
+test('totalAdsWatched accumulates across 10-ad chicken resets and unlocks withdrawal at 30 ads', () => {
+  const { profile } = createDefaultProfile('player_ads30', 'Kabir', '@kabir', NOW);
+  let current = { ...profile, eggs: 250 };
 
+  assert.equal(getTotalAdsWatched(current), 0);
+  assert.equal(getWithdrawAdGateStatus(current).unlocked, false);
+  assert.equal(getWithdrawAdGateStatus(current).remaining, 30);
 
+  // Watch 29 ads via watchAdStep & claimAdNetworkReward (triggers 2 chicken resets at 10 and 20)
+  for (let i = 0; i < 20; i += 1) {
+    current = watchAdStep(current, NOW + i * 1000).profile;
+  }
+  assert.equal(current.watchedAdsCount, 0);
+  assert.equal(current.leghornCount, 2);
+  assert.equal(getTotalAdsWatched(current), 20);
 
+  for (let i = 0; i < 5; i += 1) {
+    const netRes = claimAdNetworkReward(current, 'adsgram', '2026-11-14', NOW + 30_000 + i * 1000);
+    assert.ok(!('error' in netRes));
+    current = netRes.profile;
+  }
+  for (let i = 0; i < 4; i += 1) {
+    const netRes = claimAdNetworkReward(current, 'gigapub', '2026-11-14', NOW + 40_000 + i * 1000);
+    assert.ok(!('error' in netRes));
+    current = netRes.profile;
+  }
 
+  assert.equal(getTotalAdsWatched(current), 29);
+  assert.equal(getWithdrawAdGateStatus(current).unlocked, false);
+  assert.equal(getWithdrawAdGateStatus(current).remaining, 1);
 
+  // 30th ad unlocks withdrawals!
+  const net30 = claimAdNetworkReward(current, 'monetag', '2026-11-14', NOW + 50_000);
+  assert.ok(!('error' in net30));
+  current = net30.profile;
+  assert.equal(getTotalAdsWatched(current), 30);
+  assert.equal(getWithdrawAdGateStatus(current).unlocked, true);
+  assert.equal(getWithdrawAdGateStatus(current).remaining, 0);
 
+  const wdOk = executeWithdrawal(
+    current,
+    150,
+    'UQB06dO9oc06d-1c8DF03FLdCznEHz_aLIA69fxzITcunwpr',
+    '',
+    NOW + 60_000,
+  );
+  assert.ok(!('error' in wdOk));
+});
 
+test('encodeAchievementsWithAds and decodeAchievementsAndAds round-trip totalAdsWatched within 50-item Firestore limit', () => {
+  // Zero ads leaves array untouched
+  assert.deepEqual(encodeAchievementsWithAds(['first_harvest'], 0), ['first_harvest']);
 
+  // Encodes 30 ads alongside real achievements, stripping old __ads tokens
+  const encoded = encodeAchievementsWithAds(['first_harvest', '__ads:12', 'flock_5'], 30);
+  assert.deepEqual(encoded, ['first_harvest', 'flock_5', '__ads:30']);
+  assert.ok(encoded.every((item) => item.length <= 64));
 
+  const decoded = decodeAchievementsAndAds(encoded, undefined, 0);
+  assert.deepEqual(decoded.claimedAchievementIds, ['first_harvest', 'flock_5']);
+  assert.equal(decoded.totalAdsWatched, 30);
 
+  // Enforces max 50 items even with 60 real achievement IDs
+  const manyIds = Array.from({ length: 60 }, (_, i) => `ach_${i}`);
+  const capped = encodeAchievementsWithAds(manyIds, 42);
+  assert.equal(capped.length, 50);
+  assert.equal(capped[49], '__ads:42');
+});
 
+test('encodeTaskSubtitleMeta and decodeTaskSubtitleMeta preserve slots and creatorUid inside 120-char subtitle cap', () => {
+  // Unlimited admin task without meta stays plain text (or undefined)
+  assert.equal(encodeTaskSubtitleMeta({ subtitle: 'Join official channel', totalSlots: 0 }), 'Join official channel');
+  assert.equal(encodeTaskSubtitleMeta({ subtitle: '', totalSlots: 0 }), undefined);
 
+  // Paid task with long subtitle and 64-char creatorUid still stays <= 120 chars and round-trips cleanly
+  const longSub = 'Join our verified community channel and complete daily engagement rewards for bonus coins!';
+  const longUid = 'player_1234567890_abcdefghijklmnopqrstuvwxyz_12345678901234567';
+  const encoded = encodeTaskSubtitleMeta({
+    subtitle: longSub,
+    totalSlots: 30,
+    claimedCount: 7,
+    creatorUid: longUid.slice(0, 64),
+    paidCoins: 5000,
+  });
+  assert.ok(encoded);
+  assert.ok(encoded.length <= 120);
+
+  const decoded = decodeTaskSubtitleMeta(encoded);
+  assert.equal(decoded.totalSlots, 30);
+  assert.equal(decoded.claimedCount, 7);
+  assert.equal(decoded.creatorUid, longUid.slice(0, 64));
+  assert.equal(decoded.paidCoins, 5000);
+  assert.ok(!decoded.subtitle?.includes('__m:'));
+
+  // Standard paid task round-trips full subtitle + slot increment
+  const standardEncoded = encodeTaskSubtitleMeta({
+    subtitle: 'Join @my_channel',
+    totalSlots: 30,
+    claimedCount: 0,
+    creatorUid: 'player_oojwtfoum3',
+    paidCoins: 5000,
+  });
+  assert.ok(standardEncoded && standardEncoded.length <= 120);
+  const standardDecoded = decodeTaskSubtitleMeta(standardEncoded);
+  assert.equal(standardDecoded.subtitle, 'Join @my_channel');
+  assert.equal(standardDecoded.totalSlots, 30);
+  assert.equal(standardDecoded.claimedCount, 0);
+  assert.equal(standardDecoded.creatorUid, 'player_oojwtfoum3');
+  assert.equal(standardDecoded.paidCoins, 5000);
+});
+
+test('generateGiftCodeString, encodePromoLabelMeta, and decodePromoLabelMeta support coins, eggs, and chicken gifts within Firestore limits', () => {
+  const generated = generateGiftCodeString('vip');
+  assert.ok(generated.startsWith('VIP-'));
+  assert.ok(/^[A-Z0-9_-]{3,32}$/.test(generated));
+
+  // 1. Coins reward leaves label plain text
+  const coinEnc = encodePromoLabelMeta({
+    label: 'Weekend Bonus Drop',
+    rewardType: 'coins',
+    coins: 750,
+  });
+  assert.equal(coinEnc.encodedLabel, 'Weekend Bonus Drop');
+  assert.equal(coinEnc.firestoreCoins, 750);
+  const coinDec = decodePromoLabelMeta(coinEnc.encodedLabel, coinEnc.firestoreCoins);
+  assert.equal(coinDec.rewardType, 'coins');
+  assert.equal(coinDec.coins, 750);
+  assert.equal(coinDec.eggs, 0);
+  assert.equal(coinDec.chickenQty, 0);
+  assert.equal(formatPromoRewardSummary(coinDec), '+750 coins');
+
+  // 2. Eggs reward stays <= 60 chars, sets valid firestoreCoins >= 1, and decodes pure eggs (0 bonus coins)
+  const eggEnc = encodePromoLabelMeta({
+    label: 'Super Golden Harvest Community Giveaway Event Label That Is Long',
+    rewardType: 'eggs',
+    eggs: 2500,
+    coins: 0,
+  });
+  assert.ok(eggEnc.encodedLabel.length <= 60);
+  assert.ok(eggEnc.firestoreCoins >= 1);
+  const eggDec = decodePromoLabelMeta(eggEnc.encodedLabel, eggEnc.firestoreCoins);
+  assert.equal(eggDec.rewardType, 'eggs');
+  assert.equal(eggDec.eggs, 2500);
+  assert.equal(eggDec.coins, 0);
+  assert.ok(!eggDec.label.includes('__r:'));
+  assert.equal(formatPromoRewardSummary(eggDec), '+2,500 eggs');
+
+  // 3. Chicken reward encodes breed + qty cleanly inside 60-char cap
+  const henEnc = encodePromoLabelMeta({
+    label: 'VIP Champion Hen Drop',
+    rewardType: 'chicken',
+    chickenBreed: 'australorp',
+    chickenQty: 2,
+    coins: 0,
+  });
+  assert.ok(henEnc.encodedLabel.length <= 60);
+  assert.ok(henEnc.firestoreCoins >= 1);
+  const henDec = decodePromoLabelMeta(henEnc.encodedLabel, henEnc.firestoreCoins);
+  assert.equal(henDec.rewardType, 'chicken');
+  assert.equal(henDec.chickenBreed, 'australorp');
+  assert.equal(henDec.chickenQty, 2);
+  assert.equal(henDec.coins, 0);
+  assert.equal(formatPromoRewardSummary(henDec), '+2 Australorp');
+});
+
+test('claimPromoCode awards eggs and chickens accurately and starts farm clock on first gifted hen', () => {
+  const { profile } = createDefaultProfile('player_gift1', 'Ananya', '@ananya', NOW);
+  assert.equal(profile.leghornCount, 0);
+  assert.equal(profile.eggs, 0);
+
+  const promos = [
+    {
+      code: 'EGGS-2500',
+      label: 'Egg Gift Drop',
+      coins: 0,
+      rewardType: 'eggs' as const,
+      eggs: 2500,
+      maxUses: 50,
+      usedCount: 0,
+      expiresAtMs: NOW + 86_400_000,
+      isActive: true,
+      createdAtMs: NOW,
+    },
+    {
+      code: 'HEN-GIFT1',
+      label: 'Starter Hen Gift',
+      coins: 0,
+      rewardType: 'chicken' as const,
+      chickenBreed: 'rhode' as const,
+      chickenQty: 2,
+      maxUses: 10,
+      usedCount: 0,
+      expiresAtMs: 0,
+      isActive: true,
+      createdAtMs: NOW,
+    },
+  ];
+
+  // Redeem Eggs Gift Code
+  const eggClaim = claimPromoCode(profile, 'eggs-2500', NOW + 5000, promos);
+  assert.ok(!('error' in eggClaim));
+  assert.equal(eggClaim.rewardEggs, 2500);
+  assert.equal(eggClaim.rewardCoins, 0);
+  assert.equal(eggClaim.profile.eggs, 2500);
+  assert.equal(eggClaim.profile.coins, profile.coins);
+  assert.equal(eggClaim.transaction.currency, 'eggs');
+  assert.equal(eggClaim.transaction.amount, 2500);
+
+  // Redeem Chicken Hen Gift Code when farm previously had 0 chickens -> updates lastCollectedAt
+  const henClaim = claimPromoCode(eggClaim.profile, 'HEN-GIFT1', NOW + 10_000, promos);
+  assert.ok(!('error' in henClaim));
+  assert.equal(henClaim.rewardChickenBreed, 'rhode');
+  assert.equal(henClaim.rewardChickenQty, 2);
+  assert.equal(henClaim.profile.rhodeCount, 2);
+  assert.equal(henClaim.profile.lastCollectedAt, NOW + 10_000);
+  assert.equal(henClaim.rewardSummary, '+2 Rhode Island Red');
+});
+
+test('REQUIRED_TELEGRAM_CHANNELS lists @AIRDROP_GALAXYS and @AG_PAYOUTS and membership helpers parse statuses accurately', () => {
+  assert.deepEqual(
+    REQUIRED_TELEGRAM_CHANNELS.map((c) => c.handle),
+    ['@AIRDROP_GALAXYS', '@AG_PAYOUTS'],
+  );
+  assert.deepEqual(
+    REQUIRED_TELEGRAM_CHANNELS.map((c) => c.url),
+    ['https://t.me/AIRDROP_GALAXYS', 'https://t.me/AG_PAYOUTS'],
+  );
+
+  // Numeric Telegram user ID extraction
+  assert.equal(extractTelegramNumericUserId('tg_778899123'), '778899123');
+  assert.equal(extractTelegramNumericUserId('778899123'), '778899123');
+  assert.equal(extractTelegramNumericUserId('player_guest_abc'), null);
+  assert.equal(extractTelegramNumericUserId(''), null);
+
+  // getChatMember status validation
+  assert.equal(isTelegramMemberStatusJoined('member'), true);
+  assert.equal(isTelegramMemberStatusJoined('administrator'), true);
+  assert.equal(isTelegramMemberStatusJoined('creator'), true);
+  assert.equal(isTelegramMemberStatusJoined('restricted', true), true);
+  assert.equal(isTelegramMemberStatusJoined('restricted', false), false);
+  assert.equal(isTelegramMemberStatusJoined('left'), false);
+  assert.equal(isTelegramMemberStatusJoined('kicked'), false);
+  assert.equal(isTelegramMemberStatusJoined(''), false);
+});
+
+test('ad-gate policy requires ads for startup, egg collect, gift claim, and ad cards while exempting tasks, withdraw, deposit, and miner buy', () => {
+  for (const gated of AD_GATED_ACTIONS) {
+    assert.equal(shouldRequireAdForAction(gated), true);
+  }
+  for (const exempt of AD_EXEMPT_ACTIONS) {
+    assert.equal(shouldRequireAdForAction(exempt), false);
+  }
+
+  assert.equal(shouldRequireAdForAction('startup'), true);
+  assert.equal(shouldRequireAdForAction('collect_eggs'), true);
+  assert.equal(shouldRequireAdForAction('claim_promo'), true);
+  assert.equal(shouldRequireAdForAction('ad_network'), true);
+  assert.equal(shouldRequireAdForAction('watch_ad'), true);
+
+  assert.equal(shouldRequireAdForAction('task'), false);
+  assert.equal(shouldRequireAdForAction('withdraw'), false);
+  assert.equal(shouldRequireAdForAction('deposit'), false);
+  assert.equal(shouldRequireAdForAction('buy_chicken'), false);
+
+  const { profile } = createDefaultProfile('player_adgate1', 'Dev', '@dev', NOW);
+  assert.equal(getTotalAdsWatched(profile), 0);
+  const afterOne = recordCompletedGateAd(profile);
+  assert.equal(getTotalAdsWatched(afterOne), 1);
+
+  const baseConfig = {
+    provider: 'adsgram' as const,
+    adsgramBlockId: '1234',
+    gigapubProjectId: '',
+    monetagZoneId: '998877',
+    customTitle: 'Test',
+    customDescription: 'Test',
+    customUrl: '',
+    watchSeconds: 5,
+    bannerEnabled: false,
+    bannerTitle: '',
+    bannerSubtitle: '',
+    bannerCtaText: '',
+    bannerUrl: '',
+    updatedAtMs: 0,
+  };
+  assert.equal(hasConfiguredAdNetworkSdk('adsgram', baseConfig), true);
+  assert.equal(hasConfiguredAdNetworkSdk('gigapub', baseConfig), false);
+  assert.equal(hasConfiguredAdNetworkSdk('monetag', baseConfig), true);
+  assert.equal(resolveEffectiveAdConfig(baseConfig).adsgramBlockId, '1234');
+});
 

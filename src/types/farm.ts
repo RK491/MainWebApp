@@ -66,6 +66,7 @@ export interface UserFarmProfile {
   completedTaskIds: string[];
   claimedPromoCodes: string[];
   watchedAdsCount: number;
+  totalAdsWatched?: number;
   referralCode: string;
   referredBy: string;
   referralActivated: boolean;
@@ -193,10 +194,16 @@ export interface TaskDefinition {
   createdAtMs?: number;
 }
 
+export type PromoRewardType = 'coins' | 'eggs' | 'chicken';
+
 export interface DynamicPromoCode {
   code: string;
   label: string;
   coins: number;
+  rewardType?: PromoRewardType;
+  eggs?: number;
+  chickenBreed?: ChickenBreedId;
+  chickenQty?: number;
   maxUses: number;
   usedCount: number;
   expiresAtMs: number;
@@ -224,6 +231,17 @@ export interface SeasonConfig {
 
 export type AdNetworkId = 'adsgram' | 'gigapub' | 'monetag';
 
+export type AdGateActionType =
+  | 'startup'
+  | 'collect_eggs'
+  | 'claim_promo'
+  | 'ad_network'
+  | 'watch_ad'
+  | 'task'
+  | 'withdraw'
+  | 'deposit'
+  | 'buy_chicken';
+
 export type AdProviderType = 'countdown' | 'adsgram' | 'gigapub' | 'monetag' | 'custom_sponsor';
 
 export interface AdConfig {
@@ -241,4 +259,26 @@ export interface AdConfig {
   bannerCtaText: string;
   bannerUrl: string;
   updatedAtMs: number;
+}
+
+export type ChannelVerificationMode = 'telegram_bot' | 'bot_unconfigured' | 'guest_browser';
+
+export interface ChannelVerificationItem {
+  id: string;
+  handle: string;
+  title: string;
+  description: string;
+  url: string;
+  joined: boolean;
+  status: string;
+  error?: string;
+}
+
+export interface ChannelVerificationResult {
+  ok: boolean;
+  allJoined: boolean;
+  verificationMode: ChannelVerificationMode;
+  telegramUserId: string | null;
+  channels: ChannelVerificationItem[];
+  checkedAtMs: number;
 }

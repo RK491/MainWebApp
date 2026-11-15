@@ -1,15 +1,27 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, ExternalLink, Play, Sparkles, Timer, X } from 'lucide-react';
+import { CheckCircle2, ExternalLink, Gift, Play, Sparkles, Timer, X } from 'lucide-react';
 import type { AdConfig } from '../types/farm';
 import clayHenMascot from '../assets/images/clay_hen_mascot_1794678825872.jpg';
-import { ChickenSprite, CoinIcon } from './GameIcons';
+import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
+
+export type ModalAdActionKind =
+  | 'startup'
+  | 'collect_eggs'
+  | 'claim_promo'
+  | 'ad_network'
+  | 'watch_ad';
 
 interface RewardedAdModalProps {
   adConfig: AdConfig;
   watchedCount: number;
+  actionKind?: ModalAdActionKind;
   networkLabel?: string | null;
   rewardCoins?: number | null;
+  pendingEggs?: number | null;
+  promoCode?: string | null;
+  promoRewardSummary?: string | null;
   fallbackNotice?: string | null;
+  mandatory?: boolean;
   onComplete: () => void;
   onClose: () => void;
 }
@@ -17,9 +29,14 @@ interface RewardedAdModalProps {
 export function RewardedAdModal({
   adConfig,
   watchedCount,
+  actionKind = 'watch_ad',
   networkLabel,
   rewardCoins,
+  pendingEggs,
+  promoCode,
+  promoRewardSummary,
   fallbackNotice,
+  mandatory = false,
   onComplete,
   onClose,
 }: RewardedAdModalProps) {
@@ -40,12 +57,58 @@ export function RewardedAdModal({
   const readyToClaim = secondsLeft === 0;
   const sponsorUrl = adConfig.customUrl.trim();
   const hasCoinReward = typeof rewardCoins === 'number' && rewardCoins > 0;
+  const safeEggs = Math.max(0, Math.floor(Number(pendingEggs ?? 0)));
 
   const handleClaim = () => {
     if (!readyToClaim || claimed) return;
     setClaimed(true);
     onComplete();
   };
+
+  const badgeText = (() => {
+    if (actionKind === 'startup') return 'App Launch Ad';
+    if (actionKind === 'collect_eggs') return 'Egg Harvest Ad';
+    if (actionKind === 'claim_promo') return 'Gift Code Ad';
+    if (networkLabel) return `${networkLabel} Reward`;
+    return `Sponsored Reward (${watchedCount + 1}/10)`;
+  })();
+
+  const headline = (() => {
+    if (actionKind === 'startup') return adConfig.customTitle || 'Welcome to Alpha Gram';
+    if (actionKind === 'collect_eggs') return 'Unlock Egg Harvest';
+    if (actionKind === 'claim_promo') return `Unlock Gift ${promoCode || 'Code'}`;
+    if (networkLabel) return `${networkLabel} Daily Ad`;
+    return adConfig.customTitle || 'Alpha Gram Sponsor Showcase';
+  })();
+
+  const description = (() => {
+    if (actionKind === 'startup') {
+      return 'Watch this short ad to enter your farm & start mining.';
+    }
+    if (actionKind === 'collect_eggs') {
+      return `Complete the ad timer to collect +${safeEggs.toLocaleString()} eggs into your basket.`;
+    }
+    if (actionKind === 'claim_promo') {
+      return `Complete the ad timer to claim ${promoCode || 'your gift code'}${
+        promoRewardSummary ? ` (${promoRewardSummary})` : ''
+      }.`;
+    }
+    if (hasCoinReward) {
+      return `Watch until the timer ends to earn +${rewardCoins} coins & +1/10 progress toward a free White Leghorn.`;
+    }
+    return (
+      adConfig.customDescription ||
+      'Watch until the timer ends to earn +1 progress toward a free White Leghorn.'
+    );
+  })();
+
+  const completeButtonLabel = (() => {
+    if (actionKind === 'startup') return 'Continue to Alpha Gram';
+    if (actionKind === 'collect_eggs') return `Collect +${safeEggs.toLocaleString()} Eggs`;
+    if (actionKind === 'claim_promo') return `Claim Gift (${promoCode || 'Reward'})`;
+    if (hasCoinReward) return `Claim +${rewardCoins} Coins`;
+    return `Claim Ad Step (${Math.min(10, watchedCount + 1)}/10)`;
+  })();
 
   return (
     <div
@@ -58,20 +121,19 @@ export function RewardedAdModal({
         <div className="flex items-center justify-between gap-2">
           <div className="clay-card-warm !rounded-xl inline-flex items-center gap-1.5 text-xs font-extrabold text-amber-800 dark:text-amber-300 px-3 py-1.5">
             <Sparkles className="w-3.5 h-3.5" />
-            <span>
-              {networkLabel
-                ? `${networkLabel} Reward`
-                : `Sponsored Reward (${watchedCount + 1}/10)`}
-            </span>
+            <span>{badgeText}</span>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close ad"
-            className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center text-stone-600 dark:text-stone-300"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          {!mandatory && (
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Cancel ad without claiming"
+              title="Closing early cancels the reward"
+              className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center text-stone-600 dark:text-stone-300"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
         </div>
 
         <div className="clay-card-mint !rounded-2xl p-4 text-center space-y-2.5">
@@ -91,16 +153,25 @@ export function RewardedAdModal({
             </div>
           </div>
           <h2 id="rewarded-ad-title" className="text-base font-extrabold text-stone-900 dark:text-stone-100">
-            {networkLabel
-              ? `${networkLabel} Daily Ad`
-              : adConfig.customTitle || 'Alpha Gram Sponsor Showcase'}
+            {headline}
           </h2>
           <p className="text-xs text-stone-600 dark:text-stone-300 leading-relaxed">
-            {hasCoinReward
-              ? `Watch until the timer ends to earn +${rewardCoins} coins & +1/10 progress toward a free White Leghorn.`
-              : adConfig.customDescription ||
-                'Watch until the timer ends to earn +1 progress toward a free White Leghorn.'}
+            {description}
           </p>
+
+          {actionKind === 'collect_eggs' && safeEggs > 0 && (
+            <div className="inline-flex items-center gap-1.5 rounded-xl bg-amber-100/80 dark:bg-amber-950/60 border border-amber-300/70 dark:border-amber-700/50 px-3 py-1 text-xs font-extrabold text-amber-800 dark:text-amber-300">
+              <EggIcon className="w-4 h-4" />
+              <span className="font-mono-num">+{safeEggs.toLocaleString()} eggs</span>
+            </div>
+          )}
+
+          {actionKind === 'claim_promo' && promoRewardSummary && (
+            <div className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-100/80 dark:bg-emerald-950/60 border border-emerald-300/70 dark:border-emerald-700/50 px-3 py-1 text-xs font-extrabold text-emerald-800 dark:text-emerald-300">
+              <Gift className="w-4 h-4" />
+              <span>{promoRewardSummary}</span>
+            </div>
+          )}
 
           {hasCoinReward && (
             <div className="inline-flex items-center gap-1.5 rounded-xl bg-amber-100/80 dark:bg-amber-950/60 border border-amber-300/70 dark:border-amber-700/50 px-3 py-1 text-xs font-extrabold text-amber-800 dark:text-amber-300">
@@ -134,18 +205,23 @@ export function RewardedAdModal({
           <div className="flex items-center justify-between text-xs font-bold text-stone-600 dark:text-stone-300">
             <span className="inline-flex items-center gap-1">
               <Timer className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
-              <span>{readyToClaim ? 'Reward unlocked!' : 'Reward timer'}</span>
+              <span>{readyToClaim ? 'Ad completed!' : 'Complete ad to unlock'}</span>
             </span>
             <span className="font-mono-num text-stone-900 dark:text-stone-100">
               {readyToClaim ? 'Ready' : `${secondsLeft}s`}
             </span>
           </div>
-          <div className="h-3 rounded-full clay-inset p-0.5 overflow-hidden">
+          <div className="h-3 rounded-xl clay-inset p-0.5 overflow-hidden">
             <div
-              className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-emerald-500 transition-all duration-500 clay-shimmer-bar"
+              className="h-full rounded-lg bg-gradient-to-r from-emerald-400 to-emerald-500 transition-all duration-500 clay-shimmer-bar"
               style={{ width: `${progressPct}%` }}
             />
           </div>
+          {!mandatory && !readyToClaim && (
+            <p className="text-[10px] font-semibold text-stone-400 dark:text-stone-500 text-center">
+              Closing early cancels this claim until the ad completes.
+            </p>
+          )}
         </div>
 
         <button
@@ -161,11 +237,7 @@ export function RewardedAdModal({
           {readyToClaim ? (
             <>
               <CheckCircle2 className="w-4 h-4" />
-              <span>
-                {hasCoinReward
-                  ? `Claim +${rewardCoins} Coins`
-                  : `Claim Ad Step (${Math.min(10, watchedCount + 1)}/10)`}
-              </span>
+              <span>{completeButtonLabel}</span>
             </>
           ) : (
             <>

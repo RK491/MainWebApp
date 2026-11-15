@@ -1,26 +1,45 @@
 import { useState } from 'react';
-import { ArrowLeft, CheckCircle2, ChevronRight, ClipboardPaste, ShieldCheck } from 'lucide-react';
+import {
+  ArrowLeft,
+  CheckCircle2,
+  ChevronRight,
+  ClipboardPaste,
+  Lock,
+  Play,
+  ShieldCheck,
+  Tv,
+} from 'lucide-react';
 import {
   eggsToGram,
   eggsToUsd,
   getWithdrawalStatusMeta,
+  getWithdrawAdGateStatus,
   MIN_WITHDRAW_EGGS,
   validateWithdrawalInput,
 } from '../game/economy';
-import type { UserFarmProfile, WithdrawalOrder } from '../types/farm';
+import type { ChannelVerificationResult, UserFarmProfile, WithdrawalOrder } from '../types/farm';
+import { ChannelCheckCard } from './ChannelCheckPanel';
 import { EggIcon } from './GameIcons';
 
 interface WithdrawViewProps {
   profile: UserFarmProfile;
   withdrawals: WithdrawalOrder[];
+  channelVerification?: ChannelVerificationResult | null;
+  checkingChannels?: boolean;
+  onCheckChannels?: () => void;
   onBack: () => void;
+  onGoToTasks?: () => void;
   onConfirmWithdraw: (eggsAmount: number, walletAddress: string, memo: string) => void;
 }
 
 export function WithdrawView({
   profile,
   withdrawals,
+  channelVerification = null,
+  checkingChannels = false,
+  onCheckChannels,
   onBack,
+  onGoToTasks,
   onConfirmWithdraw,
 }: WithdrawViewProps) {
   const [walletAddress, setWalletAddress] = useState('');
@@ -33,6 +52,10 @@ export function WithdrawView({
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
+  const adGate = getWithdrawAdGateStatus(profile);
+  const adGatePct = Math.min(100, Math.round((adGate.watched / adGate.required) * 100));
+  const channelGateBlocked =
+    channelVerification?.verificationMode === 'telegram_bot' && !channelVerification.allJoined;
   const numericEggs = Math.max(0, Math.floor(Number(amountInput) || 0));
   const receiveGram = eggsToGram(numericEggs).toFixed(4);
   const receiveUsd = eggsToUsd(numericEggs).toFixed(4);
@@ -55,6 +78,10 @@ export function WithdrawView({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setSuccessMsg(null);
+    if (channelGateBlocked) {
+      setErrorMsg('Join @AIRDROP_GALAXYS & @AG_PAYOUTS and tap Check Channels before withdrawing.');
+      return;
+    }
     const err = validateWithdrawalInput(profile, numericEggs, walletAddress);
     if (err) {
       setErrorMsg(err);
@@ -120,6 +147,85 @@ export function WithdrawView({
           </span>
         </div>
       </div>
+
+      {/* 30 Ads Watch Requirement Gate */}
+      <div
+        className={`clay-card p-4 space-y-2.5 border ${
+          adGate.unlocked
+            ? 'border-emerald-200/80 dark:border-emerald-800/60'
+            : 'border-amber-200/90 dark:border-amber-800/60'
+        }`}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="w-9 h-9 rounded-xl clay-icon-well flex items-center justify-center shrink-0">
+              {adGate.unlocked ? (
+                <Tv className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+              ) : (
+                <Lock className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+              )}
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs font-extrabold text-stone-900 dark:text-stone-100">
+                Withdraw Requirement: Watch {adGate.required} Ads
+              </div>
+              <div className="text-[11px] font-semibold text-stone-500 dark:text-stone-400">
+                {adGate.unlocked
+                  ? 'Requirement met — withdrawals unlocked'
+                  : `Watch ${adGate.remaining} more ad${adGate.remaining === 1 ? '' : 's'} to unlock withdrawals`}
+              </div>
+            </div>
+          </div>
+          <span
+            className={`rounded-lg border px-2 py-0.5 text-xs font-extrabold font-mono-num shrink-0 ${
+              adGate.unlocked
+                ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                : 'bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800/70 text-amber-700 dark:text-amber-300'
+            }`}
+          >
+            {Math.min(adGate.watched, adGate.required)}/{adGate.required}
+          </span>
+        </div>
+
+        <div
+          role="progressbar"
+          aria-label={`${adGate.watched} of ${adGate.required} ads watched`}
+          aria-valuenow={Math.min(adGate.watched, adGate.required)}
+          aria-valuemin={0}
+          aria-valuemax={adGate.required}
+          className="h-2.5 w-full rounded-lg clay-inset overflow-hidden"
+        >
+          <div
+            className={`h-full rounded-lg transition-all duration-300 ${
+              adGate.unlocked
+                ? 'bg-gradient-to-r from-emerald-400 to-emerald-500'
+                : 'bg-gradient-to-r from-amber-400 to-orange-500'
+            }`}
+            style={{ width: `${adGatePct}%` }}
+          />
+        </div>
+
+        {!adGate.unlocked && onGoToTasks && (
+          <button
+            type="button"
+            onClick={onGoToTasks}
+            className="clay-btn clay-btn-amber w-full min-h-[40px] rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5"
+          >
+            <Play className="w-3.5 h-3.5 fill-current" />
+            <span>Watch Ads in Tasks ({adGate.watched}/{adGate.required})</span>
+          </button>
+        )}
+      </div>
+
+      {/* Required Channels Verification Gate (@AIRDROP_GALAXYS & @AG_PAYOUTS) */}
+      {onCheckChannels && (
+        <ChannelCheckCard
+          variant="compact"
+          verification={channelVerification}
+          checking={checkingChannels}
+          onCheckChannels={onCheckChannels}
+        />
+      )}
 
       {/* Withdraw Form */}
       <form
@@ -246,9 +352,18 @@ export function WithdrawView({
 
         <button
           type="submit"
-          className="clay-btn clay-btn-sky w-full min-h-[50px] rounded-2xl font-extrabold text-sm"
+          disabled={!adGate.unlocked || channelGateBlocked}
+          className={`clay-btn w-full min-h-[50px] rounded-2xl font-extrabold text-sm ${
+            adGate.unlocked && !channelGateBlocked
+              ? 'clay-btn-sky'
+              : 'clay-inset text-stone-500 dark:text-stone-400 cursor-not-allowed shadow-none'
+          }`}
         >
-          Withdraw
+          {!adGate.unlocked
+            ? `Watch ${adGate.remaining} More Ad${adGate.remaining === 1 ? '' : 's'} to Withdraw`
+            : channelGateBlocked
+              ? 'Join Required Channels to Withdraw'
+              : 'Withdraw'}
         </button>
       </form>
 
