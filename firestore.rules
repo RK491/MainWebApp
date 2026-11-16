@@ -17,6 +17,10 @@ service cloud.firestore {
       return id is string && id.size() >= 3 && id.size() <= 64 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isAdminActorId(id) {
+      return id in ['tg_7508911853', '7508911853'];
+    }
+
     function isBoundedStringList(arr, maxLen) {
       return arr is list && arr.size() <= maxLen && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= 64));
     }
@@ -386,9 +390,28 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidBannedUser(data, playerId) {
+      return data.keys().hasAll([
+          'uid', 'displayName', 'handle', 'reason', 'bannedBy', 'bannedAtMs', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'displayName', 'handle', 'reason', 'bannedBy', 'bannedAtMs', 'createdAt'
+        ])
+        && isValidId(data.uid)
+        && data.uid == playerId
+        && !isAdminActorId(data.uid)
+        && data.displayName is string && data.displayName.size() <= 60
+        && data.handle is string && data.handle.size() <= 40
+        && data.reason is string && data.reason.size() <= 160
+        && isValidId(data.bannedBy)
+        && isAdminActorId(data.bannedBy)
+        && data.bannedAtMs is number && data.bannedAtMs >= 0
+        && data.createdAt is timestamp;
+    }
+
     match /players/{playerId} {
       allow get: if isValidId(playerId);
-      allow list: if request.query.limit != null && request.query.limit <= 10;
+      allow list: if request.query.limit != null && request.query.limit <= 50;
       allow create: if isValidId(playerId)
         && isValidPlayerFarmProfile(incoming(), playerId)
         && incoming().createdAt == request.time
@@ -456,7 +479,8 @@ service cloud.firestore {
           && isValidWithdrawal(incoming(), playerId)
           && incoming().status == 'pending'
           && incoming().createdAt == request.time
-          && exists(/databases/$(database)/documents/players/$(playerId));
+          && exists(/databases/$(database)/documents/players/$(playerId))
+          && !exists(/databases/$(database)/documents/banned_users/$(playerId));
         allow update: if isValidId(playerId)
           && isValidId(withdrawalId)
           && isValidWithdrawal(incoming(), playerId)
@@ -521,7 +545,8 @@ service cloud.firestore {
         && incoming().status == 'pending'
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
-        && exists(/databases/$(database)/documents/players/$(incoming().userId));
+        && exists(/databases/$(database)/documents/players/$(incoming().userId))
+        && !exists(/databases/$(database)/documents/banned_users/$(incoming().userId));
       allow update: if isValidId(withdrawalId)
         && isValidWithdrawRequest(incoming(), withdrawalId)
         && existing().status == 'pending'
@@ -607,6 +632,20 @@ service cloud.firestore {
           && incoming().updatedAt == request.time)
       );
       allow delete: if false;
+    }
+
+    match /banned_users/{playerId} {
+      allow get: if isValidId(playerId);
+      allow list: if request.query.limit != null && request.query.limit <= 100;
+      allow create: if isValidId(playerId)
+        && isValidBannedUser(incoming(), playerId)
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(playerId)
+        && isValidBannedUser(incoming(), playerId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'handle', 'reason', 'bannedBy', 'bannedAtMs']);
+      allow delete: if isValidId(playerId);
     }
   }
 }

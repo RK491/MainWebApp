@@ -18,6 +18,7 @@ import {
   calculateProductionRate,
   calculateReferralBonusEggs,
   calculateReferralEggCommission,
+  canBanPlayerId,
   claimAchievement,
   claimAdNetworkReward,
   claimDailyStreak,
@@ -67,10 +68,12 @@ import {
   isFeedBoosterActive,
   isGoldenEggReady,
   isTelegramMemberStatusJoined,
+  matchesBannedUserRecord,
   MAX_DEPOSIT_COINS,
   mergeTaskDefinitions,
   MIN_DEPOSIT_COINS,
   MIN_WITHDRAW_ADS_WATCHED,
+  normalizePlayerBanId,
   normalizeTelegramChannelEntry,
   normalizeTelegramChannelHandle,
   parseAdConfigTemplate,
@@ -105,7 +108,14 @@ import {
   calculateMsUntilBasketFull,
   shouldTriggerBasketFullNotification,
 } from '../utils/notifications';
-import { getTelegramChannelUrl, resolveTelegramUserIdentity } from '../utils/telegram';
+import {
+  DEFAULT_TELEGRAM_BOT_USERNAME,
+  DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME,
+  detectTelegramBotConfig,
+  getTelegramChannelUrl,
+  normalizeTelegramBotUsername,
+  resolveTelegramUserIdentity,
+} from '../utils/telegram';
 import { isValidLanguageCode, LANGUAGE_OPTIONS, t } from '../utils/i18n';
 import {
   THEME_STORAGE_KEY,
@@ -117,6 +127,8 @@ import {
 import {
   buildPersonalReferralUrl,
   buildReferralShareData,
+  buildTelegramDirectShareUrl,
+  getReferralStartId,
   shareReferralLink,
 } from '../utils/referralShare';
 import {
@@ -1234,22 +1246,40 @@ test('buildInvitedFriendsList sorts newest-first, matches handles safely without
   assert.equal(byId.u_legacy.eggsGenerated, 18);
 });
 
-test('referralShare builds personal referral URL, invokes Web Share API, and handles cancel/fallback cleanly', async () => {
-  const url = buildPersonalReferralUrl('CL-778899', 'https://chickenland.app/');
-  assert.equal(url, 'https://chickenland.app/?ref=CL-778899');
-  assert.equal(buildPersonalReferralUrl('', 'https://chickenland.app/'), 'https://chickenland.app');
+test('referralShare builds Telegram Mini App t.me startapp URL with auto-detected bot and ID, invokes Web Share API, and handles cancel/fallback cleanly', async () => {
+  assert.equal(getReferralStartId('tg_7508911853', 'CL-911853'), '7508911853');
+  assert.equal(getReferralStartId('player_abc123', 'CL-ABC123'), 'player_abc123');
+  assert.equal(getReferralStartId('', 'CL-911853'), 'CL-911853');
 
-  const payload = buildReferralShareData('CL-778899', url, 'Rahul');
+  const url = buildPersonalReferralUrl('7508911853', {
+    botUsername: 'AlphaGramAiBot',
+    appShortName: 'app',
+  });
+  assert.equal(url, 'https://t.me/AlphaGramAiBot/app?startapp=7508911853');
+  assert.equal(
+    buildPersonalReferralUrl('player_abc123'),
+    `https://t.me/${DEFAULT_TELEGRAM_BOT_USERNAME}/${DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME}?startapp=player_abc123`,
+  );
+  assert.equal(
+    buildPersonalReferralUrl('', { botUsername: '@CustomFarmBot', appShortName: 'game' }),
+    'https://t.me/CustomFarmBot/game',
+  );
+
+  const tgDirectShare = buildTelegramDirectShareUrl(url, '7508911853', 'Rahul');
+  assert.ok(tgDirectShare.startsWith('https://t.me/share/url?url='));
+  assert.ok(tgDirectShare.includes(encodeURIComponent(url)));
+
+  const payload = buildReferralShareData('7508911853', url, 'Rahul');
   assert.equal(payload.title, 'Join Alpha Gram!');
   assert.equal(payload.url, url);
-  assert.ok(payload.text?.includes('CL-778899'));
+  assert.ok(payload.text?.includes('7508911853'));
   assert.ok(payload.text?.includes('+1,000'));
 
   // 1. Web Share API succeeds
   let sharedPayload: ShareData | null = null;
   let clipboardCalls = 0;
   const okOutcome = await shareReferralLink({
-    referralCode: 'CL-778899',
+    referralCode: '7508911853',
     referralUrl: url,
     referrerName: 'Rahul',
     nav: {
@@ -2384,3 +2414,74 @@ test('formatAdConfigTemplate and parseAdConfigTemplate parse KEY=VALUE, VITE_* a
   assert.deepEqual(emptyParsed.next, initialDraft);
   assert.deepEqual(emptyParsed.appliedKeys, []);
 });
+
+test('user management ban helpers normalize Telegram IDs, protect Owner Admin ID, and match banned records', () => {
+  assert.equal(normalizePlayerBanId('987654321'), 'tg_987654321');
+  assert.equal(normalizePlayerBanId('TG_987654321'), 'tg_987654321');
+  assert.equal(normalizePlayerBanId('player_abc123'), 'player_abc123');
+  assert.equal(normalizePlayerBanId('bad id!'), null);
+  assert.equal(normalizePlayerBanId(''), null);
+
+  const validBan = canBanPlayerId('987654321');
+  assert.deepEqual(validBan, { ok: true, canonicalId: 'tg_987654321' });
+
+  const guestBan = canBanPlayerId('player_guest_99');
+  assert.deepEqual(guestBan, { ok: true, canonicalId: 'player_guest_99' });
+
+  const adminNumericBlock = canBanPlayerId(PRIMARY_ADMIN_TELEGRAM_ID);
+  assert.equal(adminNumericBlock.ok, false);
+
+  const adminPrefixedBlock = canBanPlayerId(`tg_${PRIMARY_ADMIN_TELEGRAM_ID}`);
+  assert.equal(adminPrefixedBlock.ok, false);
+
+  assert.equal(matchesBannedUserRecord('tg_987654321', { uid: 'tg_987654321' }), true);
+  assert.equal(matchesBannedUserRecord('987654321', { uid: 'tg_987654321' }), true);
+  assert.equal(matchesBannedUserRecord('tg_987654321', { uid: '987654321' }), true);
+  assert.equal(matchesBannedUserRecord('player_guest_99', { uid: 'player_guest_99' }), true);
+  assert.equal(matchesBannedUserRecord('tg_111111111', { uid: 'tg_987654321' }), false);
+});
+
+test('detectTelegramBotConfig auto-detects bot username & mini app short name across URL, referrer, server getMe, env, and startapp params', () => {
+  assert.equal(normalizeTelegramBotUsername('@AlphaGramAiBot'), 'AlphaGramAiBot');
+  assert.equal(normalizeTelegramBotUsername('https://t.me/AlphaGramAiBot/app'), 'AlphaGramAiBot');
+
+  const fromUrl = detectTelegramBotConfig({
+    search: '?bot=DetectedUrlBot&app=play',
+    serverBotUsername: 'ServerBot',
+  });
+  assert.equal(fromUrl.botUsername, 'DetectedUrlBot');
+  assert.equal(fromUrl.appShortName, 'play');
+  assert.equal(fromUrl.source, 'url');
+
+  const fromReferrer = detectTelegramBotConfig({
+    referrer: 'https://t.me/AlphaGramAiBot/farm?startapp=7508911853',
+  });
+  assert.equal(fromReferrer.botUsername, 'AlphaGramAiBot');
+  assert.equal(fromReferrer.appShortName, 'farm');
+  assert.equal(fromReferrer.source, 'referrer');
+
+  const fromServer = detectTelegramBotConfig({
+    serverBotUsername: 'AlphaGramAiBot',
+    serverAppShortName: 'app',
+    envBotUsername: 'FallbackEnvBot',
+  });
+  assert.equal(fromServer.botUsername, 'AlphaGramAiBot');
+  assert.equal(fromServer.appShortName, 'app');
+  assert.equal(fromServer.source, 'server');
+
+  const fromDefault = detectTelegramBotConfig({});
+  assert.equal(fromDefault.botUsername, 'AlphaGramAiBot');
+  assert.equal(fromDefault.appShortName, 'app');
+  assert.equal(fromDefault.source, 'default');
+
+  const startAppFromSearch = resolveTelegramUserIdentity({
+    search: '?tgWebAppStartParam=7508911853',
+  });
+  assert.equal(startAppFromSearch.startParam, '7508911853');
+
+  const startAppFromHash = resolveTelegramUserIdentity({
+    hash: '#tgWebAppStartParam=player_xyz987',
+  });
+  assert.equal(startAppFromHash.startParam, 'player_xyz987');
+});
+

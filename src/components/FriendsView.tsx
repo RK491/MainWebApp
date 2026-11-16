@@ -21,9 +21,15 @@ import {
 import type { ReferralRecord, TransactionEntry, UserFarmProfile } from '../types/farm';
 import {
   buildPersonalReferralUrl,
+  buildTelegramDirectShareUrl,
   copyTextWithFallback,
+  getReferralStartId,
   shareReferralLink,
 } from '../utils/referralShare';
+import {
+  detectBrowserTelegramBotConfig,
+  notifyTelegramOpenLink,
+} from '../utils/telegram';
 import clayHenMascot from '../assets/images/clay_hen_mascot_1794678825872.jpg';
 import clayEggBasket from '../assets/images/clay_egg_basket_1794678826026.jpg';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
@@ -60,6 +66,8 @@ interface FriendsViewProps {
   profile: UserFarmProfile;
   referrals: ReferralRecord[];
   transactions?: TransactionEntry[];
+  botUsername?: string;
+  appShortName?: string;
   onClaimReferralMilestone?: (targetActive: number) => void;
 }
 
@@ -67,6 +75,8 @@ export function FriendsView({
   profile,
   referrals,
   transactions = [],
+  botUsername,
+  appShortName,
   onClaimReferralMilestone,
 }: FriendsViewProps) {
   const [feedback, setFeedback] = useState<'shared' | 'copied-link' | 'copied-code' | 'error' | null>(null);
@@ -94,9 +104,32 @@ export function FriendsView({
     }, 2000);
   };
 
+  const botConfig = useMemo(
+    () =>
+      detectBrowserTelegramBotConfig({
+        serverBotUsername: botUsername,
+        serverAppShortName: appShortName,
+      }),
+    [appShortName, botUsername],
+  );
+
+  const referralStartId = useMemo(
+    () => getReferralStartId(profile.uid, profile.referralCode),
+    [profile.referralCode, profile.uid],
+  );
+
   const referralUrl = useMemo(
-    () => buildPersonalReferralUrl(profile.referralCode),
-    [profile.referralCode],
+    () =>
+      buildPersonalReferralUrl(referralStartId, {
+        botUsername: botConfig.botUsername,
+        appShortName: botConfig.appShortName,
+      }),
+    [botConfig.appShortName, botConfig.botUsername, referralStartId],
+  );
+
+  const telegramShareUrl = useMemo(
+    () => buildTelegramDirectShareUrl(referralUrl, referralStartId, profile.displayName),
+    [profile.displayName, referralStartId, referralUrl],
   );
 
   const handleCopy = async (text: string, which: 'copied-link' | 'copied-code') => {
@@ -109,7 +142,7 @@ export function FriendsView({
     setIsSharing(true);
     try {
       const outcome = await shareReferralLink({
-        referralCode: profile.referralCode,
+        referralCode: referralStartId,
         referralUrl,
         referrerName: profile.displayName,
       });
@@ -224,14 +257,19 @@ export function FriendsView({
         </div>
 
         <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-stone-500 dark:text-stone-400">Your Referral Link</span>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="text-xs font-bold text-stone-500 dark:text-stone-400">Your Referral Link</span>
+              <span className="px-1.5 py-0.5 rounded-md bg-sky-50 dark:bg-sky-950/50 border border-sky-200 dark:border-sky-800/70 text-[10px] font-extrabold text-sky-700 dark:text-sky-300 truncate">
+                @{botConfig.botUsername}
+              </span>
+            </div>
             <button
               type="button"
-              onClick={() => void handleCopy(profile.referralCode, 'copied-code')}
-              className="text-xs font-extrabold font-mono-num text-emerald-700 dark:text-emerald-400 hover:underline flex items-center gap-1 cursor-pointer"
+              onClick={() => void handleCopy(referralStartId, 'copied-code')}
+              className="text-xs font-extrabold font-mono-num text-emerald-700 dark:text-emerald-400 hover:underline flex items-center gap-1 cursor-pointer shrink-0"
             >
-              <span>{profile.referralCode}</span>
+              <span>ID: {referralStartId}</span>
               {feedback === 'copied-code' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
             </button>
           </div>
@@ -255,19 +293,34 @@ export function FriendsView({
         </div>
 
         <div className="space-y-1.5">
-          <button
-            type="button"
-            disabled={isSharing}
-            onClick={() => void handleShare()}
-            className="clay-btn clay-btn-amber w-full min-h-[48px] rounded-2xl disabled:opacity-60 font-extrabold text-sm flex items-center justify-center gap-2"
-          >
-            {feedback === 'shared' || feedback === 'copied-link' ? (
-              <Check className="w-4 h-4" />
-            ) : (
-              <Share2 className="w-4 h-4" />
-            )}
-            <span>{shareButtonLabel}</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={isSharing}
+              onClick={() => void handleShare()}
+              className="clay-btn clay-btn-amber flex-1 min-h-[48px] rounded-2xl disabled:opacity-60 font-extrabold text-sm flex items-center justify-center gap-2"
+            >
+              {feedback === 'shared' || feedback === 'copied-link' ? (
+                <Check className="w-4 h-4" />
+              ) : (
+                <Share2 className="w-4 h-4" />
+              )}
+              <span>{shareButtonLabel}</span>
+            </button>
+            <a
+              href={telegramShareUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => {
+                if (notifyTelegramOpenLink(telegramShareUrl)) {
+                  e.preventDefault();
+                }
+              }}
+              className="clay-btn clay-btn-sky min-h-[48px] px-4 rounded-2xl font-extrabold text-sm inline-flex items-center justify-center gap-1.5 shrink-0"
+            >
+              <span>Telegram</span>
+            </a>
+          </div>
           {feedback === 'error' && (
             <p className="text-center text-xs font-semibold text-rose-600 dark:text-rose-400">
               Unable to share automatically — select and copy your referral link above.

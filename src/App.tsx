@@ -2,7 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDownLeft,
   ArrowUpRight,
+  Ban,
+  Check,
   CheckCircle2,
+  Copy,
   Crown,
   Package,
   Sparkles,
@@ -41,6 +44,7 @@ import {
   formatChannelsHandleSummary,
   formatPromoRewardSummary,
   getActiveRequiredChannels,
+  isAdminPlayerId,
   recordCompletedGateAd,
   reinvestEggs,
   upgradeBasket,
@@ -58,6 +62,7 @@ import {
 } from './game/farmArtifacts';
 import {
   applyReferralCodeInFirestore,
+  banPlayerInFirestore,
   commitPlayerMutation,
   createCustomTaskInFirestore,
   createPaidCustomTaskInFirestore,
@@ -70,6 +75,7 @@ import {
   getStoredPlayerId,
   incrementPromoCodeUseInFirestore,
   incrementTaskClaimCountInFirestore,
+  loadCachedBanRecord,
   loadCachedPlayerProfile,
   resolveActivePlayerIdentity,
   reviewWithdrawalInFirestore,
@@ -78,18 +84,23 @@ import {
   saveSeasonConfigInFirestore,
   subscribeToAdConfig,
   subscribeToAllWithdrawRequests,
+  subscribeToBannedUsers,
   subscribeToChannelsConfig,
   subscribeToCustomTasks,
   subscribeToLeaderboard,
   subscribeToPlayer,
+  subscribeToPlayerBanStatus,
   subscribeToPromoCodes,
+  subscribeToRecentPlayers,
   subscribeToSeasonConfig,
   toggleCustomTaskInFirestore,
   togglePromoCodeInFirestore,
+  unbanPlayerInFirestore,
 } from './services/farmStore';
 import type {
   AdConfig,
   AdNetworkId,
+  BannedUserRecord,
   ChannelsConfig,
   ChannelVerificationResult,
   ChickenBreedId,
@@ -140,9 +151,12 @@ import {
   syncAmbientMusic,
 } from './utils/sound';
 import {
+  cacheDetectedTelegramBotConfig,
+  detectBrowserTelegramBotConfig,
   getTelegramChannelUrl,
   getTelegramInitData,
   safeFetchJson,
+  type TelegramBotConfig,
   triggerHapticFeedback,
 } from './utils/telegram';
 import { applyThemeToDocument, getStoredTheme, setStoredTheme, type ThemeMode } from './utils/theme';
@@ -199,6 +213,9 @@ export default function App() {
   const [depositAddress, setDepositAddress] = useState<string>(DEFAULT_GRAM_DEPOSIT_ADDRESS);
   const [gramJettonMaster, setGramJettonMaster] = useState<string>(DEFAULT_GRAM_JETTON_MASTER);
   const [payoutChannel, setPayoutChannel] = useState<string>('@AG_PAYOUTS');
+  const [telegramBotConfig, setTelegramBotConfig] = useState<TelegramBotConfig>(() =>
+    detectBrowserTelegramBotConfig(),
+  );
   const [transactions, setTransactions] = useState<TransactionEntry[]>(initialSeed.transactions);
   const [referralTransactions, setReferralTransactions] = useState<TransactionEntry[]>([]);
   const [deposits, setDeposits] = useState<DepositOrder[]>([]);
@@ -211,6 +228,16 @@ export default function App() {
   const [allWithdrawRequests, setAllWithdrawRequests] = useState<WithdrawRequestRecord[]>([]);
   const [promoCodes, setPromoCodes] = useState<DynamicPromoCode[]>([]);
   const [seasonConfig, setSeasonConfig] = useState<SeasonConfig>(() => createDefaultSeasonConfig());
+  const [recentPlayers, setRecentPlayers] = useState<UserFarmProfile[]>([]);
+  const [bannedUsers, setBannedUsers] = useState<BannedUserRecord[]>([]);
+  const [banRecord, setBanRecord] = useState<BannedUserRecord | null>(() =>
+    loadCachedBanRecord(activePlayerId),
+  );
+  const [banIdCopied, setBanIdCopied] = useState(false);
+
+  const isBanned = Boolean(banRecord) && !isAdminPlayerId(profile.uid);
+  const isBannedRef = useRef(isBanned);
+  isBannedRef.current = isBanned;
 
   const activeRequiredChannels = useMemo(
     () => getActiveRequiredChannels(channelsConfig),
@@ -298,10 +325,17 @@ export default function App() {
   const pendingRefCodeRef = useRef<string | null>(
     (() => {
       if (detectedIdentity.startParam) {
-        return detectedIdentity.startParam.trim().toUpperCase();
+        return detectedIdentity.startParam.trim();
       }
       if (typeof window !== 'undefined') {
-        return new URLSearchParams(window.location.search).get('ref')?.trim().toUpperCase() || null;
+        const search = new URLSearchParams(window.location.search);
+        const param =
+          search.get('tgWebAppStartParam') ||
+          search.get('startapp') ||
+          search.get('start_param') ||
+          search.get('ref') ||
+          '';
+        return param.trim() || null;
       }
       return null;
     })(),
@@ -362,16 +396,29 @@ export default function App() {
   }, [soundsEnabled]);
 
   useEffect(() => {
+    if (isBanned) {
+      stopAmbientMusic();
+      setAdModalState({ open: false, kind: 'watch_ad', notice: null, network: null });
+      setShowSettings(false);
+      setShowArtifactsDrawer(false);
+      setShowWelcomeModal(false);
+      setShowSignUpBonusModal(false);
+      setShowChannelGateModal(false);
+      return () => stopAmbientMusic();
+    }
+
     syncAmbientMusic(musicEnabled);
     if (!musicEnabled) {
       return () => stopAmbientMusic();
     }
 
     const handleFirstGesture = () => {
-      syncAmbientMusic(true);
+      if (!isBannedRef.current) {
+        syncAmbientMusic(true);
+      }
     };
     const handleVisibility = () => {
-      if (document.visibilityState === 'hidden') {
+      if (document.visibilityState === 'hidden' || isBannedRef.current) {
         stopAmbientMusic();
       } else {
         syncAmbientMusic(true);
@@ -388,7 +435,7 @@ export default function App() {
       document.removeEventListener('visibilitychange', handleVisibility);
       stopAmbientMusic();
     };
-  }, [musicEnabled]);
+  }, [isBanned, musicEnabled]);
 
   useEffect(() => {
     // Re-check Telegram WebApp hydration shortly after mount in case SDK populates asynchronously
@@ -396,6 +443,9 @@ export default function App() {
     const timers = [150, 500, 1200].map((delay) =>
       window.setTimeout(() => {
         const next = resolveActivePlayerIdentity();
+        if (next.startParam && !pendingRefCodeRef.current) {
+          pendingRefCodeRef.current = next.startParam.trim();
+        }
         if (next.isTelegramDetected && next.playerId && next.playerId !== activePlayerId) {
           setDetectedIdentity(next);
           const cached = loadCachedPlayerProfile(next.playerId);
@@ -575,6 +625,7 @@ export default function App() {
   }, [audioSettings]);
 
   const checkAndNotifyBasketFull = useCallback(() => {
+    if (isBannedRef.current) return;
     const current = latestProfileRef.current;
     const now = Date.now();
     const pending = calculatePendingEggs(current, now);
@@ -692,6 +743,8 @@ export default function App() {
       gramDepositAddress?: string;
       gramJettonMaster?: string;
       payoutChannel?: string;
+      telegramBotUsername?: string;
+      telegramAppShortName?: string;
     }>('/api/config').then((cfg) => {
       if (!cfg) return;
       if (cfg.gramDepositAddress) {
@@ -702,6 +755,15 @@ export default function App() {
       }
       if (cfg.payoutChannel) {
         setPayoutChannel(cfg.payoutChannel);
+      }
+      if (cfg.telegramBotUsername || cfg.telegramAppShortName) {
+        cacheDetectedTelegramBotConfig(cfg.telegramBotUsername, cfg.telegramAppShortName);
+        setTelegramBotConfig(
+          detectBrowserTelegramBotConfig({
+            serverBotUsername: cfg.telegramBotUsername,
+            serverAppShortName: cfg.telegramAppShortName,
+          }),
+        );
       }
     });
     const unsubLb = subscribeToLeaderboard((entries) => {
@@ -734,12 +796,33 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    setBanRecord(loadCachedBanRecord(activePlayerId));
+    const unsubBan = subscribeToPlayerBanStatus(activePlayerId, (ban) => {
+      setBanRecord(ban);
+    });
+    return () => unsubBan();
+  }, [activePlayerId]);
+
+  useEffect(() => {
     if (subView !== 'admin') return;
     const unsubWdReqs = subscribeToAllWithdrawRequests((items) => {
       setAllWithdrawRequests(items);
     });
-    return () => unsubWdReqs();
-  }, [subView]);
+    if (!isAdminPlayerId(profile.uid)) {
+      return () => unsubWdReqs();
+    }
+    const unsubRecentPlayers = subscribeToRecentPlayers((players) => {
+      setRecentPlayers(players);
+    }, 50);
+    const unsubBannedUsers = subscribeToBannedUsers((items) => {
+      setBannedUsers(items);
+    });
+    return () => {
+      unsubWdReqs();
+      unsubRecentPlayers();
+      unsubBannedUsers();
+    };
+  }, [profile.uid, subView]);
 
   // Ensure active player exists in Firestore and subscribe live to all subcollections
   useEffect(() => {
@@ -827,9 +910,9 @@ export default function App() {
           }
         }
 
-        // Auto-link ?ref= / start_param as Pending until player buys their 1st chicken
+        // Auto-link ?startapp= / ?ref= / start_param as Pending until player buys their 1st chicken
         const refCode = pendingRefCodeRef.current;
-        if (refCode && !ensured.referredBy && refCode !== ensured.referralCode.toUpperCase()) {
+        if (refCode && !ensured.referredBy) {
           pendingRefCodeRef.current = null;
           const refRes = await applyReferralCodeInFirestore(ensured, refCode);
           if (!cancelled && !('error' in refRes)) {
@@ -839,6 +922,8 @@ export default function App() {
             if (typeof window !== 'undefined') {
               const url = new URL(window.location.href);
               url.searchParams.delete('ref');
+              url.searchParams.delete('startapp');
+              url.searchParams.delete('tgWebAppStartParam');
               window.history.replaceState({}, '', url.toString());
             }
           }
@@ -905,6 +990,10 @@ export default function App() {
       referralEggCommission?: number;
       activateReferral?: boolean;
     }): Promise<boolean> => {
+      if (isBannedRef.current) {
+        showToast('Account blocked — actions are disabled.');
+        return false;
+      }
       if (!params.deposit) {
         latestProfileRef.current = params.nextProfile;
         setProfile(params.nextProfile);
@@ -1435,6 +1524,29 @@ export default function App() {
     }
   };
 
+  const handleBanPlayer = async (input: {
+    targetId: string;
+    displayName?: string;
+    handle?: string;
+    reason?: string;
+  }) => {
+    const record = await banPlayerInFirestore({
+      targetId: input.targetId,
+      displayName: input.displayName,
+      handle: input.handle,
+      reason: input.reason,
+      bannedBy: profile.uid,
+    });
+    const label = record.displayName || getPrimaryDepositMemo(record.uid) || record.uid;
+    showToast(`Blocked player ${label}!`);
+  };
+
+  const handleUnbanPlayer = async (targetId: string) => {
+    await unbanPlayerInFirestore(targetId);
+    const label = getPrimaryDepositMemo(targetId) || targetId;
+    showToast(`Unblocked player ${label}!`);
+  };
+
   const handleClaimDaily = () => {
     const now = Date.now();
     const res = claimDailyStreak(profile, todayStr, now);
@@ -1515,7 +1627,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (skipWelcome || showSplash) return;
+    if (isBanned || skipWelcome || showSplash) return;
     if (subView === 'admin') return;
     if (startupAdTriggeredRef.current) return;
     startupAdTriggeredRef.current = true;
@@ -1792,6 +1904,8 @@ export default function App() {
           promoCodes={promoCodes}
           seasonConfig={seasonConfig}
           leaderboardEntries={cloudLeaderboard}
+          recentPlayers={recentPlayers}
+          bannedUsers={bannedUsers}
           onTabTap={() => playTabTapSound(soundsEnabled)}
           onBack={() => setSubView('none')}
           onReviewWithdrawal={handleReviewWithdrawal}
@@ -1805,6 +1919,8 @@ export default function App() {
           onDeletePromoCode={handleDeletePromoCode}
           onSaveSeasonConfig={handleSaveSeasonConfig}
           onDistributeSeasonPrizes={handleDistributeSeasonPrizes}
+          onBanPlayer={handleBanPlayer}
+          onUnbanPlayer={handleUnbanPlayer}
         />
       );
     }
@@ -1931,6 +2047,8 @@ export default function App() {
           profile={profile}
           referrals={referrals}
           transactions={mergedReferralTransactions}
+          botUsername={telegramBotConfig.botUsername}
+          appShortName={telegramBotConfig.appShortName}
           onClaimReferralMilestone={handleClaimReferralMilestone}
         />
       );
@@ -2115,6 +2233,79 @@ export default function App() {
   const showFarmOnMobile = activeTab === 'farm' && subView === 'none';
 
   const hideBottomNav = subView === 'profile' || subView === 'admin';
+
+  if (isBanned && banRecord) {
+    const displayUserId = getPrimaryDepositMemo(banRecord.uid || profile.uid);
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4 text-stone-900 dark:text-stone-100">
+        <div className="clay-card max-w-md w-full overflow-hidden">
+          <div className="bg-stone-900 dark:bg-stone-950 border-b border-stone-800 px-5 py-4 text-white flex items-center gap-3">
+            <div className="w-11 h-11 rounded-2xl bg-rose-500/20 border border-rose-400/30 flex items-center justify-center shrink-0">
+              <Ban className="w-5 h-5 text-rose-300" />
+            </div>
+            <div className="min-w-0">
+              <h1 className="text-lg font-extrabold tracking-tight">Account Blocked</h1>
+              <p className="text-xs text-stone-300">Access to all Alpha Gram features is suspended</p>
+            </div>
+          </div>
+
+          <div className="p-5 space-y-4">
+            <p className="text-xs font-semibold text-stone-600 dark:text-stone-300 leading-relaxed">
+              Your account has been restricted by an administrator. Farm mining, shop purchases,
+              tasks, referrals, and withdrawals are disabled while this block is active.
+            </p>
+
+            <div className="clay-inset !rounded-2xl p-3.5 space-y-2 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-bold text-stone-500 dark:text-stone-400">Blocked Player ID</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(displayUserId).catch(() => {});
+                    setBanIdCopied(true);
+                    window.setTimeout(() => setBanIdCopied(false), 1600);
+                  }}
+                  className="inline-flex items-center gap-1 rounded-lg bg-stone-200/80 dark:bg-stone-800 px-2 py-1 font-mono-num font-extrabold text-stone-900 dark:text-stone-100 cursor-pointer"
+                >
+                  <span>{displayUserId}</span>
+                  {banIdCopied ? (
+                    <Check className="w-3 h-3 text-emerald-600" />
+                  ) : (
+                    <Copy className="w-3 h-3 opacity-70" />
+                  )}
+                </button>
+              </div>
+              {displayUserId !== banRecord.uid && (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold text-stone-500 dark:text-stone-400">Account UID</span>
+                  <span className="font-mono-num font-bold text-stone-700 dark:text-stone-300">
+                    {banRecord.uid}
+                  </span>
+                </div>
+              )}
+              {banRecord.bannedAtMs > 0 && (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold text-stone-500 dark:text-stone-400">Blocked On</span>
+                  <span className="font-mono-num font-semibold text-stone-700 dark:text-stone-300">
+                    {new Date(banRecord.bannedAtMs).toLocaleString()}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/70 px-3.5 py-3 space-y-1">
+              <div className="text-[10px] font-extrabold uppercase tracking-wider text-rose-700 dark:text-rose-300">
+                Reason
+              </div>
+              <div className="text-xs font-bold text-rose-900 dark:text-rose-200 break-words">
+                {banRecord.reason || 'Blocked by Administrator'}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`min-h-screen text-stone-900 dark:text-stone-100 transition-colors ${hideBottomNav ? 'pb-6' : 'pb-22'}`}>

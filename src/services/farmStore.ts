@@ -23,6 +23,7 @@ import {
   buildDeterministicDepositIds,
   calculateBuyerPoints,
   calculateTotalChickens,
+  canBanPlayerId,
   createDefaultProfile,
   createDefaultSeasonConfig,
   decodeAchievementsAndAds,
@@ -35,6 +36,8 @@ import {
   encodePromoLabelMeta,
   encodeTaskSubtitleMeta,
   formatReferralHandle,
+  isAdminPlayerId,
+  normalizePlayerBanId,
   normalizeTelegramChannelEntry,
   REFERRED_WELCOME_BONUS_COINS,
   REFERRER_SIGNUP_BONUS_COINS,
@@ -46,6 +49,7 @@ import {
 } from '../game/economy';
 import type {
   AdConfig,
+  BannedUserRecord,
   ChannelsConfig,
   ChickenBreedId,
   DepositOrder,
@@ -67,6 +71,7 @@ import { detectBrowserTelegramIdentity, type DetectedUserIdentity } from '../uti
 const PLAYER_ID_KEY = 'chickenland_player_id_v1';
 const PLAYER_ID_COOKIE = 'chickenland_uid_v1';
 const PROFILE_CACHE_PREFIX = 'chickenland_profile_cache_v1_';
+const BAN_CACHE_PREFIX = 'chickenland_ban_cache_v1_';
 
 function readCookiePlayerId(): string {
   try {
@@ -421,34 +426,77 @@ export async function ensurePlayerInFirestore(
 
 export async function applyReferralCodeInFirestore(
   currentProfile: UserFarmProfile,
-  rawCode: string,
+  rawCodeOrId: string,
 ): Promise<{ profile: UserFarmProfile; transaction: TransactionEntry; referrerName: string } | { error: string }> {
-  const code = rawCode.trim().toUpperCase();
-  if (!code || code.length < 3) {
-    return { error: 'Enter a valid referral code (e.g. CL-XXXXXX).' };
+  const rawTrimmed = rawCodeOrId.trim();
+  const strippedParam = rawTrimmed.replace(/^(?:ref|r)_/i, '').trim();
+  const codeUpper = rawTrimmed.toUpperCase();
+  if (!rawTrimmed || rawTrimmed.length < 3) {
+    return { error: 'Enter a valid referral ID or code.' };
   }
   if (currentProfile.referredBy) {
-    return { error: 'You have already used a referral code on this account.' };
+    return { error: 'You have already used a referral link on this account.' };
   }
-  if (code === currentProfile.referralCode.toUpperCase()) {
+
+  const currentCanonicalUid = normalizePlayerBanId(currentProfile.uid) || currentProfile.uid;
+  const candidateUid =
+    normalizePlayerBanId(strippedParam) || normalizePlayerBanId(rawTrimmed);
+  if (
+    codeUpper === currentProfile.referralCode.toUpperCase() ||
+    rawTrimmed === currentProfile.uid ||
+    strippedParam === currentProfile.uid ||
+    (candidateUid && candidateUid === currentCanonicalUid)
+  ) {
     return { error: 'You cannot refer yourself.' };
   }
 
   try {
-    const q = query(
-      collection(db, 'leaderboard'),
-      where('referralCode', '==', code),
-      limit(1),
+    let referrerUid = '';
+    let referrerName = 'Farmer';
+
+    // 1. Resolve directly by auto-detected Telegram ID / User ID (e.g. ?startapp=7508911853 or player_...)
+    const candidateIds = Array.from(
+      new Set(
+        [candidateUid, strippedParam, rawTrimmed].filter(
+          (id): id is string => Boolean(id && /^[a-zA-Z0-9_-]{3,64}$/.test(id)),
+        ),
+      ),
     );
-    const matches = await getDocs(q);
-    if (matches.empty) {
-      return { error: `Referral code "${code}" not found.` };
+
+    for (const id of candidateIds) {
+      const playerSnap = await getDoc(doc(db, 'players', id));
+      if (playerSnap.exists()) {
+        referrerUid = playerSnap.id;
+        referrerName = String(playerSnap.data().displayName || 'Farmer');
+        break;
+      }
+      const lbSnap = await getDoc(doc(db, 'leaderboard', id));
+      if (lbSnap.exists()) {
+        referrerUid = lbSnap.id;
+        referrerName = String(lbSnap.data().displayName || 'Farmer');
+        break;
+      }
     }
 
-    const referrerSnap = matches.docs[0];
-    const referrerData = referrerSnap.data();
-    const referrerUid = String(referrerData.uid);
-    const referrerName = String(referrerData.displayName || 'Farmer');
+    // 2. Fallback to legacy CL-XXXXXX referralCode lookup
+    if (!referrerUid) {
+      const q = query(
+        collection(db, 'leaderboard'),
+        where('referralCode', '==', codeUpper),
+        limit(1),
+      );
+      const matches = await getDocs(q);
+      if (!matches.empty) {
+        const referrerSnap = matches.docs[0];
+        const referrerData = referrerSnap.data();
+        referrerUid = String(referrerData.uid || referrerSnap.id);
+        referrerName = String(referrerData.displayName || 'Farmer');
+      }
+    }
+
+    if (!referrerUid) {
+      return { error: `Referral ID "${rawTrimmed}" not found.` };
+    }
 
     if (referrerUid === currentProfile.uid) {
       return { error: 'You cannot refer yourself.' };
@@ -504,7 +552,7 @@ export async function applyReferralCodeInFirestore(
     await batch.commit();
     return { profile: nextProfile, transaction: userTx, referrerName };
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `referrals/${code}`);
+    handleFirestoreError(error, OperationType.WRITE, `referrals/${rawTrimmed}`);
   }
 }
 
@@ -1912,4 +1960,175 @@ export async function distributeSeasonPrizesInFirestore(params: {
   }
 }
 
+function parseBannedUserDoc(id: string, d: Record<string, unknown>): BannedUserRecord {
+  return {
+    uid: String(d.uid || id),
+    displayName: String(d.displayName || ''),
+    handle: String(d.handle || ''),
+    reason: String(d.reason || ''),
+    bannedBy: String(d.bannedBy || ''),
+    bannedAtMs: Number(d.bannedAtMs ?? 0),
+  };
+}
+
+export function loadCachedBanRecord(playerId: string): BannedUserRecord | null {
+  try {
+    if (typeof localStorage === 'undefined' || !playerId || isAdminPlayerId(playerId)) {
+      return null;
+    }
+    const canonical = normalizePlayerBanId(playerId) || playerId;
+    const raw =
+      localStorage.getItem(`${BAN_CACHE_PREFIX}${canonical}`) ||
+      localStorage.getItem(`${BAN_CACHE_PREFIX}${playerId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as BannedUserRecord;
+    return parsed?.uid ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveCachedBanRecord(
+  playerId: string,
+  ban: BannedUserRecord | null,
+): void {
+  try {
+    if (typeof localStorage === 'undefined' || !playerId) return;
+    const canonical = normalizePlayerBanId(playerId) || playerId;
+    if (!ban) {
+      localStorage.removeItem(`${BAN_CACHE_PREFIX}${canonical}`);
+      localStorage.removeItem(`${BAN_CACHE_PREFIX}${playerId}`);
+      return;
+    }
+    localStorage.setItem(`${BAN_CACHE_PREFIX}${canonical}`, JSON.stringify(ban));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function subscribeToPlayerBanStatus(
+  playerId: string,
+  onUpdate: (ban: BannedUserRecord | null) => void,
+): () => void {
+  if (!playerId || isAdminPlayerId(playerId)) {
+    saveCachedBanRecord(playerId, null);
+    onUpdate(null);
+    return () => {};
+  }
+  const canonicalId = normalizePlayerBanId(playerId) || playerId;
+  return onSnapshot(
+    doc(db, 'banned_users', canonicalId),
+    (snap) => {
+      if (!snap.exists()) {
+        saveCachedBanRecord(canonicalId, null);
+        onUpdate(null);
+        return;
+      }
+      const parsed = parseBannedUserDoc(snap.id, snap.data());
+      saveCachedBanRecord(canonicalId, parsed);
+      onUpdate(parsed);
+    },
+    (err) => logSubscriptionError(`banned_users/${canonicalId}`, err),
+  );
+}
+
+export function subscribeToRecentPlayers(
+  onUpdate: (players: UserFarmProfile[]) => void,
+  maxLimit = 50,
+): () => void {
+  const safeLimit = Math.max(1, Math.min(50, Math.floor(maxLimit)));
+  const q = query(
+    collection(db, 'players'),
+    orderBy('createdAtMs', 'desc'),
+    limit(safeLimit),
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      onUpdate(snap.docs.map((docSnap) => parseProfileDoc(docSnap.data(), docSnap.id)));
+    },
+    (err) => logSubscriptionError('players', err),
+  );
+}
+
+export function subscribeToBannedUsers(
+  onUpdate: (items: BannedUserRecord[]) => void,
+): () => void {
+  const q = query(
+    collection(db, 'banned_users'),
+    orderBy('bannedAtMs', 'desc'),
+    limit(100),
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      onUpdate(
+        snap.docs.map((docSnap) => parseBannedUserDoc(docSnap.id, docSnap.data())),
+      );
+    },
+    (err) => logSubscriptionError('banned_users', err),
+  );
+}
+
+export async function banPlayerInFirestore(params: {
+  targetId: string;
+  displayName?: string;
+  handle?: string;
+  reason?: string;
+  bannedBy: string;
+}): Promise<BannedUserRecord> {
+  if (!isAdminPlayerId(params.bannedBy)) {
+    throw new Error('Only authorized Owner Admin ID can block or ban players.');
+  }
+  const check = canBanPlayerId(params.targetId);
+  if (!check.ok) {
+    throw new Error(check.error);
+  }
+  const canonicalId = check.canonicalId;
+  const nowMs = Date.now();
+  const payload: BannedUserRecord = {
+    uid: canonicalId,
+    displayName: String(params.displayName || '').trim().slice(0, 60),
+    handle: String(params.handle || '').trim().slice(0, 40),
+    reason: (String(params.reason || '').trim() || 'Blocked by Administrator').slice(0, 160),
+    bannedBy: params.bannedBy.trim().slice(0, 64),
+    bannedAtMs: nowMs,
+  };
+
+  const ref = doc(db, 'banned_users', canonicalId);
+  try {
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(ref);
+      if (snap.exists()) {
+        tx.update(ref, {
+          displayName: payload.displayName,
+          handle: payload.handle,
+          reason: payload.reason,
+          bannedBy: payload.bannedBy,
+          bannedAtMs: payload.bannedAtMs,
+        });
+      } else {
+        tx.set(ref, {
+          ...payload,
+          createdAt: serverTimestamp(),
+        });
+      }
+    });
+    return payload;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `banned_users/${canonicalId}`);
+  }
+}
+
+export async function unbanPlayerInFirestore(targetId: string): Promise<void> {
+  const canonicalId = normalizePlayerBanId(targetId) || String(targetId || '').trim();
+  if (!canonicalId) {
+    throw new Error('Invalid Player ID.');
+  }
+  try {
+    await deleteDoc(doc(db, 'banned_users', canonicalId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `banned_users/${canonicalId}`);
+  }
+}
 

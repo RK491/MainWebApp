@@ -2,6 +2,7 @@ import type {
   AdConfig,
   AdGateActionType,
   AdNetworkId,
+  BannedUserRecord,
   ChannelsConfig,
   ChickenBreedId,
   ChickenPack,
@@ -2768,4 +2769,55 @@ export function parseAdConfigTemplate(
   return { next, appliedKeys: Array.from(applied) };
 }
 
+export function normalizePlayerBanId(rawId: unknown): string | null {
+  const trimmed = String(rawId || '').trim();
+  if (!trimmed) return null;
+  const tgMatch = trimmed.match(/^(?:tg_)?(\d{4,20})$/i);
+  if (tgMatch) {
+    return `tg_${tgMatch[1]}`;
+  }
+  if (/^[a-zA-Z0-9_-]{3,64}$/.test(trimmed)) {
+    return trimmed;
+  }
+  return null;
+}
 
+export function canBanPlayerId(
+  rawId: unknown,
+  extraAdminIds: string[] = [],
+): { ok: true; canonicalId: string } | { ok: false; error: string } {
+  const canonicalId = normalizePlayerBanId(rawId);
+  if (!canonicalId) {
+    return {
+      ok: false,
+      error: 'Enter a valid Player ID (Telegram numeric ID, tg_..., or player_... UID).',
+    };
+  }
+  if (isAdminPlayerId(canonicalId, extraAdminIds)) {
+    return {
+      ok: false,
+      error: `Cannot block or ban Owner Admin ID ${PRIMARY_ADMIN_TELEGRAM_ID}.`,
+    };
+  }
+  return { ok: true, canonicalId };
+}
+
+export function matchesBannedUserRecord(
+  playerId: unknown,
+  ban: Pick<BannedUserRecord, 'uid'> | null | undefined,
+): boolean {
+  if (!ban?.uid) return false;
+  const rawPlayer = String(playerId || '').trim();
+  if (!rawPlayer) return false;
+  if (rawPlayer === ban.uid) return true;
+
+  const normPlayer = normalizePlayerBanId(rawPlayer);
+  const normBan = normalizePlayerBanId(ban.uid);
+  if (normPlayer && normBan && normPlayer === normBan) return true;
+
+  const tgPlayer = extractTelegramNumericUserId(rawPlayer);
+  const tgBan = extractTelegramNumericUserId(ban.uid);
+  if (tgPlayer && tgBan && tgPlayer === tgBan) return true;
+
+  return false;
+}

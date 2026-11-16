@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   ArrowRight,
   Award,
+  Ban,
   Check,
   CheckCircle2,
   ClipboardCheck,
@@ -30,13 +31,16 @@ import {
   Ticket,
   Trash2,
   Trophy,
+  UserCheck,
   Users,
+  UserX,
   Wallet,
   XCircle,
 } from 'lucide-react';
 import type {
   AdConfig,
   AdProviderType,
+  BannedUserRecord,
   ChannelsConfig,
   ChickenBreedId,
   DynamicPromoCode,
@@ -45,15 +49,20 @@ import type {
   RequiredTelegramChannel,
   SeasonConfig,
   TaskDefinition,
+  UserFarmProfile,
   WithdrawRequestRecord,
 } from '../types/farm';
 import {
+  calculateTotalChickens,
+  canBanPlayerId,
   CHICKEN_PACKS,
+  extractTelegramNumericUserId,
   formatAdConfigTemplate,
   formatPromoRewardSummary,
   generateGiftCodeString,
   getWithdrawalStatusMeta,
   isAdminPlayerId,
+  matchesBannedUserRecord,
   normalizeTelegramChannelEntry,
   parseAdConfigTemplate,
   PRIMARY_ADMIN_TELEGRAM_ID,
@@ -69,6 +78,8 @@ interface AdminPanelViewProps {
   promoCodes: DynamicPromoCode[];
   seasonConfig: SeasonConfig;
   leaderboardEntries: LeaderboardEntry[];
+  recentPlayers: UserFarmProfile[];
+  bannedUsers: BannedUserRecord[];
   onBack: () => void;
   onTabTap?: () => void;
   onReviewWithdrawal: (
@@ -104,6 +115,13 @@ interface AdminPanelViewProps {
   onDeletePromoCode: (code: string) => Promise<void>;
   onSaveSeasonConfig: (config: Omit<SeasonConfig, 'updatedAtMs'>) => Promise<void>;
   onDistributeSeasonPrizes: (nextDurationDays: number) => Promise<void>;
+  onBanPlayer: (input: {
+    targetId: string;
+    displayName?: string;
+    handle?: string;
+    reason?: string;
+  }) => Promise<void>;
+  onUnbanPlayer: (targetId: string) => Promise<void>;
 }
 
 const AD_PROVIDER_CARDS: Array<{
@@ -189,6 +207,8 @@ export function AdminPanelView({
   promoCodes,
   seasonConfig,
   leaderboardEntries,
+  recentPlayers,
+  bannedUsers,
   onBack,
   onTabTap,
   onReviewWithdrawal,
@@ -202,17 +222,27 @@ export function AdminPanelView({
   onDeletePromoCode,
   onSaveSeasonConfig,
   onDistributeSeasonPrizes,
+  onBanPlayer,
+  onUnbanPlayer,
 }: AdminPanelViewProps) {
   const isAuthorizedAdmin = isAdminPlayerId(playerId);
 
   const [tab, setTab] = useState<
-    'withdrawals' | 'channels' | 'promos' | 'tasks' | 'ads' | 'ad_ids' | 'season'
+    'withdrawals' | 'users' | 'channels' | 'promos' | 'tasks' | 'ads' | 'ad_ids' | 'season'
   >('withdrawals');
   const [wdFilter, setWdFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
   const [wdSearch, setWdSearch] = useState('');
   const [noteById, setNoteById] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  // User Management state
+  const [userSearch, setUserSearch] = useState('');
+  const [userFilter, setUserFilter] = useState<'recent' | 'active' | 'banned'>('recent');
+  const [banTargetIdInput, setBanTargetIdInput] = useState('');
+  const [banReasonInput, setBanReasonInput] = useState('');
+  const [banFormError, setBanFormError] = useState<string | null>(null);
+  const [banningId, setBanningId] = useState<string | null>(null);
 
   // Check Channels management draft state
   const [channelsEnabledDraft, setChannelsEnabledDraft] = useState<boolean>(channelsConfig.enabled);
@@ -593,6 +623,113 @@ export function AdminPanelView({
     }
   };
 
+  const sortedRecentPlayers = useMemo(
+    () =>
+      [...recentPlayers].sort(
+        (a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0),
+      ),
+    [recentPlayers],
+  );
+
+  const findBanForPlayer = (uid: string): BannedUserRecord | undefined =>
+    bannedUsers.find((b) => matchesBannedUserRecord(uid, b));
+
+  const visibleRecentPlayers = useMemo(() => {
+    const q = userSearch.trim().toLowerCase();
+    return sortedRecentPlayers.filter((p) => {
+      const ban = findBanForPlayer(p.uid);
+      if (userFilter === 'active' && ban) return false;
+      if (userFilter === 'banned' && !ban) return false;
+      if (!q) return true;
+      const numericId = extractTelegramNumericUserId(p.uid) || '';
+      return (
+        p.uid.toLowerCase().includes(q) ||
+        numericId.toLowerCase().includes(q) ||
+        p.displayName.toLowerCase().includes(q) ||
+        p.handle.toLowerCase().includes(q)
+      );
+    });
+  }, [bannedUsers, sortedRecentPlayers, userFilter, userSearch]);
+
+  const visibleBannedRecords = useMemo(() => {
+    const q = userSearch.trim().toLowerCase();
+    return bannedUsers.filter((b) => {
+      if (!q) return true;
+      const numericId = extractTelegramNumericUserId(b.uid) || '';
+      return (
+        b.uid.toLowerCase().includes(q) ||
+        numericId.toLowerCase().includes(q) ||
+        b.displayName.toLowerCase().includes(q) ||
+        b.handle.toLowerCase().includes(q) ||
+        b.reason.toLowerCase().includes(q)
+      );
+    });
+  }, [bannedUsers, userSearch]);
+
+  const handleManualBanSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBanFormError(null);
+    const check = canBanPlayerId(banTargetIdInput);
+    if (!check.ok) {
+      setBanFormError(check.error);
+      return;
+    }
+
+    const matchedProfile = sortedRecentPlayers.find(
+      (p) =>
+        p.uid === check.canonicalId ||
+        matchesBannedUserRecord(p.uid, { uid: check.canonicalId }),
+    );
+
+    setBanningId(check.canonicalId);
+    try {
+      onTabTap?.();
+      await onBanPlayer({
+        targetId: check.canonicalId,
+        displayName: matchedProfile?.displayName || '',
+        handle: matchedProfile?.handle || '',
+        reason: banReasonInput.trim() || 'Blocked by Administrator',
+      });
+      setBanTargetIdInput('');
+    } catch (err) {
+      setBanFormError(err instanceof Error ? err.message : 'Failed to block player.');
+    } finally {
+      setBanningId(null);
+    }
+  };
+
+  const handleBanPlayerRow = async (player: UserFarmProfile) => {
+    setBanFormError(null);
+    const check = canBanPlayerId(player.uid);
+    if (!check.ok) {
+      setBanFormError(check.error);
+      return;
+    }
+    setBanningId(player.uid);
+    try {
+      onTabTap?.();
+      await onBanPlayer({
+        targetId: player.uid,
+        displayName: player.displayName,
+        handle: player.handle,
+        reason: banReasonInput.trim() || 'Blocked by Administrator',
+      });
+    } finally {
+      setBanningId(null);
+    }
+  };
+
+  const handleUnbanRow = async (targetId: string) => {
+    setBanFormError(null);
+    setBanningId(targetId);
+    try {
+      onTabTap?.();
+      await onUnbanPlayer(targetId);
+    } finally {
+      setBanningId(null);
+    }
+  };
+
   if (!isAuthorizedAdmin) {
     return (
       <div className="animate-clay-enter space-y-6 pb-8">
@@ -699,7 +836,7 @@ export function AdminPanelView({
               </span>
             </div>
             <p className="text-[11px] text-stone-300 truncate">
-              Payouts, Check Channels, Gift Codes, Tasks, Ads &amp; Season Control
+              Payouts, User Management, Check Channels, Gift Codes, Tasks &amp; Ads
             </p>
           </div>
         </div>
@@ -731,19 +868,19 @@ export function AdminPanelView({
           type="button"
           onClick={() => {
             onTabTap?.();
-            setTab('channels');
+            setTab('users');
           }}
           className="clay-card clay-hover-lift !rounded-2xl p-3.5 text-left cursor-pointer"
         >
           <div className="flex items-center justify-between text-[11px] font-bold text-stone-500 dark:text-stone-400">
-            <span>Check Channels</span>
-            <Radio className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
+            <span>Recent Players</span>
+            <Users className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
           </div>
           <div className="mt-1 text-xl font-extrabold text-stone-900 dark:text-stone-100 font-mono-num">
-            {channelsConfig.enabled ? channelsConfig.channels.filter((c) => c.enabled !== false).length : 0}
+            {recentPlayers.length}
           </div>
-          <div className="mt-0.5 text-[11px] text-stone-500 dark:text-stone-400">
-            {channelsConfig.enabled ? 'Gate Active' : 'Gate Paused'}
+          <div className="mt-0.5 text-[11px] text-stone-500 dark:text-stone-400 font-mono-num">
+            {bannedUsers.length} blocked / banned
           </div>
         </button>
 
@@ -792,11 +929,12 @@ export function AdminPanelView({
       <div
         role="tablist"
         aria-label="Admin console sections"
-        className="clay-inset !rounded-2xl grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-7 gap-1 p-1.5"
+        className="clay-inset !rounded-2xl grid grid-cols-2 sm:grid-cols-4 gap-1 p-1.5"
       >
         {(
           [
             { id: 'withdrawals', label: 'Payouts', icon: Wallet, count: pendingRequests.length },
+            { id: 'users', label: 'User Management', icon: Users, count: bannedUsers.length },
             { id: 'channels', label: 'Channels', icon: Radio, count: activeChannelsCount },
             { id: 'promos', label: 'Gift Codes', icon: Gift, count: 0 },
             { id: 'tasks', label: 'Tasks', icon: ListPlus, count: 0 },
@@ -817,13 +955,13 @@ export function AdminPanelView({
                 onTabTap?.();
                 setTab(item.id);
               }}
-              className={`clay-btn min-h-[42px] px-1.5 rounded-xl text-[11px] sm:text-xs font-extrabold flex items-center justify-center gap-1 transition-all ${
+              className={`clay-btn min-h-[42px] px-2 rounded-xl text-[11px] sm:text-xs font-extrabold flex items-center justify-center gap-1.5 transition-all ${
                 isActive
                   ? 'clay-btn-amber'
                   : 'text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-100'
               }`}
             >
-              <Icon className="w-3.5 h-3.5 shrink-0 hidden sm:inline" />
+              <Icon className="w-3.5 h-3.5 shrink-0" />
               <span className="truncate">{item.label}</span>
               {item.count > 0 && (
                 <span
@@ -844,6 +982,348 @@ export function AdminPanelView({
           );
         })}
       </div>
+
+      {/* ========================================================================
+          USER MANAGEMENT TAB
+         ======================================================================== */}
+      {tab === 'users' && (
+        <div key="admin-tab-users" className="animate-clay-enter space-y-4">
+          {/* Quick Block/Ban by Player ID Form */}
+          <form onSubmit={(e) => void handleManualBanSubmit(e)} className="clay-card p-4 space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+                  <Ban className="w-4 h-4 text-rose-500" />
+                  <span>Block / Ban Player by ID</span>
+                </h2>
+                <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
+                  Blocked players are immediately locked out of all game features, earning, shop, tasks &amp; withdrawals.
+                </p>
+              </div>
+              <span className="rounded-lg bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800/70 px-2 py-1 text-[10px] font-extrabold font-mono-num text-rose-700 dark:text-rose-300 shrink-0">
+                {bannedUsers.length} Blocked
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div className="space-y-1">
+                <label htmlFor="admin-ban-player-id" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                  Player ID (Telegram ID or UID)
+                </label>
+                <input
+                  id="admin-ban-player-id"
+                  type="text"
+                  value={banTargetIdInput}
+                  onChange={(e) => {
+                    setBanTargetIdInput(e.target.value);
+                    setBanFormError(null);
+                  }}
+                  placeholder="e.g. 987654321, tg_987654321, or player_..."
+                  className="clay-inset w-full min-h-[42px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-rose-400"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label htmlFor="admin-ban-reason" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                  Reason (optional, applied to ID or quick row ban)
+                </label>
+                <input
+                  id="admin-ban-reason"
+                  type="text"
+                  maxLength={160}
+                  value={banReasonInput}
+                  onChange={(e) => setBanReasonInput(e.target.value)}
+                  placeholder="e.g. Spam, multi-accounting, or abuse"
+                  className="clay-inset w-full min-h-[42px] px-3 text-xs font-medium text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-rose-400"
+                />
+              </div>
+            </div>
+
+            {banFormError && (
+              <div
+                role="alert"
+                className="rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800/70 px-3 py-2 text-xs font-bold text-rose-700 dark:text-rose-300"
+              >
+                {banFormError}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={!banTargetIdInput.trim() || banningId !== null}
+              className="clay-btn w-full min-h-[42px] rounded-2xl bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
+            >
+              <UserX className="w-4 h-4" />
+              <span>{banningId && banTargetIdInput ? 'Blocking Player...' : 'Block / Ban by ID'}</span>
+            </button>
+          </form>
+
+          {/* Recent Players Directory + Filter */}
+          <div className="clay-card overflow-hidden">
+            <div className="p-4 border-b border-stone-200/70 dark:border-stone-800 space-y-2.5">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div>
+                  <h3 className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
+                    Recent Players ({sortedRecentPlayers.length})
+                  </h3>
+                  <p className="text-[11px] text-stone-500 dark:text-stone-400">
+                    Latest farmers synced in Firestore · Tap Block/Ban to restrict access by ID
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="relative flex-1">
+                  <Search className="w-4 h-4 text-stone-400 dark:text-stone-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={userSearch}
+                    onChange={(e) => setUserSearch(e.target.value)}
+                    placeholder="Search player name, @handle, or ID..."
+                    aria-label="Search recent players"
+                    className="clay-inset w-full min-h-[40px] pl-9 pr-3 text-xs font-semibold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
+
+                <div className="clay-inset !rounded-xl flex items-center gap-1 p-1 shrink-0">
+                  {(
+                    [
+                      { id: 'recent', label: `Recent (${sortedRecentPlayers.length})` },
+                      {
+                        id: 'active',
+                        label: `Active (${sortedRecentPlayers.filter((p) => !findBanForPlayer(p.uid)).length})`,
+                      },
+                      { id: 'banned', label: `Blocked (${bannedUsers.length})` },
+                    ] as const
+                  ).map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => {
+                        onTabTap?.();
+                        setUserFilter(f.id);
+                      }}
+                      className={`clay-btn px-2.5 py-1.5 rounded-lg text-[11px] font-extrabold transition-colors ${
+                        userFilter === f.id
+                          ? f.id === 'banned'
+                            ? 'bg-rose-600 text-white'
+                            : 'clay-btn-amber'
+                          : 'text-stone-600 dark:text-stone-300'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {userFilter === 'banned' ? (
+              visibleBannedRecords.length === 0 ? (
+                <div className="p-6 text-center text-xs text-stone-500 dark:text-stone-400">
+                  {bannedUsers.length === 0
+                    ? 'No players are currently blocked or banned.'
+                    : 'No blocked players match your search.'}
+                </div>
+              ) : (
+                <div className="divide-y divide-stone-100 dark:divide-stone-800/80">
+                  {visibleBannedRecords.map((ban) => {
+                    const matchedProfile = sortedRecentPlayers.find((p) =>
+                      matchesBannedUserRecord(p.uid, ban),
+                    );
+                    const numericId = extractTelegramNumericUserId(ban.uid);
+                    const displayLabel =
+                      ban.displayName || matchedProfile?.displayName || `Player ${ban.uid.slice(-4)}`;
+                    const handleLabel = ban.handle || matchedProfile?.handle || '';
+                    const isBusy = banningId === ban.uid;
+                    return (
+                      <div key={ban.uid} className="p-3.5 flex items-center justify-between gap-3 flex-wrap sm:flex-nowrap">
+                        <div className="flex items-start gap-3 min-w-0 flex-1">
+                          <div className="w-10 h-10 rounded-2xl bg-rose-100 dark:bg-rose-950/70 border border-rose-200 dark:border-rose-800/70 text-rose-700 dark:text-rose-300 font-extrabold text-sm flex items-center justify-center shrink-0">
+                            <Ban className="w-4 h-4" />
+                          </div>
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-sm font-extrabold text-stone-900 dark:text-stone-100 truncate">
+                                {displayLabel}
+                              </span>
+                              {handleLabel && (
+                                <span className="text-xs font-semibold text-stone-500 dark:text-stone-400">
+                                  {handleLabel}
+                                </span>
+                              )}
+                              <span className="px-1.5 py-0.5 rounded-md bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800/70 text-[10px] font-extrabold text-rose-700 dark:text-rose-300">
+                                Blocked
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-2 flex-wrap text-[11px] font-mono-num text-stone-500 dark:text-stone-400">
+                              <button
+                                type="button"
+                                onClick={() => void handleCopy(`ban_id_${ban.uid}`, numericId || ban.uid)}
+                                className="inline-flex items-center gap-1 rounded-md bg-stone-100 dark:bg-stone-800 px-1.5 py-0.5 font-bold text-stone-700 dark:text-stone-200 hover:underline cursor-pointer"
+                              >
+                                <span>ID: {numericId || ban.uid}</span>
+                                {copiedKey === `ban_id_${ban.uid}` ? (
+                                  <Check className="w-3 h-3 text-emerald-600" />
+                                ) : (
+                                  <Copy className="w-3 h-3 opacity-70" />
+                                )}
+                              </button>
+                              {numericId && <span className="opacity-75">({ban.uid})</span>}
+                              {ban.bannedAtMs > 0 && (
+                                <span>· {new Date(ban.bannedAtMs).toLocaleDateString()}</span>
+                              )}
+                            </div>
+
+                            <div className="text-xs font-semibold text-rose-700 dark:text-rose-300 truncate">
+                              Reason: {ban.reason || 'Blocked by Administrator'}
+                            </div>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => void handleUnbanRow(ban.uid)}
+                          className="clay-btn clay-btn-emerald min-h-[38px] px-3.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 shrink-0 disabled:opacity-50"
+                        >
+                          <UserCheck className="w-3.5 h-3.5" />
+                          <span>{isBusy ? 'Unblocking...' : 'Unblock'}</span>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )
+            ) : visibleRecentPlayers.length === 0 ? (
+              <div className="p-6 text-center text-xs text-stone-500 dark:text-stone-400">
+                {sortedRecentPlayers.length === 0
+                  ? 'No recent players loaded yet.'
+                  : 'No players match your search or filter.'}
+              </div>
+            ) : (
+              <div className="divide-y divide-stone-100 dark:divide-stone-800/80">
+                {visibleRecentPlayers.map((player) => {
+                  const ban = findBanForPlayer(player.uid);
+                  const isOwnerAdmin = isAdminPlayerId(player.uid);
+                  const numericId = extractTelegramNumericUserId(player.uid);
+                  const totalHens = calculateTotalChickens(player);
+                  const isBusy = banningId === player.uid;
+
+                  return (
+                    <div
+                      key={player.uid}
+                      className={`p-3.5 flex items-center justify-between gap-3 flex-wrap sm:flex-nowrap ${
+                        ban ? 'bg-rose-50/40 dark:bg-rose-950/20' : ''
+                      }`}
+                    >
+                      <div className="flex items-start gap-3 min-w-0 flex-1">
+                        {player.photoUrl ? (
+                          <img
+                            src={player.photoUrl}
+                            alt={player.displayName}
+                            className="w-10 h-10 rounded-2xl object-cover shrink-0 border border-stone-200 dark:border-stone-700"
+                          />
+                        ) : (
+                          <div
+                            className="w-10 h-10 rounded-2xl text-white font-extrabold text-sm flex items-center justify-center shrink-0 shadow-sm"
+                            style={{ backgroundColor: player.avatarColor || '#EF4444' }}
+                          >
+                            {(player.displayName || 'F').slice(0, 1).toUpperCase()}
+                          </div>
+                        )}
+
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="text-sm font-extrabold text-stone-900 dark:text-stone-100 truncate">
+                              {player.displayName}
+                            </span>
+                            <span className="text-xs font-semibold text-stone-500 dark:text-stone-400 truncate">
+                              {player.handle}
+                            </span>
+                            {isOwnerAdmin ? (
+                              <span className="px-1.5 py-0.5 rounded-md bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800/70 text-[10px] font-extrabold text-emerald-700 dark:text-emerald-300">
+                                Owner Admin
+                              </span>
+                            ) : ban ? (
+                              <span className="px-1.5 py-0.5 rounded-md bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800/70 text-[10px] font-extrabold text-rose-700 dark:text-rose-300">
+                                Blocked
+                              </span>
+                            ) : (
+                              <span className="px-1.5 py-0.5 rounded-md bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800/70 text-[10px] font-extrabold text-emerald-700 dark:text-emerald-300">
+                                Active
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-2 flex-wrap text-[11px] font-mono-num text-stone-500 dark:text-stone-400">
+                            <button
+                              type="button"
+                              onClick={() => void handleCopy(`usr_id_${player.uid}`, numericId || player.uid)}
+                              title="Copy Player ID"
+                              className="inline-flex items-center gap-1 rounded-md bg-stone-100 dark:bg-stone-800 px-1.5 py-0.5 font-bold text-stone-700 dark:text-stone-200 hover:underline cursor-pointer"
+                            >
+                              <span>ID: {numericId || player.uid}</span>
+                              {copiedKey === `usr_id_${player.uid}` ? (
+                                <Check className="w-3 h-3 text-emerald-600" />
+                              ) : (
+                                <Copy className="w-3 h-3 opacity-70" />
+                              )}
+                            </button>
+                            {numericId && <span className="opacity-75">({player.uid})</span>}
+                            <span>· {Math.floor(player.coins).toLocaleString()} coins</span>
+                            <span>· {Math.floor(player.eggs).toLocaleString()} eggs</span>
+                            <span>· {totalHens} hens</span>
+                            {player.createdAtMs > 0 && (
+                              <span>· Joined {new Date(player.createdAtMs).toLocaleDateString()}</span>
+                            )}
+                          </div>
+
+                          {ban && (
+                            <div className="text-[11px] font-bold text-rose-700 dark:text-rose-300 truncate">
+                              Blocked reason: {ban.reason || 'Blocked by Administrator'}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="shrink-0">
+                        {isOwnerAdmin ? (
+                          <span className="inline-flex items-center gap-1 rounded-xl bg-stone-100 dark:bg-stone-800 px-3 py-2 text-[11px] font-extrabold text-stone-500 dark:text-stone-400">
+                            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>Protected</span>
+                          </span>
+                        ) : ban ? (
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => void handleUnbanRow(ban.uid)}
+                            className="clay-btn clay-btn-emerald min-h-[38px] px-3.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 disabled:opacity-50"
+                          >
+                            <UserCheck className="w-3.5 h-3.5" />
+                            <span>{isBusy ? 'Unblocking...' : 'Unblock'}</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => void handleBanPlayerRow(player)}
+                            className="clay-btn min-h-[38px] px-3.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold inline-flex items-center gap-1.5 disabled:opacity-50"
+                          >
+                            <Ban className="w-3.5 h-3.5" />
+                            <span>{isBusy ? 'Blocking...' : 'Block/Ban'}</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ========================================================================
           CHECK CHANNELS MANAGEMENT TAB

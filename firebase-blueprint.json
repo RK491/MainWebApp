@@ -289,6 +289,21 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["enabled", "channels", "updatedAtMs", "updatedAt"]
+    },
+    "BannedUser": {
+      "title": "BannedUser",
+      "description": "Admin-managed ban record preventing a blocked player ID from accessing game features.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "maxLength": 60 },
+        "handle": { "type": "string", "maxLength": 40 },
+        "reason": { "type": "string", "maxLength": 160 },
+        "bannedBy": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "bannedAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "handle", "reason", "bannedBy", "bannedAtMs", "createdAt"]
     }
   },
   "firestore": {
@@ -335,6 +350,10 @@
     "/app_config/{configId}": {
       "schema": { "$ref": "#/entities/AdsConfig" },
       "description": "Global app configuration for ads, seasonal leaderboard, and required Telegram channels."
+    },
+    "/banned_users/{playerId}": {
+      "schema": { "$ref": "#/entities/BannedUser" },
+      "description": "Admin-managed registry of blocked/banned player IDs prevented from accessing game features."
     }
   }
 }

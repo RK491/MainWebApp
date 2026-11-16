@@ -301,3 +301,12 @@ export interface ChannelVerificationResult {
   channels: ChannelVerificationItem[];
   checkedAtMs: number;
 }
+
+export interface BannedUserRecord {
+  uid: string;
+  displayName: string;
+  handle: string;
+  reason: string;
+  bannedBy: string;
+  bannedAtMs: number;
+}

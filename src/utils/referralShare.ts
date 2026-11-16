@@ -1,3 +1,10 @@
+import {
+  DEFAULT_TELEGRAM_BOT_USERNAME,
+  DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME,
+  normalizeTelegramBotUsername,
+  normalizeTelegramMiniAppShortName,
+} from './telegram';
+
 export interface ShareNavigatorLike {
   share?: (data: ShareData) => Promise<void>;
   canShare?: (data: ShareData) => boolean;
@@ -8,17 +15,42 @@ export interface ShareNavigatorLike {
 
 export type ShareReferralOutcome = 'shared' | 'copied' | 'cancelled' | 'failed';
 
-export function buildPersonalReferralUrl(referralCode: string, origin?: string): string {
-  const fallbackOrigin =
-    typeof window !== 'undefined' && window.location?.origin
-      ? window.location.origin
-      : 'https://chickenland.farm';
-  const cleanOrigin = (origin ?? fallbackOrigin).replace(/\/+$/, '');
-  const cleanCode = referralCode.trim();
-  if (!cleanCode) {
-    return cleanOrigin;
+export function getReferralStartId(
+  uid?: string | null,
+  fallbackReferralCode?: string | null,
+): string {
+  const cleanUid = String(uid || '').trim();
+  if (cleanUid) {
+    const tgMatch = cleanUid.match(/^tg_(\d{4,20})$/i);
+    if (tgMatch) {
+      return tgMatch[1];
+    }
+    if (/^[a-zA-Z0-9_-]{3,64}$/.test(cleanUid)) {
+      return cleanUid;
+    }
   }
-  return `${cleanOrigin}/?ref=${encodeURIComponent(cleanCode)}`;
+  return String(fallbackReferralCode || '').trim();
+}
+
+export function buildPersonalReferralUrl(
+  referralIdOrCode: string,
+  options?: {
+    botUsername?: string;
+    appShortName?: string;
+  },
+): string {
+  const botUsername =
+    normalizeTelegramBotUsername(options?.botUsername) || DEFAULT_TELEGRAM_BOT_USERNAME;
+  const appShortName =
+    normalizeTelegramMiniAppShortName(options?.appShortName) ||
+    DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME;
+
+  const baseUrl = `https://t.me/${botUsername}/${appShortName}`;
+  const cleanParam = String(referralIdOrCode || '').trim();
+  if (!cleanParam) {
+    return baseUrl;
+  }
+  return `${baseUrl}?startapp=${encodeURIComponent(cleanParam)}`;
 }
 
 export function buildReferralShareData(
@@ -28,13 +60,24 @@ export function buildReferralShareData(
 ): ShareData {
   const cleanName = (referrerName || '').trim();
   const possessiveOwner = cleanName ? `${cleanName}'s` : 'my';
-  const codeFragment = referralCode.trim() ? ` using code ${referralCode.trim()}` : '';
+  const codeFragment = referralCode.trim() ? ` (ID: ${referralCode.trim()})` : '';
 
   return {
     title: 'Join Alpha Gram!',
     text: `Join ${possessiveOwner} Alpha Gram farm${codeFragment} and claim +1,000 sign-up bonus coins!`,
     url: referralUrl,
   };
+}
+
+export function buildTelegramDirectShareUrl(
+  referralUrl: string,
+  referralCode: string,
+  referrerName?: string,
+): string {
+  const shareData = buildReferralShareData(referralCode, referralUrl, referrerName);
+  return `https://t.me/share/url?url=${encodeURIComponent(referralUrl)}&text=${encodeURIComponent(
+    shareData.text || '',
+  )}`;
 }
 
 export async function copyTextWithFallback(

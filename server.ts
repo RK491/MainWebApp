@@ -46,6 +46,12 @@ import {
   type TonApiEvent,
   type TonCenterJettonTransfer,
 } from './src/game/tonGram.ts';
+import {
+  DEFAULT_TELEGRAM_BOT_USERNAME,
+  DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME,
+  normalizeTelegramBotUsername,
+  normalizeTelegramMiniAppShortName,
+} from './src/utils/telegram.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -94,6 +100,15 @@ const TELEGRAM_PAYOUT_CHANNEL = normalizeTelegramChannel(
   process.env.TELEGRAM_PAYOUT_CHANNEL || '@AG_PAYOUTS',
 );
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const TELEGRAM_BOT_USERNAME_ENV = normalizeTelegramBotUsername(
+  process.env.TELEGRAM_BOT_USERNAME || process.env.VITE_TELEGRAM_BOT_USERNAME || '',
+);
+const TELEGRAM_MINIAPP_SHORT_NAME =
+  normalizeTelegramMiniAppShortName(
+    process.env.TELEGRAM_MINIAPP_SHORT_NAME ||
+      process.env.VITE_TELEGRAM_MINIAPP_SHORT_NAME ||
+      '',
+  ) || DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME;
 const TONCENTER_API_KEY = (process.env.TONCENTER_API_KEY || '').trim();
 const ADMIN_TELEGRAM_IDS = (process.env.ADMIN_TELEGRAM_IDS || '')
   .split(',')
@@ -103,6 +118,41 @@ const SESSION_SIGNING_SECRET = crypto
   .createHash('sha256')
   .update(`chickenland_session_v2:${PRIMARY_ADMIN_TELEGRAM_ID}:${TELEGRAM_BOT_TOKEN}`)
   .digest('hex');
+
+let cachedBotUsername = TELEGRAM_BOT_USERNAME_ENV || '';
+let lastBotLookupAttemptMs = 0;
+
+async function resolveTelegramBotUsername(): Promise<string> {
+  if (TELEGRAM_BOT_USERNAME_ENV) return TELEGRAM_BOT_USERNAME_ENV;
+  if (cachedBotUsername) return cachedBotUsername;
+
+  const now = Date.now();
+  if (!TELEGRAM_BOT_TOKEN || now - lastBotLookupAttemptMs < 10 * 60 * 1000) {
+    return DEFAULT_TELEGRAM_BOT_USERNAME;
+  }
+
+  lastBotLookupAttemptMs = now;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as {
+        ok?: boolean;
+        result?: { username?: string };
+      };
+      const detected = normalizeTelegramBotUsername(data?.result?.username);
+      if (data?.ok && detected) {
+        cachedBotUsername = detected;
+        return detected;
+      }
+    }
+  } catch {
+    // Fallback to default bot username
+  }
+
+  return DEFAULT_TELEGRAM_BOT_USERNAME;
+}
 
 function signSessionToken(payload: Record<string, unknown>, ttlMs = 12 * 3_600_000): string {
   const body = {
@@ -320,7 +370,10 @@ async function startServer() {
   app.use(express.json());
 
   app.get('/api/config', async (_req, res) => {
-    const channelsCfg = await loadChannelsConfigFromFirestore();
+    const [channelsCfg, telegramBotUsername] = await Promise.all([
+      loadChannelsConfigFromFirestore(),
+      resolveTelegramBotUsername(),
+    ]);
     const activeChannels = getActiveRequiredChannels(channelsCfg);
     res.json({
       gramDepositAddress: GRAM_DEPOSIT_ADDRESS,
@@ -331,6 +384,8 @@ async function startServer() {
       channelCheckEnabled: channelsCfg.enabled,
       requiredChannels: activeChannels.map((c) => c.handle),
       telegramBotConfigured: Boolean(TELEGRAM_BOT_TOKEN),
+      telegramBotUsername,
+      telegramAppShortName: TELEGRAM_MINIAPP_SHORT_NAME,
       persistentLedgerEnabled: Boolean(serverDb),
     });
   });

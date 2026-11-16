@@ -36,6 +36,208 @@ interface TelegramWindow {
   };
 }
 
+export const DEFAULT_TELEGRAM_BOT_USERNAME = 'AlphaGramAiBot';
+export const DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME = 'app';
+
+const BOT_USERNAME_CACHE_KEY = 'chickenland_tg_bot_username_v1';
+const APP_SHORT_NAME_CACHE_KEY = 'chickenland_tg_app_short_name_v1';
+
+export interface TelegramBotConfig {
+  botUsername: string;
+  appShortName: string;
+  source: 'url' | 'referrer' | 'server' | 'env' | 'cache' | 'default';
+}
+
+export function normalizeTelegramBotUsername(raw?: string | null): string {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return '';
+
+  const tmeMatch = trimmed.match(/^(?:https?:\/\/)?(?:t\.me|telegram\.me)\/([a-zA-Z0-9_]{3,64})/i);
+  const candidate = (tmeMatch ? tmeMatch[1] : trimmed)
+    .replace(/^@+/, '')
+    .split(/[/?#]/)[0]
+    .trim();
+
+  if (!/^[a-zA-Z0-9_]{3,64}$/.test(candidate)) {
+    return '';
+  }
+  return candidate;
+}
+
+export function normalizeTelegramMiniAppShortName(raw?: string | null): string {
+  const trimmed = String(raw || '')
+    .trim()
+    .replace(/^\/+|\/+$/g, '')
+    .split(/[?#]/)[0]
+    .trim();
+  if (!trimmed) return '';
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(trimmed)) {
+    return '';
+  }
+  return trimmed;
+}
+
+export function parseTelegramBotAndAppFromUrl(rawUrl?: string | null): {
+  botUsername: string;
+  appShortName: string;
+} {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed) return { botUsername: '', appShortName: '' };
+
+  const tmeMatch = trimmed.match(
+    /(?:https?:\/\/)?(?:t\.me|telegram\.me)\/([a-zA-Z0-9_]{3,64})(?:\/([a-zA-Z0-9_-]{1,64}))?/i,
+  );
+  if (tmeMatch) {
+    return {
+      botUsername: normalizeTelegramBotUsername(tmeMatch[1]),
+      appShortName: normalizeTelegramMiniAppShortName(tmeMatch[2] || ''),
+    };
+  }
+
+  const webTgHashMatch = trimmed.match(/web\.telegram\.org\/[^#]*#@([a-zA-Z0-9_]{3,64})/i);
+  if (webTgHashMatch) {
+    return {
+      botUsername: normalizeTelegramBotUsername(webTgHashMatch[1]),
+      appShortName: '',
+    };
+  }
+
+  return { botUsername: '', appShortName: '' };
+}
+
+export function detectTelegramBotConfig(params?: {
+  search?: string;
+  hash?: string;
+  referrer?: string;
+  envBotUsername?: string;
+  envAppShortName?: string;
+  serverBotUsername?: string;
+  serverAppShortName?: string;
+  cachedBotUsername?: string;
+  cachedAppShortName?: string;
+}): TelegramBotConfig {
+  const searchParams = new URLSearchParams(params?.search || '');
+  const cleanHash = (params?.hash || '').startsWith('#')
+    ? (params?.hash || '').slice(1)
+    : (params?.hash || '');
+  const hashParams = new URLSearchParams(cleanHash);
+
+  const urlBot = normalizeTelegramBotUsername(
+    searchParams.get('bot') ||
+      searchParams.get('bot_username') ||
+      searchParams.get('botUsername') ||
+      searchParams.get('tg_bot') ||
+      hashParams.get('bot') ||
+      hashParams.get('bot_username') ||
+      hashParams.get('botUsername'),
+  );
+  const urlApp = normalizeTelegramMiniAppShortName(
+    searchParams.get('app') ||
+      searchParams.get('app_name') ||
+      searchParams.get('appName') ||
+      searchParams.get('short_name') ||
+      searchParams.get('miniapp') ||
+      hashParams.get('app') ||
+      hashParams.get('short_name'),
+  );
+
+  const refParsed = parseTelegramBotAndAppFromUrl(params?.referrer);
+  const serverBot = normalizeTelegramBotUsername(params?.serverBotUsername);
+  const serverApp = normalizeTelegramMiniAppShortName(params?.serverAppShortName);
+  const envBot = normalizeTelegramBotUsername(params?.envBotUsername);
+  const envApp = normalizeTelegramMiniAppShortName(params?.envAppShortName);
+  const cachedBot = normalizeTelegramBotUsername(params?.cachedBotUsername);
+  const cachedApp = normalizeTelegramMiniAppShortName(params?.cachedAppShortName);
+
+  let botUsername = DEFAULT_TELEGRAM_BOT_USERNAME;
+  let source: TelegramBotConfig['source'] = 'default';
+
+  if (urlBot) {
+    botUsername = urlBot;
+    source = 'url';
+  } else if (refParsed.botUsername) {
+    botUsername = refParsed.botUsername;
+    source = 'referrer';
+  } else if (serverBot) {
+    botUsername = serverBot;
+    source = 'server';
+  } else if (envBot) {
+    botUsername = envBot;
+    source = 'env';
+  } else if (cachedBot) {
+    botUsername = cachedBot;
+    source = 'cache';
+  }
+
+  const appShortName =
+    urlApp ||
+    refParsed.appShortName ||
+    serverApp ||
+    envApp ||
+    cachedApp ||
+    DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME;
+
+  return {
+    botUsername,
+    appShortName,
+    source,
+  };
+}
+
+export function cacheDetectedTelegramBotConfig(
+  botUsername?: string | null,
+  appShortName?: string | null,
+): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const cleanBot = normalizeTelegramBotUsername(botUsername);
+    if (cleanBot) {
+      localStorage.setItem(BOT_USERNAME_CACHE_KEY, cleanBot);
+    }
+    const cleanApp = normalizeTelegramMiniAppShortName(appShortName);
+    if (cleanApp) {
+      localStorage.setItem(APP_SHORT_NAME_CACHE_KEY, cleanApp);
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function detectBrowserTelegramBotConfig(overrides?: {
+  serverBotUsername?: string;
+  serverAppShortName?: string;
+}): TelegramBotConfig {
+  const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
+  let cachedBotUsername = '';
+  let cachedAppShortName = '';
+  try {
+    if (typeof localStorage !== 'undefined') {
+      cachedBotUsername = localStorage.getItem(BOT_USERNAME_CACHE_KEY) || '';
+      cachedAppShortName = localStorage.getItem(APP_SHORT_NAME_CACHE_KEY) || '';
+    }
+  } catch {
+    // Ignore storage errors
+  }
+
+  const config = detectTelegramBotConfig({
+    search: typeof window !== 'undefined' ? window.location.search : '',
+    hash: typeof window !== 'undefined' ? window.location.hash : '',
+    referrer: typeof document !== 'undefined' ? document.referrer : '',
+    envBotUsername: env?.VITE_TELEGRAM_BOT_USERNAME,
+    envAppShortName: env?.VITE_TELEGRAM_MINIAPP_SHORT_NAME,
+    serverBotUsername: overrides?.serverBotUsername,
+    serverAppShortName: overrides?.serverAppShortName,
+    cachedBotUsername,
+    cachedAppShortName,
+  });
+
+  if (config.source !== 'default') {
+    cacheDetectedTelegramBotConfig(config.botUsername, config.appShortName);
+  }
+
+  return config;
+}
+
 function parseInitDataUserParams(rawInitData: string): {
   user: TelegramWebAppUser | null;
   startParam: string;
@@ -66,20 +268,42 @@ export function resolveTelegramUserIdentity(params: {
   let user = params.tgUser ?? null;
   let derivedStartParam = (params.startParam || '').trim();
 
-  if (!user && params.initData) {
+  if (params.initData) {
     const parsed = parseInitDataUserParams(params.initData);
-    if (parsed.user) user = parsed.user;
+    if (!user && parsed.user) user = parsed.user;
     if (!derivedStartParam && parsed.startParam) derivedStartParam = parsed.startParam;
   }
 
-  if (!user && params.hash) {
+  if (params.hash) {
     const cleanHash = params.hash.startsWith('#') ? params.hash.slice(1) : params.hash;
     const hashParams = new URLSearchParams(cleanHash);
     const rawTgWebAppData = hashParams.get('tgWebAppData') || '';
     if (rawTgWebAppData) {
       const parsed = parseInitDataUserParams(rawTgWebAppData);
-      if (parsed.user) user = parsed.user;
+      if (!user && parsed.user) user = parsed.user;
       if (!derivedStartParam && parsed.startParam) derivedStartParam = parsed.startParam;
+    }
+    if (!derivedStartParam) {
+      derivedStartParam = (
+        hashParams.get('tgWebAppStartParam') ||
+        hashParams.get('startapp') ||
+        hashParams.get('start_param') ||
+        hashParams.get('ref') ||
+        ''
+      ).trim();
+    }
+  }
+
+  if (params.search) {
+    const query = new URLSearchParams(params.search);
+    if (!derivedStartParam) {
+      derivedStartParam = (
+        query.get('tgWebAppStartParam') ||
+        query.get('startapp') ||
+        query.get('start_param') ||
+        query.get('ref') ||
+        ''
+      ).trim();
     }
   }
 
@@ -113,11 +337,6 @@ export function resolveTelegramUserIdentity(params: {
     const qName = query.get('tg_name')?.trim() || '';
     const qUser = query.get('tg_username')?.trim().replace(/^@/, '') || '';
     const qPhoto = query.get('tg_photo')?.trim() || '';
-    const qStart =
-      derivedStartParam ||
-      query.get('startapp')?.trim() ||
-      query.get('ref')?.trim() ||
-      '';
 
     if (qId || qName || qUser || qPhoto) {
       const displayName = (qName || qUser || `Farmer ${qId.slice(-4) || 'TG'}`).slice(0, 60);
@@ -127,7 +346,7 @@ export function resolveTelegramUserIdentity(params: {
         displayName,
         handle,
         photoUrl: qPhoto.slice(0, 512),
-        startParam: qStart,
+        startParam: derivedStartParam,
         isTelegramDetected: true,
       };
     }
@@ -137,7 +356,7 @@ export function resolveTelegramUserIdentity(params: {
       displayName: '',
       handle: '',
       photoUrl: '',
-      startParam: qStart,
+      startParam: derivedStartParam,
       isTelegramDetected: false,
     };
   }
