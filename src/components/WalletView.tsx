@@ -9,6 +9,7 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
+import { motion } from 'motion/react';
 import {
   Bar,
   BarChart,
@@ -138,12 +139,24 @@ export function WalletView({
         </div>
 
         <div className="flex items-center justify-center gap-2.5">
-          <div className="w-11 h-11 rounded-2xl clay-icon-well flex items-center justify-center">
+          <motion.div
+            key={`wallet-egg-well-${profile.eggs}`}
+            initial={{ scale: 1.15, rotate: -8 }}
+            animate={{ scale: 1, rotate: 0 }}
+            transition={{ type: 'spring', stiffness: 400, damping: 20 }}
+            className="w-11 h-11 rounded-2xl clay-icon-well flex items-center justify-center"
+          >
             <EggIcon className="w-7 h-7" />
-          </div>
-          <span className="text-3xl font-extrabold text-stone-900 dark:text-stone-100 font-mono-num">
+          </motion.div>
+          <motion.span
+            key={profile.eggs}
+            initial={{ scale: 1.08 }}
+            animate={{ scale: 1 }}
+            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+            className="text-3xl font-extrabold text-stone-900 dark:text-stone-100 font-mono-num origin-left"
+          >
             {profile.eggs.toLocaleString()}
-          </span>
+          </motion.span>
         </div>
 
         <div className="text-sm font-bold text-stone-700 dark:text-stone-200 font-mono-num">
@@ -160,22 +173,24 @@ export function WalletView({
         </div>
 
         <div className="grid grid-cols-2 gap-2.5 pt-1">
-          <button
+          <motion.button
             type="button"
+            whileTap={{ scale: 0.96 }}
             onClick={onOpenDeposit}
-            className="clay-btn clay-btn-emerald min-h-[48px] rounded-2xl font-extrabold text-sm flex items-center justify-center gap-2"
+            className="clay-btn clay-btn-emerald clay-cta-sheen min-h-[48px] rounded-2xl font-extrabold text-sm flex items-center justify-center gap-2"
           >
             <ArrowDownLeft className="w-4 h-4 stroke-[2.5]" />
             <span>Deposit</span>
-          </button>
-          <button
+          </motion.button>
+          <motion.button
             type="button"
+            whileTap={{ scale: 0.96 }}
             onClick={onOpenWithdraw}
             className="clay-btn clay-btn-sky min-h-[48px] rounded-2xl font-extrabold text-sm flex items-center justify-center gap-2"
           >
             <ArrowUpRight className="w-4 h-4 stroke-[2.5]" />
             <span>Withdraw</span>
-          </button>
+          </motion.button>
         </div>
       </div>
 
@@ -274,27 +289,37 @@ export function WalletView({
                 { id: 'pending', label: 'Pending', count: pendingWithdrawals.length },
                 { id: 'completed', label: 'Completed', count: completedWithdrawals.length },
               ] as const
-            ).map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                aria-pressed={withdrawalFilter === tab.id}
-                onClick={() => {
-                  onTabTap?.();
-                  setWithdrawalFilter(tab.id);
-                }}
-                className={`clay-btn px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1 ${
-                  withdrawalFilter === tab.id
-                    ? 'clay-btn-amber'
-                    : 'text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200'
-                }`}
-              >
-                <span>{tab.label}</span>
-                {tab.count > 0 && (
-                  <span className="text-[10px] font-mono-num opacity-80">{tab.count}</span>
-                )}
-              </button>
-            ))}
+            ).map((tab) => {
+              const active = withdrawalFilter === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => {
+                    onTabTap?.();
+                    setWithdrawalFilter(tab.id);
+                  }}
+                  className={`relative px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors ${
+                    active
+                      ? 'text-amber-950'
+                      : 'text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200'
+                  }`}
+                >
+                  {active && (
+                    <motion.span
+                      layoutId="wallet-wd-filter-active"
+                      transition={{ type: 'spring', stiffness: 420, damping: 30 }}
+                      className="clay-btn-amber absolute inset-0 rounded-lg -z-10"
+                    />
+                  )}
+                  <span>{tab.label}</span>
+                  {tab.count > 0 && (
+                    <span className="text-[10px] font-mono-num opacity-80">{tab.count}</span>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
 

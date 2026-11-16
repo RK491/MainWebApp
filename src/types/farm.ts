@@ -5,7 +5,6 @@ export type NavTab = 'farm' | 'packs' | 'tasks' | 'friends' | 'wallet';
 export type SubView =
   | 'none'
   | 'profile'
-  | 'leaderboard'
   | 'your_farm'
   | 'deposit'
   | 'withdraw'
@@ -238,6 +237,7 @@ export type AdGateActionType =
   | 'claim_promo'
   | 'ad_network'
   | 'watch_ad'
+  | 'adsgram_task'
   | 'task'
   | 'withdraw'
   | 'deposit'
@@ -248,6 +248,7 @@ export type AdProviderType = 'countdown' | 'adsgram' | 'gigapub' | 'monetag' | '
 export interface AdConfig {
   provider: AdProviderType;
   adsgramBlockId: string;
+  adsgramTaskBlockId?: string;
   gigapubProjectId?: string;
   monetagZoneId: string;
   customTitle: string;
@@ -280,6 +281,7 @@ export interface RequiredTelegramChannel {
 export interface ChannelsConfig {
   enabled: boolean;
   channels: RequiredTelegramChannel[];
+  getCodeChannelUrl?: string;
   updatedAtMs: number;
 }
 

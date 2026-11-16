@@ -47,3 +47,53 @@ export function triggerTop10RankConfetti(): void {
     colors: ['#F59E0B', '#FBBF24', '#10B981', '#38BDF8'],
   });
 }
+
+export function triggerCollectConfetti(): void {
+  safeFire({
+    particleCount: 36,
+    spread: 58,
+    startVelocity: 26,
+    scalar: 0.85,
+    origin: { y: 0.72 },
+    colors: ['#F59E0B', '#FDE047', '#FFFBEB', '#10B981'],
+  });
+}
+
+export function triggerGoldenEggConfetti(): void {
+  safeFire({
+    particleCount: 48,
+    angle: 65,
+    spread: 52,
+    startVelocity: 32,
+    origin: { x: 0.22, y: 0.62 },
+    colors: ['#FBBF24', '#FDE047', '#F59E0B', '#FEF3C7'],
+  });
+  safeFire({
+    particleCount: 48,
+    angle: 115,
+    spread: 52,
+    startVelocity: 32,
+    origin: { x: 0.78, y: 0.62 },
+    colors: ['#FBBF24', '#FDE047', '#F59E0B', '#FEF3C7'],
+  });
+}
+
+export function triggerRewardConfetti(): void {
+  safeFire({
+    particleCount: 45,
+    spread: 64,
+    startVelocity: 28,
+    origin: { y: 0.66 },
+    colors: ['#10B981', '#34D399', '#F59E0B', '#FDE047'],
+  });
+}
+
+export function triggerDepositConfetti(): void {
+  safeFire({
+    particleCount: 60,
+    spread: 72,
+    startVelocity: 30,
+    origin: { y: 0.64 },
+    colors: ['#10B981', '#0EA5E9', '#34D399', '#FBBF24'],
+  });
+}

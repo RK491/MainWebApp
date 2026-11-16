@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle2, ExternalLink, Gift, Play, Sparkles, Timer, X } from 'lucide-react';
-import { CHICKEN_PACKS } from '../game/economy';
+import { motion, useReducedMotion } from 'motion/react';
+import {
+  ADSGRAM_BOT_JOIN_TASK,
+  CHICKEN_PACKS,
+  FREE_EGGS_MILESTONE_BONUS,
+  FREE_EGGS_PER_AD,
+} from '../game/economy';
 import type { AdConfig, ChickenBreedId } from '../types/farm';
 import clayHenMascot from '../assets/images/clay_hen_mascot_1794678825872.jpg';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
@@ -11,6 +17,7 @@ export type ModalAdActionKind =
   | 'claim_promo'
   | 'buy_chicken'
   | 'ad_network'
+  | 'adsgram_task'
   | 'watch_ad';
 
 interface RewardedAdModalProps {
@@ -48,6 +55,7 @@ export function RewardedAdModal({
   onComplete,
   onClose,
 }: RewardedAdModalProps) {
+  const shouldReduceMotion = useReducedMotion();
   const totalSeconds = Math.max(3, Math.min(60, adConfig.watchSeconds || 5));
   const [secondsLeft, setSecondsLeft] = useState(totalSeconds);
   const [claimed, setClaimed] = useState(false);
@@ -72,6 +80,10 @@ export function RewardedAdModal({
     : null;
   const minerPackName = minerPack?.name || 'Hen Miner';
   const safeMinerCost = Math.max(0, Math.floor(Number(minerCostCoins ?? 0)));
+  const isMilestoneEggAd = watchedCount + 1 >= 10;
+  const watchAdEggAmount = isMilestoneEggAd
+    ? FREE_EGGS_PER_AD + FREE_EGGS_MILESTONE_BONUS
+    : FREE_EGGS_PER_AD;
 
   const handleClaim = () => {
     if (!readyToClaim || claimed) return;
@@ -84,8 +96,9 @@ export function RewardedAdModal({
     if (actionKind === 'collect_eggs') return 'Egg Harvest Ad';
     if (actionKind === 'claim_promo') return 'Gift Code Ad';
     if (actionKind === 'buy_chicken') return 'Miner Purchase Ad';
-    if (networkLabel) return `${networkLabel} Reward`;
-    return `Sponsored Reward (${watchedCount + 1}/10)`;
+    if (actionKind === 'adsgram_task') return 'AdsGram Bot Joins';
+    if (networkLabel) return `${networkLabel} · Earn Coins`;
+    return `Get Free Eggs (${watchedCount + 1}/10)`;
   })();
 
   const headline = (() => {
@@ -93,8 +106,9 @@ export function RewardedAdModal({
     if (actionKind === 'collect_eggs') return 'Unlock Egg Harvest';
     if (actionKind === 'claim_promo') return `Unlock Gift ${promoCode || 'Code'}`;
     if (actionKind === 'buy_chicken') return `Unlock ${safeChickenQty}× ${minerPackName}`;
-    if (networkLabel) return `${networkLabel} Daily Ad`;
-    return adConfig.customTitle || 'Alpha Gram Sponsor Showcase';
+    if (actionKind === 'adsgram_task') return 'AdsGram Bot Joins & Clicks';
+    if (networkLabel) return `${networkLabel} Watch & Earn`;
+    return 'Watch & Earn Free Eggs';
   })();
 
   const description = (() => {
@@ -114,13 +128,17 @@ export function RewardedAdModal({
         safeMinerCost > 0 ? ` for ${safeMinerCost.toLocaleString()} coins` : ''
       }.`;
     }
-    if (hasCoinReward) {
-      return `Watch until the timer ends to earn +${rewardCoins} coins & +1/10 progress toward a free White Leghorn.`;
+    if (actionKind === 'adsgram_task') {
+      return `Visit the sponsored Telegram bot or channel offer and wait for the timer to claim +${
+        rewardCoins ?? ADSGRAM_BOT_JOIN_TASK.rewardCoins
+      } coins.`;
     }
-    return (
-      adConfig.customDescription ||
-      'Watch until the timer ends to earn +1 progress toward a free White Leghorn.'
-    );
+    if (hasCoinReward) {
+      return `Watch until the timer ends to earn +${rewardCoins} coins directly to your wallet.`;
+    }
+    return isMilestoneEggAd
+      ? `10/10 Bonus Ad! Complete the timer to claim +${watchAdEggAmount.toLocaleString()} Free Eggs (+${FREE_EGGS_MILESTONE_BONUS} bonus).`
+      : `Watch until the timer ends to earn +${FREE_EGGS_PER_AD} Free Eggs (+${FREE_EGGS_MILESTONE_BONUS} chest at 10/10).`;
   })();
 
   const completeButtonLabel = (() => {
@@ -128,8 +146,11 @@ export function RewardedAdModal({
     if (actionKind === 'collect_eggs') return `Collect +${safeEggs.toLocaleString()} Eggs`;
     if (actionKind === 'claim_promo') return `Claim Gift (${promoCode || 'Reward'})`;
     if (actionKind === 'buy_chicken') return `Buy ${safeChickenQty}× ${minerPackName}`;
+    if (actionKind === 'adsgram_task') {
+      return `Claim +${rewardCoins ?? ADSGRAM_BOT_JOIN_TASK.rewardCoins} Coins`;
+    }
     if (hasCoinReward) return `Claim +${rewardCoins} Coins`;
-    return `Claim Ad Step (${Math.min(10, watchedCount + 1)}/10)`;
+    return `Claim +${watchAdEggAmount} Free Eggs`;
   })();
 
   return (
@@ -163,6 +184,8 @@ export function RewardedAdModal({
             <div className="animate-clay-float w-20 h-20 rounded-2xl clay-icon-well p-1 flex items-center justify-center overflow-hidden">
               {actionKind === 'buy_chicken' && chickenBreed ? (
                 <ChickenSprite breed={chickenBreed} className="w-14 h-14" />
+              ) : actionKind === 'watch_ad' ? (
+                <EggIcon className="w-14 h-14" />
               ) : !imgFailed ? (
                 <img
                   src={clayHenMascot}
@@ -187,6 +210,13 @@ export function RewardedAdModal({
             <div className="inline-flex items-center gap-1.5 rounded-xl bg-amber-100/80 dark:bg-amber-950/60 border border-amber-300/70 dark:border-amber-700/50 px-3 py-1 text-xs font-extrabold text-amber-800 dark:text-amber-300">
               <EggIcon className="w-4 h-4" />
               <span className="font-mono-num">+{safeEggs.toLocaleString()} eggs</span>
+            </div>
+          )}
+
+          {actionKind === 'watch_ad' && (
+            <div className="inline-flex items-center gap-1.5 rounded-xl bg-amber-100/80 dark:bg-amber-950/60 border border-amber-300/70 dark:border-amber-700/50 px-3 py-1 text-xs font-extrabold text-amber-800 dark:text-amber-300">
+              <EggIcon className="w-4 h-4" />
+              <span className="font-mono-num">+{watchAdEggAmount.toLocaleString()} Free Eggs</span>
             </div>
           )}
 
@@ -226,7 +256,7 @@ export function RewardedAdModal({
                 rel="noopener noreferrer"
                 className="clay-btn clay-btn-neutral inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-extrabold text-sky-700 dark:text-sky-400"
               >
-                <span>Visit Sponsor</span>
+                <span>{actionKind === 'adsgram_task' ? 'Open Bot / Offer' : 'Visit Sponsor'}</span>
                 <ExternalLink className="w-3.5 h-3.5" />
               </a>
             </div>
@@ -250,9 +280,11 @@ export function RewardedAdModal({
             </span>
           </div>
           <div className="h-3 rounded-xl clay-inset p-0.5 overflow-hidden">
-            <div
-              className="h-full rounded-lg bg-gradient-to-r from-emerald-400 to-emerald-500 transition-all duration-500 clay-shimmer-bar"
-              style={{ width: `${progressPct}%` }}
+            <motion.div
+              initial={{ width: 0 }}
+              animate={{ width: `${progressPct}%` }}
+              transition={shouldReduceMotion ? { duration: 0 } : { duration: 0.45, ease: 'easeOut' }}
+              className="h-full rounded-lg bg-gradient-to-r from-emerald-400 to-emerald-500 clay-shimmer-bar"
             />
           </div>
           {!mandatory && !readyToClaim && (

@@ -20,6 +20,7 @@ import {
   type Firestore,
 } from 'firebase/firestore';
 import {
+  buildReferralBotNotificationMessage,
   DEFAULT_CHANNELS_CONFIG,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
@@ -32,6 +33,7 @@ import {
   normalizeTelegramChannelEntry,
   PRIMARY_ADMIN_TELEGRAM_ID,
   PROMO_CODES,
+  REFERRER_SIGNUP_BONUS_COINS,
 } from './src/game/economy.ts';
 import type { ChannelsConfig, RequiredTelegramChannel } from './src/types/farm.ts';
 import {
@@ -114,9 +116,26 @@ const ADMIN_TELEGRAM_IDS = (process.env.ADMIN_TELEGRAM_IDS || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+
+// ============================================================================
+// ADMIN PASSCODE CONFIGURATION
+// Option A (Recommended): Set ADMIN_PASSCODE=your_secret in your `.env` file
+// Option B: Change DEFAULT_ADMIN_PASSCODE right here in `server.ts`
+// ============================================================================
+export const DEFAULT_ADMIN_PASSCODE = '750891';
+const ADMIN_PASSCODE = (process.env.ADMIN_PASSCODE || DEFAULT_ADMIN_PASSCODE).trim();
+
+function verifyAdminPasscode(provided: string): boolean {
+  const cleanProvided = provided.trim();
+  if (!cleanProvided || !ADMIN_PASSCODE) return false;
+  const a = Buffer.from(cleanProvided, 'utf8');
+  const b = Buffer.from(ADMIN_PASSCODE, 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 const SESSION_SIGNING_SECRET = crypto
   .createHash('sha256')
-  .update(`chickenland_session_v2:${PRIMARY_ADMIN_TELEGRAM_ID}:${TELEGRAM_BOT_TOKEN}`)
+  .update(`chickenland_session_v2:${PRIMARY_ADMIN_TELEGRAM_ID}:${TELEGRAM_BOT_TOKEN}:${ADMIN_PASSCODE}`)
   .digest('hex');
 
 let cachedBotUsername = TELEGRAM_BOT_USERNAME_ENV || '';
@@ -365,6 +384,20 @@ async function loadChannelsConfigFromFirestore(): Promise<ChannelsConfig> {
   }
 }
 
+async function loadExtraAdminIdsFromFirestore(): Promise<string[]> {
+  if (!serverDb) return [];
+  try {
+    const snap = await getDoc(doc(serverDb, 'app_config', 'admins'));
+    if (!snap.exists()) return [];
+    const d = snap.data();
+    return Array.isArray(d.adminIds)
+      ? d.adminIds.map((id) => String(id).trim()).filter(Boolean)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json());
@@ -551,20 +584,25 @@ async function startServer() {
     });
   });
 
-  app.post('/api/admin/auth', (req, res) => {
+  app.post('/api/admin/auth', async (req, res) => {
     const body = req.body as {
       playerId?: string;
       initData?: string;
+      passcode?: string;
       token?: string;
     };
     const rawPlayerId = String(body.playerId || '').trim();
     const rawInitData = String(body.initData || '').trim();
+    const rawPasscode = String(body.passcode || '').trim();
     const authHeader = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
     const candidateToken = String(body.token || authHeader || '').trim();
 
+    const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
+    const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
+
     if (candidateToken) {
       const verified = verifySessionToken(candidateToken);
-      if (verified?.role === 'admin' && isAdminPlayerId(verified.playerId, ADMIN_TELEGRAM_IDS)) {
+      if (verified?.role === 'admin' && isAdminPlayerId(verified.playerId, effectiveExtraAdmins)) {
         res.json({ ok: true, method: 'token', token: candidateToken });
         return;
       }
@@ -578,20 +616,113 @@ async function startServer() {
       }
     }
 
-    if (isAdminPlayerId(resolvedPlayerId, ADMIN_TELEGRAM_IDS)) {
-      const token = signSessionToken({
-        role: 'admin',
-        playerId: resolvedPlayerId,
-        method: 'telegram_id',
+    if (!isAdminPlayerId(resolvedPlayerId, effectiveExtraAdmins)) {
+      res.status(403).json({
+        ok: false,
+        error: `Restricted to authorized Admin IDs (Primary: ${PRIMARY_ADMIN_TELEGRAM_ID}).`,
       });
-      res.json({ ok: true, method: 'telegram_id', token });
       return;
     }
 
-    res.status(403).json({
-      ok: false,
-      error: `Restricted to Telegram Admin ID ${PRIMARY_ADMIN_TELEGRAM_ID}.`,
+    if (!rawPasscode) {
+      res.status(401).json({
+        ok: false,
+        requiresPasscode: true,
+        error: 'Enter your Admin Passcode to unlock the Admin Console.',
+      });
+      return;
+    }
+
+    if (!verifyAdminPasscode(rawPasscode)) {
+      res.status(403).json({
+        ok: false,
+        requiresPasscode: true,
+        error: 'Incorrect Admin Passcode. Please check and try again.',
+      });
+      return;
+    }
+
+    const token = signSessionToken({
+      role: 'admin',
+      playerId: resolvedPlayerId,
+      method: 'passcode',
     });
+    res.json({ ok: true, method: 'passcode', token });
+  });
+
+  app.post('/api/referrals/notify', async (req, res) => {
+    const body = req.body as {
+      event?: 'referral_joined' | 'deposit_commission';
+      referrerUid?: string;
+      referredName?: string;
+      referredHandle?: string;
+      rewardCoins?: number;
+      depositGram?: string;
+      depositUsd?: number;
+    };
+
+    const referrerUid = String(body.referrerUid || '').trim();
+    const numericReferrerId = extractTelegramNumericUserId(referrerUid);
+    const event = body.event === 'deposit_commission' ? 'deposit_commission' : 'referral_joined';
+    const rewardCoins = Math.max(
+      0,
+      Math.round(Number(body.rewardCoins ?? (event === 'referral_joined' ? REFERRER_SIGNUP_BONUS_COINS : 0))),
+    );
+
+    if (!numericReferrerId) {
+      res.json({
+        ok: true,
+        sent: false,
+        reason: 'Referrer does not have a Telegram numeric chat ID',
+      });
+      return;
+    }
+
+    if (!TELEGRAM_BOT_TOKEN) {
+      res.json({
+        ok: true,
+        sent: false,
+        reason: 'TELEGRAM_BOT_TOKEN not configured on server',
+      });
+      return;
+    }
+
+    const messageText = buildReferralBotNotificationMessage({
+      event,
+      referredName: body.referredName,
+      referredHandle: body.referredHandle,
+      rewardCoins,
+      depositGram: body.depositGram,
+      depositUsd: body.depositUsd,
+    });
+
+    try {
+      const tgRes = await fetch(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: numericReferrerId,
+            text: messageText,
+            parse_mode: 'HTML',
+          }),
+          signal: AbortSignal.timeout(7000),
+        },
+      );
+      const tgData = (await tgRes.json()) as { ok?: boolean; description?: string };
+      res.json({
+        ok: true,
+        sent: Boolean(tgData.ok),
+        reason: tgData.ok ? undefined : tgData.description || 'Telegram API error',
+      });
+    } catch (err) {
+      res.json({
+        ok: true,
+        sent: false,
+        reason: err instanceof Error ? err.message : 'Telegram request failed',
+      });
+    }
   });
 
   app.post('/api/economy/validate-promo', async (req, res) => {

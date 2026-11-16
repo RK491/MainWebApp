@@ -6,10 +6,8 @@ import {
   Check,
   CheckCircle2,
   Copy,
-  Crown,
   Package,
   Sparkles,
-  Trophy,
   Users,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
@@ -17,13 +15,14 @@ import { testFirestoreConnection } from './firebase';
 import {
   activateFeedBooster,
   AD_NETWORK_TASKS,
-  buildLeaderboardRankings,
+  ADSGRAM_BOT_JOIN_TASK,
   buyChickens,
   calculatePendingEggs,
   calculateProductionRate,
   CHICKEN_PACKS,
   claimAchievement,
   claimAdNetworkReward,
+  claimAdsgramBotJoinReward,
   claimDailyStreak,
   claimGoldenEggDrop,
   claimPromoCode,
@@ -31,14 +30,13 @@ import {
   collectEggs,
   completeTask,
   createDefaultProfile,
-  createDefaultSeasonConfig,
   createPaidTaskOrder,
   DEFAULT_AD_CONFIG,
   DEFAULT_ADMINS_CONFIG,
   DEFAULT_CHANNELS_CONFIG,
+  DEFAULT_GET_CODE_CHANNEL_URL,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
-  detectTop10RankCelebration,
   executeDeposit,
   executeWithdrawal,
   formatAwayDuration,
@@ -48,6 +46,8 @@ import {
   getEffectiveAdminIds,
   isAdminPlayerId,
   recordCompletedGateAd,
+  REFERRAL_DEPOSIT_COMMISSION_RATE,
+  REFERRER_SIGNUP_BONUS_COINS,
   reinvestEggs,
   upgradeBasket,
   watchAdStep,
@@ -76,7 +76,6 @@ import {
   createPromoCodeInFirestore,
   deleteCustomTaskInFirestore,
   deletePromoCodeInFirestore,
-  distributeSeasonPrizesInFirestore,
   ensurePlayerInFirestore,
   fetchCustomTasksFromFirestore,
   fetchPlayerReferralsFromFirestore,
@@ -90,7 +89,6 @@ import {
   reviewWithdrawalInFirestore,
   saveAdConfigInFirestore,
   saveChannelsConfigInFirestore,
-  saveSeasonConfigInFirestore,
   searchUsersInFirestore,
   subscribeToAdConfig,
   subscribeToAdminsConfig,
@@ -98,12 +96,10 @@ import {
   subscribeToBannedUsers,
   subscribeToChannelsConfig,
   subscribeToCustomTasks,
-  subscribeToLeaderboard,
   subscribeToPlayer,
   subscribeToPlayerBanStatus,
   subscribeToPromoCodes,
   subscribeToRecentPlayers,
-  subscribeToSeasonConfig,
   toggleCustomTaskInFirestore,
   togglePromoCodeInFirestore,
   unbanPlayerInFirestore,
@@ -119,11 +115,9 @@ import type {
   DepositOrder,
   DynamicPromoCode,
   LanguageCode,
-  LeaderboardEntry,
   NavTab,
   PromoRewardType,
   ReferralRecord,
-  SeasonConfig,
   SubView,
   TaskCategory,
   TaskDefinition,
@@ -132,7 +126,11 @@ import type {
   WithdrawalOrder,
   WithdrawRequestRecord,
 } from './types/farm';
-import { tryRunAdNetwork, tryRunExternalRewardedAd } from './utils/ads';
+import {
+  tryRunAdNetwork,
+  tryRunAdsgramTaskAd,
+  tryRunExternalRewardedAd,
+} from './utils/ads';
 import { getStoredLanguage, setStoredLanguage, t } from './utils/i18n';
 import {
   type BrowserNotificationPermission,
@@ -147,7 +145,13 @@ import {
   setStoredLastNotifiedCycle,
   shouldTriggerBasketFullNotification,
 } from './utils/notifications';
-import { triggerTop10RankConfetti, triggerWithdrawalConfetti } from './utils/celebration';
+import {
+  triggerCollectConfetti,
+  triggerDepositConfetti,
+  triggerGoldenEggConfetti,
+  triggerRewardConfetti,
+  triggerWithdrawalConfetti,
+} from './utils/celebration';
 import {
   type AudioSettings,
   computeMuteAllToggle,
@@ -180,7 +184,6 @@ import { FarmArtifactsDrawer } from './components/FarmArtifactsDrawer';
 import { FarmMeadow } from './components/FarmMeadow';
 import { FriendsView } from './components/FriendsView';
 import { CoinIcon, EggIcon } from './components/GameIcons';
-import { LeaderboardView } from './components/LeaderboardView';
 import { PacksView } from './components/PacksView';
 import { ProfileView, SettingsModal, YourFarmView } from './components/ProfileAndFarmViews';
 import { OfflineIndicator } from './components/PWAControls';
@@ -233,23 +236,23 @@ export default function App() {
   const [deposits, setDeposits] = useState<DepositOrder[]>([]);
   const [withdrawals, setWithdrawals] = useState<WithdrawalOrder[]>([]);
   const [referrals, setReferrals] = useState<ReferralRecord[]>([]);
-  const [cloudLeaderboard, setCloudLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [customTasks, setCustomTasks] = useState<TaskDefinition[]>([]);
   const [adConfig, setAdConfig] = useState<AdConfig>(DEFAULT_AD_CONFIG);
   const [channelsConfig, setChannelsConfig] = useState<ChannelsConfig>(DEFAULT_CHANNELS_CONFIG);
   const [allWithdrawRequests, setAllWithdrawRequests] = useState<WithdrawRequestRecord[]>([]);
   const [promoCodes, setPromoCodes] = useState<DynamicPromoCode[]>([]);
-  const [seasonConfig, setSeasonConfig] = useState<SeasonConfig>(() => createDefaultSeasonConfig());
   const [recentPlayers, setRecentPlayers] = useState<UserFarmProfile[]>([]);
   const [bannedUsers, setBannedUsers] = useState<BannedUserRecord[]>([]);
   const [adminsConfig, setAdminsConfig] = useState<AdminsConfig>(DEFAULT_ADMINS_CONFIG);
+  const [adminUnlocked, setAdminUnlocked] = useState(false);
   const [banRecord, setBanRecord] = useState<BannedUserRecord | null>(() =>
     loadCachedBanRecord(activePlayerId),
   );
   const [banIdCopied, setBanIdCopied] = useState(false);
 
   const extraAdminIds = useMemo(() => getEffectiveAdminIds(adminsConfig), [adminsConfig]);
-  const isBanned = Boolean(banRecord) && !isAdminPlayerId(profile.uid, extraAdminIds);
+  const isAuthorizedAdmin = isAdminPlayerId(profile.uid, extraAdminIds);
+  const isBanned = Boolean(banRecord) && !isAuthorizedAdmin;
   const isBannedRef = useRef(isBanned);
   isBannedRef.current = isBanned;
 
@@ -273,6 +276,9 @@ export default function App() {
   );
   const [watchingAdLoading, setWatchingAdLoading] = useState(false);
   const [activeAdNetwork, setActiveAdNetwork] = useState<AdNetworkId | null>(null);
+  const [activeAdAction, setActiveAdAction] = useState<
+    'watch_ad' | 'ad_network' | 'adsgram_task' | null
+  >(null);
   const [adModalState, setAdModalState] = useState<{
     open: boolean;
     kind: ModalAdActionKind;
@@ -325,12 +331,21 @@ export default function App() {
   });
   const [checkingChannels, setCheckingChannels] = useState(false);
   const [showChannelGateModal, setShowChannelGateModal] = useState(false);
+  const [preSplashChannelPassed, setPreSplashChannelPassed] = useState(false);
   const autoCheckedChannelsRef = useRef<string | null>(null);
 
   const skipWelcome = useMemo(() => {
     if (typeof window === 'undefined') return false;
     return new URLSearchParams(window.location.search).get('autostart') === '1';
   }, []);
+  const needsPreSplashChannelGate =
+    !skipWelcome &&
+    !isBanned &&
+    subView !== 'admin' &&
+    channelsGateEnabled &&
+    !preSplashChannelPassed &&
+    !channelVerification?.allJoined;
+
   const [showSplash, setShowSplash] = useState(() => !skipWelcome);
   const handleSplashComplete = useCallback(() => {
     setShowSplash(false);
@@ -357,9 +372,6 @@ export default function App() {
   const welcomeCheckedForPlayerRef = useRef<string | null>(null);
   const ensurePromiseRef = useRef<Promise<UserFarmProfile | void>>(Promise.resolve());
   const [isPlayerSynced, setIsPlayerSynced] = useState(false);
-  const [isLeaderboardSynced, setIsLeaderboardSynced] = useState(false);
-  const prevBuyerRankRef = useRef<number | null>(null);
-  const rankCelebrationReadyRef = useRef(false);
   const prevWithdrawalStatusRef = useRef<Map<string, string> | null>(null);
   const userSelectedLangRef = useRef<LanguageCode | null>(null);
 
@@ -498,6 +510,7 @@ export default function App() {
         };
         setChannelVerification(disabledResult);
         setShowChannelGateModal(false);
+        setPreSplashChannelPassed(true);
         return disabledResult;
       }
 
@@ -522,6 +535,7 @@ export default function App() {
 
         if (data.verificationMode === 'disabled') {
           setShowChannelGateModal(false);
+          setPreSplashChannelPassed(true);
           return data;
         }
 
@@ -536,6 +550,7 @@ export default function App() {
               // ignore storage errors
             }
             setShowChannelGateModal(false);
+            setPreSplashChannelPassed(true);
             if (!opts?.silent) {
               playClaimSound(soundsEnabled);
               triggerHapticFeedback('success');
@@ -582,19 +597,21 @@ export default function App() {
   useEffect(() => {
     if (!channelsGateEnabled) {
       setShowChannelGateModal(false);
+      setPreSplashChannelPassed(true);
       return;
     }
     if (skipWelcome) return;
-    if (!detectedIdentity.isTelegramDetected) return;
     if (autoCheckedChannelsRef.current === activePlayerId) return;
     autoCheckedChannelsRef.current = activePlayerId;
 
     void handleCheckChannels({ silent: true }).then((result) => {
-      if (result && result.verificationMode === 'telegram_bot' && !result.allJoined) {
+      if (result && (result.allJoined || result.verificationMode === 'disabled')) {
+        setPreSplashChannelPassed(true);
+      } else if (result && result.verificationMode === 'telegram_bot' && !result.allJoined) {
         setShowChannelGateModal(true);
       }
     });
-  }, [activePlayerId, channelsGateEnabled, detectedIdentity.isTelegramDetected, handleCheckChannels, skipWelcome]);
+  }, [activePlayerId, channelsGateEnabled, handleCheckChannels, skipWelcome]);
 
   const handleToggleMuteAll = useCallback(() => {
     const next = computeMuteAllToggle(audioSettings);
@@ -750,7 +767,7 @@ export default function App() {
     }
   }, [notificationsEnabled, showToast]);
 
-  // Verify Firestore connection, fetch server GRAM config & subscribe to live public leaderboard
+  // Verify Firestore connection, fetch server GRAM config & subscribe to live config collections
   useEffect(() => {
     testFirestoreConnection();
     void safeFetchJson<{
@@ -780,10 +797,6 @@ export default function App() {
         );
       }
     });
-    const unsubLb = subscribeToLeaderboard((entries) => {
-      setCloudLeaderboard(entries);
-      setIsLeaderboardSynced(true);
-    });
     const unsubTasks = subscribeToCustomTasks((items) => {
       setCustomTasks(items);
     });
@@ -796,19 +809,14 @@ export default function App() {
     const unsubPromos = subscribeToPromoCodes((codes) => {
       setPromoCodes(codes);
     });
-    const unsubSeason = subscribeToSeasonConfig((cfg) => {
-      setSeasonConfig(cfg);
-    });
     const unsubAdmins = subscribeToAdminsConfig((cfg) => {
       setAdminsConfig(cfg);
     });
     return () => {
-      unsubLb();
       unsubTasks();
       unsubAds();
       unsubChannels();
       unsubPromos();
-      unsubSeason();
       unsubAdmins();
     };
   }, []);
@@ -822,13 +830,12 @@ export default function App() {
   }, [activePlayerId]);
 
   useEffect(() => {
-    if (subView !== 'admin') return;
+    if (subView !== 'admin' || !adminUnlocked || !isAdminPlayerId(profile.uid, extraAdminIds)) {
+      return;
+    }
     const unsubWdReqs = subscribeToAllWithdrawRequests((items) => {
       setAllWithdrawRequests(items);
     });
-    if (!isAdminPlayerId(profile.uid, extraAdminIds)) {
-      return () => unsubWdReqs();
-    }
     const unsubRecentPlayers = subscribeToRecentPlayers((players) => {
       setRecentPlayers(players);
     }, 50);
@@ -840,7 +847,7 @@ export default function App() {
       unsubRecentPlayers();
       unsubBannedUsers();
     };
-  }, [extraAdminIds, profile.uid, subView]);
+  }, [adminUnlocked, extraAdminIds, profile.uid, subView]);
 
   // Ensure active player exists in Firestore and subscribe live to all subcollections
   useEffect(() => {
@@ -928,7 +935,7 @@ export default function App() {
           }
         }
 
-        // Auto-link ?startapp= / ?ref= / start_param as Pending until player buys their 1st chicken
+        // Auto-link ?startapp= / ?ref= / start_param immediately, award +150 coins to referrer, and notify bot
         const refCode = pendingRefCodeRef.current;
         if (refCode && !ensured.referredBy) {
           pendingRefCodeRef.current = null;
@@ -936,7 +943,18 @@ export default function App() {
           if (!cancelled && !('error' in refRes)) {
             latestProfileRef.current = refRes.profile;
             setProfile(refRes.profile);
-            showToast(`+100 welcome coins! Buy 1st chicken to activate ${refRes.referrerName}'s referral`);
+            showToast(`+100 welcome coins! Joined via ${refRes.referrerName}'s referral!`);
+            void safeFetchJson('/api/referrals/notify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                event: 'referral_joined',
+                referrerUid: refRes.referrerUid,
+                referredName: refRes.profile.displayName,
+                referredHandle: refRes.profile.handle,
+                rewardCoins: refRes.coinsRewarded,
+              }),
+            });
             if (typeof window !== 'undefined') {
               const url = new URL(window.location.href);
               url.searchParams.delete('ref');
@@ -1067,32 +1085,6 @@ export default function App() {
     return Array.from(byId.values());
   }, [referralTransactions, transactions]);
 
-  const rankings = useMemo(
-    () => buildLeaderboardRankings(cloudLeaderboard, profile),
-    [cloudLeaderboard, profile],
-  );
-
-  useEffect(() => {
-    if (!isPlayerSynced || !isLeaderboardSynced) return;
-    if (!rankCelebrationReadyRef.current) {
-      rankCelebrationReadyRef.current = true;
-      prevBuyerRankRef.current = rankings.userBuyerRank;
-      return;
-    }
-
-    const shouldCelebrate = detectTop10RankCelebration({
-      previousRank: prevBuyerRankRef.current,
-      nextRank: rankings.userBuyerRank,
-      hasInitialized: true,
-    });
-    prevBuyerRankRef.current = rankings.userBuyerRank;
-
-    if (shouldCelebrate) {
-      triggerTop10RankConfetti();
-      showToast(`Reached Top 10 Leaderboard Rank #${rankings.userBuyerRank}!`);
-    }
-  }, [isLeaderboardSynced, isPlayerSynced, rankings.userBuyerRank, showToast]);
-
   const todayStr = getTodayDateString();
   const hasClaimableTasks = profile.lastDailyClaimDate !== todayStr;
   const strings = t(profile.language);
@@ -1110,8 +1102,12 @@ export default function App() {
       const nextProfile = countCompletedAd ? recordCompletedGateAd(res.profile) : res.profile;
       playClaimSound(soundsEnabled);
       triggerHapticFeedback('success');
+      triggerCollectConfetti();
       setShowWelcomeModal(false);
       setNowMs(now);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('alphagram:coin-arrival'));
+      }
       void persistMutation({
         nextProfile,
         transaction: res.transaction,
@@ -1172,6 +1168,7 @@ export default function App() {
       const nextProfile = countCompletedAd ? recordCompletedGateAd(res.profile) : res.profile;
       playCoinChimeSound(soundsEnabled);
       triggerHapticFeedback('medium');
+      triggerRewardConfetti();
       await persistMutation({
         nextProfile,
         transaction: res.transaction,
@@ -1260,8 +1257,24 @@ export default function App() {
         referrerCommissionCoins: res.referrerCommissionCoins,
       });
       if (!applied) return false;
+      if (res.referrerCommissionCoins > 0 && current.referredBy) {
+        void safeFetchJson('/api/referrals/notify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            event: 'deposit_commission',
+            referrerUid: current.referredBy,
+            referredName: current.displayName,
+            referredHandle: current.handle,
+            rewardCoins: res.referrerCommissionCoins,
+            depositGram: res.deposit.cryptoAmount,
+            depositUsd: res.deposit.usdAmount,
+          }),
+        });
+      }
       playCoinChimeSound(soundsEnabled);
       triggerHapticFeedback('success');
+      triggerDepositConfetti();
       showToast(`+${res.deposit.coinsAmount.toLocaleString()} coins credited from ${res.deposit.cryptoAmount}!`);
       return true;
     },
@@ -1517,29 +1530,43 @@ export default function App() {
     }
   };
 
-  const handleSaveSeasonConfig = async (cfg: Omit<SeasonConfig, 'updatedAtMs'>) => {
+  const handleVerifyAdminPasscode = async (
+    passcode: string,
+  ): Promise<{ ok: boolean; error?: string }> => {
     try {
-      const saved = await saveSeasonConfigInFirestore(cfg);
-      setSeasonConfig(saved);
-      showToast(`${saved.title} settings saved!`);
+      const response = await fetch('/api/admin/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerId: profile.uid,
+          initData: getTelegramInitData(),
+          passcode,
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+      };
+      if (response.ok && payload.ok) {
+        setAdminUnlocked(true);
+        showToast('Admin Console unlocked!');
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        error: payload.error || 'Incorrect Admin Passcode. Please try again.',
+      };
     } catch {
-      showToast('Failed to save season config.');
+      return {
+        ok: false,
+        error: 'Unable to reach verification server. Please check your connection.',
+      };
     }
   };
 
-  const handleDistributeSeasonPrizes = async (nextDurationDays: number) => {
-    try {
-      const nextSeason = await distributeSeasonPrizesInFirestore({
-        entries: rankings.topBuyers,
-        season: seasonConfig,
-        nextDurationDays,
-      });
-      setSeasonConfig(nextSeason);
-      triggerTop10RankConfetti();
-      showToast(`Season #${seasonConfig.seasonNumber} prizes paid & Season #${nextSeason.seasonNumber} started!`);
-    } catch {
-      showToast('Failed to distribute season prizes.');
-    }
+  const handleLockAdmin = () => {
+    setAdminUnlocked(false);
+    showToast('Admin Console locked.');
   };
 
   const handleBanPlayer = async (input: {
@@ -1705,6 +1732,7 @@ export default function App() {
     }
     playClaimSound(soundsEnabled);
     triggerHapticFeedback('success');
+    triggerRewardConfetti();
     void persistMutation({
       nextProfile: res.profile,
       transaction: res.transaction,
@@ -1724,6 +1752,7 @@ export default function App() {
       const nextProfile = countCompletedAd ? recordCompletedGateAd(res.profile) : res.profile;
       playClaimSound(soundsEnabled);
       triggerHapticFeedback('success');
+      triggerRewardConfetti();
       void persistMutation({
         nextProfile,
         transaction: res.transaction,
@@ -1776,7 +1805,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (isBanned || skipWelcome || showSplash) return;
+    if (isBanned || skipWelcome || needsPreSplashChannelGate || showSplash) return;
     if (subView === 'admin') return;
     if (startupAdTriggeredRef.current) return;
     startupAdTriggeredRef.current = true;
@@ -1803,7 +1832,7 @@ export default function App() {
         setWatchingAdLoading(false);
       }
     })();
-  }, [adConfig, persistMutation, showSplash, skipWelcome, subView]);
+  }, [adConfig, isBanned, needsPreSplashChannelGate, persistMutation, showSplash, skipWelcome, subView]);
 
   const handleCompleteTask = (taskId: string) => {
     const now = Date.now();
@@ -1833,10 +1862,11 @@ export default function App() {
       nextProfile: res.profile,
       transaction: res.transaction,
     });
-    if (res.unlockedChicken) {
-      showToast('10/10 ads watched — +1 Free White Leghorn added!');
+    if (res.hitMilestone) {
+      triggerRewardConfetti();
+      showToast(`10/10 Bonus Chest! +${res.rewardEggs.toLocaleString()} Free Eggs added!`);
     } else {
-      showToast(`Ad watched (${res.profile.watchedAdsCount}/10)`);
+      showToast(`+${res.rewardEggs.toLocaleString()} Free Eggs earned! (${res.profile.watchedAdsCount}/10)`);
     }
   };
 
@@ -1854,17 +1884,34 @@ export default function App() {
       nextProfile: res.profile,
       transaction: res.transaction,
     });
-    if (res.unlockedChicken) {
-      showToast(`${res.networkName}: +${res.rewardCoins} coins & +1 Free White Leghorn!`);
-    } else {
-      showToast(`${res.networkName}: +${res.rewardCoins} coins (${res.watchedToday}/${res.dailyLimit} today)`);
+    showToast(`${res.networkName}: +${res.rewardCoins} coins (${res.watchedToday}/${res.dailyLimit} today)`);
+  };
+
+  const handleClaimAdsgramBotJoin = () => {
+    const now = Date.now();
+    const current = latestProfileRef.current;
+    const res = claimAdsgramBotJoinReward(current, todayStr, now);
+    if ('error' in res) {
+      showToast(res.error);
+      return;
     }
+    playClaimSound(soundsEnabled);
+    triggerHapticFeedback('success');
+    triggerRewardConfetti();
+    void persistMutation({
+      nextProfile: res.profile,
+      transaction: res.transaction,
+    });
+    showToast(
+      `AdsGram Bot Joins: +${res.rewardCoins} coins (${res.claimedToday}/${res.dailyLimit} today)`,
+    );
   };
 
   const handleTriggerWatchAd = async () => {
     if (watchingAdLoading) return;
     setWatchingAdLoading(true);
     setActiveAdNetwork(null);
+    setActiveAdAction('watch_ad');
     try {
       const external = await tryRunExternalRewardedAd(adConfig);
       if (external.handled) {
@@ -1884,6 +1931,7 @@ export default function App() {
       });
     } finally {
       setWatchingAdLoading(false);
+      setActiveAdAction(null);
     }
   };
 
@@ -1891,11 +1939,15 @@ export default function App() {
     if (watchingAdLoading) return;
     setWatchingAdLoading(true);
     setActiveAdNetwork(network);
+    setActiveAdAction('ad_network');
     try {
       const external = await tryRunAdNetwork(network, adConfig);
       if (external.handled) {
         if (external.rewarded) {
           handleClaimAdNetwork(network);
+          if (external.message) {
+            showToast(external.message);
+          }
         } else {
           showToast('Ad closed early — reward not claimed.');
         }
@@ -1911,6 +1963,38 @@ export default function App() {
     } finally {
       setWatchingAdLoading(false);
       setActiveAdNetwork(null);
+      setActiveAdAction(null);
+    }
+  };
+
+  const handleTriggerAdsgramTask = async () => {
+    if (watchingAdLoading) return;
+    setWatchingAdLoading(true);
+    setActiveAdNetwork(null);
+    setActiveAdAction('adsgram_task');
+    try {
+      const external = await tryRunAdsgramTaskAd(adConfig);
+      if (external.handled) {
+        if (external.rewarded) {
+          handleClaimAdsgramBotJoin();
+          if (external.message) {
+            showToast(external.message);
+          }
+        } else {
+          showToast('Complete the bot join / click task to claim coins.');
+        }
+        return;
+      }
+      setAdModalState({
+        open: true,
+        kind: 'adsgram_task',
+        notice: external.message ?? null,
+        network: null,
+        mandatory: false,
+      });
+    } finally {
+      setWatchingAdLoading(false);
+      setActiveAdAction(null);
     }
   };
 
@@ -1958,6 +2042,7 @@ export default function App() {
     }
     playGoldenEggSound(soundsEnabled);
     triggerHapticFeedback('success');
+    triggerGoldenEggConfetti();
     void persistMutation({
       nextProfile: res.profile,
       transaction: res.transaction,
@@ -1975,6 +2060,7 @@ export default function App() {
     }
     playClaimSound(soundsEnabled);
     triggerHapticFeedback('success');
+    triggerRewardConfetti();
     void persistMutation({
       nextProfile: res.profile,
       transaction: res.transaction,
@@ -1993,6 +2079,7 @@ export default function App() {
     }
     playClaimSound(soundsEnabled);
     triggerHapticFeedback('success');
+    triggerRewardConfetti();
     void persistMutation({
       nextProfile: res.profile,
       transaction: res.transaction,
@@ -2047,13 +2134,14 @@ export default function App() {
       return (
         <AdminPanelView
           playerId={profile.uid}
+          adminUnlocked={adminUnlocked}
+          onVerifyAdminPasscode={handleVerifyAdminPasscode}
+          onLockAdmin={handleLockAdmin}
           withdrawRequests={allWithdrawRequests}
           customTasks={customTasks}
           adConfig={adConfig}
           channelsConfig={channelsConfig}
           promoCodes={promoCodes}
-          seasonConfig={seasonConfig}
-          leaderboardEntries={cloudLeaderboard}
           recentPlayers={recentPlayers}
           bannedUsers={bannedUsers}
           adminsConfig={adminsConfig}
@@ -2068,8 +2156,6 @@ export default function App() {
           onCreatePromoCode={handleCreatePromoCode}
           onTogglePromoCode={handleTogglePromoCode}
           onDeletePromoCode={handleDeletePromoCode}
-          onSaveSeasonConfig={handleSaveSeasonConfig}
-          onDistributeSeasonPrizes={handleDistributeSeasonPrizes}
           onBanPlayer={handleBanPlayer}
           onUnbanPlayer={handleUnbanPlayer}
           onSearchUsers={handleSearchUsers}
@@ -2080,22 +2166,6 @@ export default function App() {
           onRemoveReferralRelation={handleRemoveReferralRelation}
           onAddAdmin={handleAddAdmin}
           onRemoveAdmin={handleRemoveAdmin}
-        />
-      );
-    }
-
-    if (subView === 'leaderboard') {
-      return (
-        <LeaderboardView
-          entries={cloudLeaderboard}
-          profile={profile}
-          seasonConfig={seasonConfig}
-          onTabTap={() => playTabTapSound(soundsEnabled)}
-          onBack={() => setSubView('none')}
-          onGoBuy={() => {
-            setSubView('none');
-            setActiveTab('packs');
-          }}
         />
       );
     }
@@ -2180,8 +2250,14 @@ export default function App() {
           customTasks={customTasks}
           adConfig={adConfig}
           payoutChannelUrl={getTelegramChannelUrl(payoutChannel)}
+          getCodeChannelUrl={
+            channelsConfig.getCodeChannelUrl ||
+            getTelegramChannelUrl(payoutChannel) ||
+            DEFAULT_GET_CODE_CHANNEL_URL
+          }
           watchingAd={watchingAdLoading}
           activeAdNetwork={activeAdNetwork}
+          activeAdAction={activeAdAction}
           channelVerification={channelVerification}
           requiredChannels={activeRequiredChannels}
           channelsGateEnabled={channelsGateEnabled}
@@ -2193,6 +2269,7 @@ export default function App() {
           onCompleteTask={handleCompleteTask}
           onTriggerWatchAd={() => void handleTriggerWatchAd()}
           onTriggerAdNetwork={(net) => void handleTriggerAdNetwork(net)}
+          onTriggerAdsgramTask={() => void handleTriggerAdsgramTask()}
           onOpenDeposit={() => openSubView('deposit')}
           onCreateTask={handleCreatePaidUserTask}
           onRefreshTasks={handleRefreshTasks}
@@ -2270,9 +2347,10 @@ export default function App() {
               </div>
             </div>
             <div className="clay-inset clay-hover-lift !rounded-2xl p-3">
-              <div className="text-xs font-bold text-stone-500 dark:text-stone-400">Buyer Rank</div>
-              <div className="text-lg font-extrabold text-stone-900 dark:text-stone-100 font-mono-num mt-0.5">
-                #{rankings.userBuyerRank}
+              <div className="text-xs font-bold text-stone-500 dark:text-stone-400">Ref Rewards</div>
+              <div className="text-lg font-extrabold text-stone-900 dark:text-stone-100 font-mono-num mt-0.5 flex items-center gap-1">
+                <CoinIcon className="w-4 h-4 shrink-0" />
+                <span>+{profile.referralCoinsEarned.toLocaleString()}</span>
               </div>
             </div>
           </div>
@@ -2308,45 +2386,47 @@ export default function App() {
             <motion.button
               type="button"
               whileTap={{ scale: 0.96 }}
-              onClick={() => openSubView('leaderboard')}
+              onClick={() => navigateTab('friends')}
               className="clay-btn clay-btn-neutral min-h-[44px] rounded-2xl text-stone-800 dark:text-stone-100 font-extrabold text-xs flex items-center justify-center gap-1.5"
             >
-              <Trophy className="w-4 h-4 text-amber-600 dark:text-amber-400" />
-              <span>{strings.top10}</span>
+              <Users className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+              <span>{strings.friends}</span>
             </motion.button>
           </div>
         </div>
 
-        {/* Desktop Preview: Live Leaderboard + Recent Transactions */}
+        {/* Desktop Preview: Referral Program + Recent Transactions */}
         <div className="grid grid-cols-2 gap-4">
           <div className="clay-card p-4 space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-1.5">
-                <Crown className="w-4 h-4 text-amber-500" />
-                <span>Live Leaderboard</span>
+                <Users className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                <span>Referral Rewards</span>
               </h3>
               <button
                 type="button"
-                onClick={() => setSubView('leaderboard')}
-                className="text-xs font-bold text-amber-700 dark:text-amber-400 hover:underline cursor-pointer"
+                onClick={() => navigateTab('friends')}
+                className="text-xs font-bold text-emerald-700 dark:text-emerald-400 hover:underline cursor-pointer"
               >
-                View all
+                Invite
               </button>
             </div>
-            <div className="space-y-2">
-              {rankings.topBuyers.slice(0, 4).map((entry, idx) => (
-                <div key={entry.uid} className="flex items-center justify-between text-xs gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="w-4 font-extrabold text-stone-400 dark:text-stone-500 font-mono-num">{idx + 1}</span>
-                    <span className="font-bold text-stone-800 dark:text-stone-200 truncate">
-                      {entry.displayName} {entry.isCurrentUser ? '(You)' : ''}
-                    </span>
-                  </div>
-                  <span className="font-extrabold text-amber-700 dark:text-amber-400 font-mono-num shrink-0">
-                    {entry.eggs.toLocaleString()} eggs · {entry.inviterCount} refs
-                  </span>
-                </div>
-              ))}
+            <div className="space-y-2 text-xs">
+              <div className="clay-card-mint !rounded-xl px-3 py-2 flex items-center justify-between">
+                <span className="font-bold text-stone-700 dark:text-stone-200">Per Referral Join</span>
+                <span className="font-extrabold font-mono-num text-emerald-700 dark:text-emerald-300">
+                  +{REFERRER_SIGNUP_BONUS_COINS} Coins
+                </span>
+              </div>
+              <div className="clay-card-warm !rounded-xl px-3 py-2 flex items-center justify-between">
+                <span className="font-bold text-stone-700 dark:text-stone-200">Friend Deposit Share</span>
+                <span className="font-extrabold font-mono-num text-amber-700 dark:text-amber-300">
+                  {Math.round(REFERRAL_DEPOSIT_COMMISSION_RATE * 100)}% Commission
+                </span>
+              </div>
+              <div className="text-[11px] text-stone-500 dark:text-stone-400 font-semibold">
+                Instant Telegram Bot notifications for every new referral &amp; deposit share.
+              </div>
             </div>
           </div>
 
@@ -2475,8 +2555,9 @@ export default function App() {
         isAllMuted={allAudioMuted}
         muteAllLabel={strings.muteAll}
         unmuteAllLabel={strings.unmuteAll}
+        isAdmin={isAuthorizedAdmin}
         onOpenProfile={() => openSubView('profile')}
-        onOpenLeaderboard={() => openSubView('leaderboard')}
+        onOpenAdmin={() => openSubView('admin')}
         onToggleMuteAll={handleToggleMuteAll}
         onOpenSettings={() => setShowSettings(true)}
         onOpenDeposit={() => openSubView('deposit')}
@@ -2489,13 +2570,14 @@ export default function App() {
             key={toastText}
             role="status"
             aria-live="polite"
-            initial={{ opacity: 0, y: 14, scale: 0.94 }}
+            initial={{ opacity: 0, y: 18, scale: 0.9 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 8, scale: 0.96 }}
-            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-            className="clay-card-dark fixed bottom-20 left-1/2 -translate-x-1/2 z-50 !rounded-2xl text-white px-4 py-2.5 text-xs sm:text-sm font-bold whitespace-nowrap"
+            exit={{ opacity: 0, y: 10, scale: 0.94 }}
+            transition={{ type: 'spring', stiffness: 440, damping: 28 }}
+            className="clay-card-dark fixed bottom-20 left-1/2 -translate-x-1/2 z-50 !rounded-2xl text-white px-4 py-2.5 text-xs sm:text-sm font-bold whitespace-nowrap flex items-center gap-2 shadow-2xl"
           >
-            {toastText}
+            <Sparkles className="w-4 h-4 text-amber-300 shrink-0" />
+            <span>{toastText}</span>
           </motion.div>
         )}
       </AnimatePresence>
@@ -2563,9 +2645,21 @@ export default function App() {
         />
       )}
 
-      {showSplash && <SplashScreen onComplete={handleSplashComplete} />}
+      {needsPreSplashChannelGate && (
+        <ChannelCheckModal
+          verification={channelVerification}
+          requiredChannels={activeRequiredChannels}
+          checking={checkingChannels}
+          onCheckChannels={() => void handleCheckChannels()}
+          onClose={() => setPreSplashChannelPassed(true)}
+        />
+      )}
 
-      {!showSplash && !adModalState.open && showSignUpBonusModal && (
+      {!needsPreSplashChannelGate && showSplash && (
+        <SplashScreen onComplete={handleSplashComplete} />
+      )}
+
+      {!needsPreSplashChannelGate && !showSplash && !adModalState.open && showSignUpBonusModal && (
         <SignUpBonusModal
           onClaim={() => {
             playClaimSound(soundsEnabled);
@@ -2580,7 +2674,7 @@ export default function App() {
         />
       )}
 
-      {!showSplash && !adModalState.open && showWelcomeModal && !showSignUpBonusModal && (
+      {!needsPreSplashChannelGate && !showSplash && !adModalState.open && showWelcomeModal && !showSignUpBonusModal && (
         <WelcomeBackModal
           pendingEggs={pendingEggs}
           awayLabel={formatAwayDuration(nowMs - profile.lastCollectedAt)}
@@ -2591,7 +2685,8 @@ export default function App() {
         />
       )}
 
-      {!showSplash &&
+      {!needsPreSplashChannelGate &&
+        !showSplash &&
         !adModalState.open &&
         !showSignUpBonusModal &&
         channelsGateEnabled &&
@@ -2615,7 +2710,11 @@ export default function App() {
             watchedCount={profile.watchedAdsCount}
             actionKind={adModalState.kind}
             networkLabel={netDef?.name ?? null}
-            rewardCoins={netDef?.rewardCoins ?? null}
+            rewardCoins={
+              adModalState.kind === 'adsgram_task'
+                ? ADSGRAM_BOT_JOIN_TASK.rewardCoins
+                : (netDef?.rewardCoins ?? null)
+            }
             pendingEggs={adModalState.pendingEggs ?? null}
             promoCode={adModalState.promoCode ?? null}
             promoRewardSummary={adModalState.promoRewardSummary ?? null}
@@ -2643,6 +2742,8 @@ export default function App() {
                 );
               } else if (currentModal.kind === 'ad_network' && currentModal.network) {
                 handleClaimAdNetwork(currentModal.network);
+              } else if (currentModal.kind === 'adsgram_task') {
+                handleClaimAdsgramBotJoin();
               } else {
                 handleWatchAd();
               }

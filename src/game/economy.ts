@@ -39,6 +39,7 @@ export const MIN_REINVEST_EGGS = 100;
 export const SIGNUP_BONUS_COINS = 1000;
 export const REFERRER_SIGNUP_BONUS_COINS = 150;
 export const REFERRER_SIGNUP_BONUS_EGGS = 500;
+export const REFERRAL_DEPOSIT_COMMISSION_RATE = 0.05;
 export const REFERRER_LIFETIME_EGG_COMMISSION_RATE = 0.05;
 export const REFERRED_WELCOME_BONUS_COINS = 100;
 
@@ -294,30 +295,42 @@ export interface AdNetworkTaskDefinition {
   badge: string;
 }
 
+export const FREE_EGGS_PER_AD = 150;
+export const FREE_EGGS_MILESTONE_BONUS = 500;
+
+export const ADSGRAM_BOT_JOIN_TASK = {
+  id: 'adsgram_task' as const,
+  name: 'Bot Joins & Clicks',
+  subtitle: 'Open & verify sponsored AdsGram bot or channel clicks',
+  rewardCoins: 120,
+  dailyLimit: 5,
+  badge: 'AdsGram Clicks',
+};
+
 export const AD_NETWORK_TASKS: AdNetworkTaskDefinition[] = [
   {
     id: 'adsgram',
     name: 'AdsGram',
-    subtitle: 'Watch Telegram native rewarded ad',
+    subtitle: 'Watch & earn coins via Telegram native ad',
     rewardCoins: 80,
     dailyLimit: 5,
-    badge: 'Telegram Ad',
+    badge: 'Earn Coins',
   },
   {
     id: 'gigapub',
     name: 'Gigapub',
-    subtitle: 'Watch Gigapub interactive rewarded ad',
+    subtitle: 'Watch & earn coins via interactive zone ad',
     rewardCoins: 90,
     dailyLimit: 5,
-    badge: 'Interactive',
+    badge: 'Earn Coins',
   },
   {
     id: 'monetag',
     name: 'Monetag',
-    subtitle: 'Complete Monetag rewarded zone view',
+    subtitle: 'Watch & earn coins via rewarded zone ad',
     rewardCoins: 100,
     dailyLimit: 5,
-    badge: 'High Reward',
+    badge: 'Earn Coins',
   },
 ];
 
@@ -458,10 +471,11 @@ export const TASK_DEFINITIONS: TaskDefinition[] = [
 export const DEFAULT_AD_CONFIG: AdConfig = {
   provider: 'countdown',
   adsgramBlockId: '',
+  adsgramTaskBlockId: '',
   gigapubProjectId: '',
   monetagZoneId: '',
   customTitle: 'Alpha Gram Partner Spotlight',
-  customDescription: 'Watch this short sponsor showcase to earn coins & 1 step toward a free White Leghorn.',
+  customDescription: 'Watch this short sponsor showcase to earn coins & free eggs.',
   customUrl: 'https://t.me/AIRDROP_GALAXYS',
   watchSeconds: 5,
   bannerEnabled: false,
@@ -545,6 +559,14 @@ export function getAdNetworkClaimCountToday(
   todayStr: string,
 ): number {
   const prefix = `ad_${network}_${todayStr}_`;
+  return completedTaskIds.filter((id) => id.startsWith(prefix)).length;
+}
+
+export function getBotJoinClaimCountToday(
+  completedTaskIds: string[],
+  todayStr: string,
+): number {
+  const prefix = `botjoin_${todayStr}_`;
   return completedTaskIds.filter((id) => id.startsWith(prefix)).length;
 }
 
@@ -1020,7 +1042,7 @@ export function executeDeposit(
   };
 
   const referrerCommissionCoins = profile.referredBy
-    ? Math.max(1, Math.round(computedCoins * 0.05))
+    ? Math.max(1, Math.round(computedCoins * REFERRAL_DEPOSIT_COMMISSION_RATE))
     : 0;
 
   return { profile: nextProfile, deposit, transaction, referrerCommissionCoins };
@@ -1520,7 +1542,6 @@ export function claimAdNetworkReward(
       networkName: string;
       watchedToday: number;
       dailyLimit: number;
-      unlockedChicken: boolean;
     }
   | { error: string } {
   const def = AD_NETWORK_TASKS.find((n) => n.id === network);
@@ -1540,29 +1561,20 @@ export function claimAdNetworkReward(
     (id) => !id.startsWith('ad_') || id.includes(`_${todayStr}_`),
   );
   const nextCompletedIds = [...prunedIds, claimToken].slice(-50);
-
-  const nextWatchCount = profile.watchedAdsCount + 1;
-  const unlockedChicken = nextWatchCount >= 10;
-  const hadNoChickens = calculateTotalChickens(profile) === 0;
   const nextTotalAdsWatched = getTotalAdsWatched(profile) + 1;
 
   const nextProfile: UserFarmProfile = {
     ...profile,
     coins: profile.coins + def.rewardCoins,
     completedTaskIds: nextCompletedIds,
-    watchedAdsCount: unlockedChicken ? 0 : nextWatchCount,
     totalAdsWatched: nextTotalAdsWatched,
-    leghornCount: unlockedChicken ? profile.leghornCount + 1 : profile.leghornCount,
-    lastCollectedAt: unlockedChicken && hadNoChickens ? nowMs : profile.lastCollectedAt,
   };
 
   const transaction: TransactionEntry = {
     id: `tx_adnet_${network}_${nowMs}`,
     userId: profile.uid,
     type: 'task',
-    title: unlockedChicken
-      ? `${def.name} Ad (+${def.rewardCoins}c & Free Hen!)`
-      : `${def.name} Ad Reward`,
+    title: `${def.name} Watch & Earn`,
     amount: def.rewardCoins,
     currency: 'coins',
     usdValue: coinsToUsd(def.rewardCoins),
@@ -1577,46 +1589,106 @@ export function claimAdNetworkReward(
     networkName: def.name,
     watchedToday: nextSlot,
     dailyLimit: def.dailyLimit,
-    unlockedChicken,
   };
 }
 
 export function watchAdStep(
   profile: UserFarmProfile,
   nowMs: number,
-): { profile: UserFarmProfile; transaction?: TransactionEntry; unlockedChicken: boolean } {
+): {
+  profile: UserFarmProfile;
+  transaction: TransactionEntry;
+  rewardEggs: number;
+  hitMilestone: boolean;
+} {
   const nextCount = profile.watchedAdsCount + 1;
+  const hitMilestone = nextCount >= 10;
+  const rewardEggs = hitMilestone
+    ? FREE_EGGS_PER_AD + FREE_EGGS_MILESTONE_BONUS
+    : FREE_EGGS_PER_AD;
   const nextTotalAdsWatched = getTotalAdsWatched(profile) + 1;
-  if (nextCount >= 10) {
-    const hadNoChickens = calculateTotalChickens(profile) === 0;
-    const nextProfile: UserFarmProfile = {
-      ...profile,
-      watchedAdsCount: 0,
-      totalAdsWatched: nextTotalAdsWatched,
-      leghornCount: profile.leghornCount + 1,
-      lastCollectedAt: hadNoChickens ? nowMs : profile.lastCollectedAt,
+  const usdAdded = eggsToUsd(rewardEggs);
+
+  const nextProfile: UserFarmProfile = {
+    ...profile,
+    eggs: profile.eggs + rewardEggs,
+    totalEggsCollected: profile.totalEggsCollected + rewardEggs,
+    totalCashEarnedUsd: Number((profile.totalCashEarnedUsd + usdAdded).toFixed(4)),
+    watchedAdsCount: hitMilestone ? 0 : nextCount,
+    totalAdsWatched: nextTotalAdsWatched,
+  };
+
+  const transaction: TransactionEntry = {
+    id: `tx_ad_${nowMs}`,
+    userId: profile.uid,
+    type: 'task',
+    title: hitMilestone
+      ? '10/10 Ads: Free Eggs Bonus Chest!'
+      : 'Watch & Earn: Free Eggs',
+    amount: rewardEggs,
+    currency: 'eggs',
+    usdValue: usdAdded,
+    status: 'completed',
+    createdAtMs: nowMs,
+  };
+
+  return { profile: nextProfile, transaction, rewardEggs, hitMilestone };
+}
+
+export function claimAdsgramBotJoinReward(
+  profile: UserFarmProfile,
+  todayStr: string,
+  nowMs: number,
+):
+  | {
+      profile: UserFarmProfile;
+      transaction: TransactionEntry;
+      rewardCoins: number;
+      claimedToday: number;
+      dailyLimit: number;
+    }
+  | { error: string } {
+  const claimedToday = getBotJoinClaimCountToday(profile.completedTaskIds, todayStr);
+  if (claimedToday >= ADSGRAM_BOT_JOIN_TASK.dailyLimit) {
+    return {
+      error: `Daily Bot Joins & Clicks limit reached (${ADSGRAM_BOT_JOIN_TASK.dailyLimit}/${ADSGRAM_BOT_JOIN_TASK.dailyLimit} today). Come back tomorrow!`,
     };
-    const transaction: TransactionEntry = {
-      id: `tx_ad_${nowMs}`,
-      userId: profile.uid,
-      type: 'task',
-      title: '10/10 Ads: Free White Leghorn',
-      amount: 1000,
-      currency: 'coins',
-      usdValue: 0.1,
-      status: 'completed',
-      createdAtMs: nowMs,
-    };
-    return { profile: nextProfile, transaction, unlockedChicken: true };
   }
 
+  const nextSlot = claimedToday + 1;
+  const claimToken = `botjoin_${todayStr}_${nextSlot}`;
+  const prunedIds = profile.completedTaskIds.filter(
+    (id) => !id.startsWith('botjoin_') || id.includes(`_${todayStr}_`),
+  );
+  const nextCompletedIds = [...prunedIds, claimToken].slice(-50);
+  const nextTotalAdsWatched = getTotalAdsWatched(profile) + 1;
+  const rewardCoins = ADSGRAM_BOT_JOIN_TASK.rewardCoins;
+
+  const nextProfile: UserFarmProfile = {
+    ...profile,
+    coins: profile.coins + rewardCoins,
+    completedTaskIds: nextCompletedIds,
+    totalAdsWatched: nextTotalAdsWatched,
+  };
+
+  const transaction: TransactionEntry = {
+    id: `tx_botjoin_${nowMs}`,
+    userId: profile.uid,
+    type: 'task',
+    title: 'AdsGram Bot Join & Clicks',
+    amount: rewardCoins,
+    currency: 'coins',
+    usdValue: coinsToUsd(rewardCoins),
+    status: 'completed',
+    createdAtMs: nowMs,
+  };
+
   return {
-    profile: {
-      ...profile,
-      watchedAdsCount: nextCount,
-      totalAdsWatched: nextTotalAdsWatched,
-    },
-    unlockedChicken: false,
+    profile: nextProfile,
+    transaction,
+    rewardCoins,
+    claimedToday: nextSlot,
+    dailyLimit: ADSGRAM_BOT_JOIN_TASK.dailyLimit,
   };
 }
 
@@ -2450,11 +2522,27 @@ export const REQUIRED_TELEGRAM_CHANNELS: RequiredTelegramChannel[] = [
   },
 ];
 
+export const DEFAULT_GET_CODE_CHANNEL_URL = 'https://t.me/AIRDROP_GALAXYS';
+
 export const DEFAULT_CHANNELS_CONFIG: ChannelsConfig = {
   enabled: true,
   channels: REQUIRED_TELEGRAM_CHANNELS,
+  getCodeChannelUrl: DEFAULT_GET_CODE_CHANNEL_URL,
   updatedAtMs: 0,
 };
+
+export function normalizeGetCodeChannelUrl(rawInput: string): string {
+  const trimmed = String(rawInput || '').trim();
+  if (!trimmed) return '';
+  if (/^https?:\/\/\S+/i.test(trimmed)) {
+    return trimmed.slice(0, 256);
+  }
+  const normalized = normalizeTelegramChannelHandle(trimmed);
+  if (normalized.url) {
+    return normalized.url.slice(0, 256);
+  }
+  return '';
+}
 
 export function normalizeTelegramChannelHandle(rawHandleOrUrl: string): {
   handle: string;
@@ -2570,6 +2658,7 @@ export const AD_GATED_ACTIONS: readonly AdGateActionType[] = [
   'buy_chicken',
   'ad_network',
   'watch_ad',
+  'adsgram_task',
 ];
 
 export const AD_EXEMPT_ACTIONS: readonly AdGateActionType[] = [
@@ -2595,6 +2684,7 @@ export function formatAdConfigTemplate(config: AdConfigDraft): string {
   return [
     `ACTIVE_PROVIDER=${config.provider}`,
     `ADSGRAM_BLOCK_ID=${config.adsgramBlockId}`,
+    `ADSGRAM_TASK_BLOCK_ID=${config.adsgramTaskBlockId || ''}`,
     `GIGAPUB_PROJECT_ID=${config.gigapubProjectId || ''}`,
     `MONETAG_ZONE_ID=${config.monetagZoneId}`,
     `WATCH_SECONDS=${config.watchSeconds}`,
@@ -2649,6 +2739,17 @@ export function parseAdConfigTemplate(
     if (key === 'adsgramblockid' || key === 'viteadsgramblockid' || key === 'adsgramid') {
       next.adsgramBlockId = val.slice(0, 64);
       applied.add('ADSGRAM_BLOCK_ID');
+      return;
+    }
+
+    if (
+      key === 'adsgramtaskblockid' ||
+      key === 'viteadsgramtaskblockid' ||
+      key === 'adsgramtaskid' ||
+      key === 'adsgrambotjoinid'
+    ) {
+      next.adsgramTaskBlockId = val.slice(0, 64);
+      applied.add('ADSGRAM_TASK_BLOCK_ID');
       return;
     }
 
@@ -3012,3 +3113,53 @@ export function computeAdminReferralCountAdjustment(
     actualDelta,
   };
 }
+
+function escapeTelegramHtml(text: string): string {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+export function buildReferralBotNotificationMessage(params: {
+  event: 'referral_joined' | 'deposit_commission';
+  referredName?: string;
+  referredHandle?: string;
+  rewardCoins: number;
+  depositGram?: string;
+  depositUsd?: number;
+}): string {
+  const safeName = escapeTelegramHtml((params.referredName || 'New Farmer').trim().slice(0, 60));
+  const safeHandle = escapeTelegramHtml(formatReferralHandle(params.referredHandle || '', '').slice(0, 40));
+  const safeCoins = Math.max(0, Math.round(Number(params.rewardCoins) || 0));
+  const pct = Math.round(REFERRAL_DEPOSIT_COMMISSION_RATE * 100);
+
+  if (params.event === 'deposit_commission') {
+    const safeGram = escapeTelegramHtml((params.depositGram || '').trim().slice(0, 40));
+    const safeUsd = Number(params.depositUsd || 0).toFixed(2);
+    const depositLine = safeGram
+      ? `💰 <b>Friend Deposit:</b> ${safeGram} (~$${safeUsd})`
+      : `💰 <b>Friend Deposit:</b> $${safeUsd}`;
+
+    return [
+      '💎 <b>Referral Deposit Commission Received!</b>',
+      '',
+      `👤 <b>Referred User:</b> ${safeName} (${safeHandle})`,
+      depositLine,
+      `🪙 <b>Your ${pct}% Commission Received:</b> +${safeCoins.toLocaleString()} Coins`,
+      '',
+      `Keep inviting friends to earn <b>+${REFERRER_SIGNUP_BONUS_COINS} Coins</b> per referral and a <b>${pct}% share</b> of every deposit they make!`,
+    ].join('\n');
+  }
+
+  return [
+    '🎉 <b>New Referral Received &amp; Reward Credited!</b>',
+    '',
+    `👤 <b>Referred User:</b> ${safeName} (${safeHandle})`,
+    `🪙 <b>Reward Received:</b> +${safeCoins.toLocaleString()} Coins`,
+    '',
+    `💎 <b>${pct}% Deposit Share Bonus:</b>`,
+    `Whenever your referred user makes a deposit, you will automatically receive a <b>${pct}% share</b> of their deposit in Coins!`,
+  ].join('\n');
+}
+

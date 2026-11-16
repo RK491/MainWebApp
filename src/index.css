@@ -591,6 +591,148 @@
   animation: splashFadeOut 0.55s cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 
+/* Enhanced Visual Effects & Tactile Micro-Animations */
+@keyframes ctaSheenSweep {
+  0% {
+    transform: translateX(-140%) skewX(-20deg);
+  }
+  38%, 100% {
+    transform: translateX(260%) skewX(-20deg);
+  }
+}
+
+@keyframes sunbeamDrift {
+  0%, 100% {
+    opacity: 0.24;
+    transform: translate3d(-4%, -2%, 0) rotate(-18deg) scale(1);
+  }
+  50% {
+    opacity: 0.44;
+    transform: translate3d(4%, 2%, 0) rotate(-15deg) scale(1.05);
+  }
+}
+
+@keyframes goldenRingSpin {
+  0% {
+    transform: rotate(0deg) scale(1);
+  }
+  50% {
+    transform: rotate(180deg) scale(1.06);
+  }
+  100% {
+    transform: rotate(360deg) scale(1);
+  }
+}
+
+@keyframes sparkleBurst {
+  0% {
+    opacity: 1;
+    transform: translate(-50%, -50%) rotate(var(--burst-angle, 0deg)) translateY(0px) scale(0.5);
+  }
+  45% {
+    opacity: 1;
+    transform: translate(-50%, -50%) rotate(var(--burst-angle, 0deg)) translateY(-22px) scale(1.15);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) rotate(var(--burst-angle, 0deg)) translateY(-34px) scale(0.35);
+  }
+}
+
+@keyframes harvestRise {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 8px) scale(0.84);
+  }
+  18% {
+    opacity: 1;
+    transform: translate(-50%, -10px) scale(1.08);
+  }
+  80% {
+    opacity: 1;
+    transform: translate(-50%, -38px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -54px) scale(0.94);
+  }
+}
+
+@keyframes eggReadyWiggle {
+  0%, 72%, 100% {
+    transform: rotate(0deg) scale(1);
+  }
+  78% {
+    transform: rotate(-10deg) scale(1.08);
+  }
+  84% {
+    transform: rotate(10deg) scale(1.1);
+  }
+  90% {
+    transform: rotate(-6deg) scale(1.05);
+  }
+  96% {
+    transform: rotate(5deg) scale(1.02);
+  }
+}
+
+@keyframes boosterBorderPulse {
+  0%, 100% {
+    opacity: 0.45;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.85;
+    transform: scale(0.996);
+  }
+}
+
+.clay-cta-sheen {
+  position: relative;
+  overflow: hidden;
+}
+
+.clay-cta-sheen::before {
+  content: '';
+  position: absolute;
+  top: -20%;
+  left: 0;
+  width: 38%;
+  height: 140%;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.36) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  animation: ctaSheenSweep 4.2s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.animate-sunbeam {
+  animation: sunbeamDrift 7.5s ease-in-out infinite;
+}
+
+.animate-golden-ring {
+  animation: goldenRingSpin 5.5s linear infinite;
+}
+
+.animate-sparkle-burst {
+  animation: sparkleBurst 0.65s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-harvest-rise {
+  animation: harvestRise 1.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-egg-wiggle {
+  animation: eggReadyWiggle 2.8s ease-in-out infinite;
+}
+
+.animate-booster-aura {
+  animation: boosterBorderPulse 2.2s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-chicken-bob,
   .animate-chicken-pop,
@@ -607,6 +749,13 @@
   .animate-artifact-sway,
   .animate-artifact-pop,
   .clay-shimmer-bar::after,
+  .clay-cta-sheen::before,
+  .animate-sunbeam,
+  .animate-golden-ring,
+  .animate-sparkle-burst,
+  .animate-harvest-rise,
+  .animate-egg-wiggle,
+  .animate-booster-aura,
   .animate-splash-pop,
   .animate-splash-progress {
     animation: none !important;

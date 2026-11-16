@@ -1,12 +1,43 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig} from 'vite';
+import {defineConfig, type Plugin} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
+
+function pwaDevSafeRegisterPlugin(): Plugin {
+  return {
+    name: 'pwa-dev-safe-register',
+    apply: 'serve',
+    enforce: 'pre',
+    load(id) {
+      if (id.includes('@vite-plugin-pwa/pwa-entry-point-loaded')) {
+        return `
+function registerDevSW() {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return;
+  if (!('serviceWorker' in navigator)) return;
+  const register = () => {
+    navigator.serviceWorker
+      .register('/dev-sw.js?dev-sw', { scope: '/', type: 'classic' })
+      .catch(() => {});
+  };
+  if (document.readyState === 'complete') {
+    register();
+  } else {
+    window.addEventListener('load', register, { once: true });
+  }
+}
+export default registerDevSW;
+`;
+      }
+      return undefined;
+    },
+  };
+}
 
 export default defineConfig(() => {
   return {
     plugins: [
+      pwaDevSafeRegisterPlugin(),
       react(),
       tailwindcss(),
       VitePWA({
@@ -16,7 +47,7 @@ export default defineConfig(() => {
           id: '/',
           name: 'Alpha Gram',
           short_name: 'Alpha Gram',
-          description: 'Build your Alpha Gram poultry farm, collect eggs 24/7, climb the Top 10 leaderboard, and manage GRAM deposits & withdrawals.',
+          description: 'Build your Alpha Gram poultry farm, collect eggs 24/7, invite friends for rewards, and manage GRAM deposits & withdrawals.',
           theme_color: '#F59E0B',
           background_color: '#F7F6F2',
           display: 'standalone',
@@ -80,7 +111,7 @@ export default defineConfig(() => {
         },
         devOptions: {
           enabled: true,
-          type: 'module',
+          type: 'classic',
         },
       }),
     ],

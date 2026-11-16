@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
-  Award,
   Ban,
   Check,
   CheckCircle2,
@@ -19,6 +18,7 @@ import {
   KeyRound,
   Link2,
   ListPlus,
+  Lock,
   Megaphone,
   Minus,
   PauseCircle,
@@ -35,7 +35,6 @@ import {
   Sparkles,
   Ticket,
   Trash2,
-  Trophy,
   Unlink,
   UserCheck,
   UserPlus,
@@ -53,11 +52,9 @@ import type {
   ChannelsConfig,
   ChickenBreedId,
   DynamicPromoCode,
-  LeaderboardEntry,
   PromoRewardType,
   ReferralRecord,
   RequiredTelegramChannel,
-  SeasonConfig,
   TaskDefinition,
   UserFarmProfile,
   WithdrawRequestRecord,
@@ -67,6 +64,7 @@ import {
   canAddAdminPlayerId,
   canBanPlayerId,
   CHICKEN_PACKS,
+  DEFAULT_GET_CODE_CHANNEL_URL,
   extractTelegramNumericUserId,
   filterPlayersBySearchQuery,
   formatAdConfigTemplate,
@@ -77,6 +75,7 @@ import {
   isAdminPlayerId,
   matchesAdminRecord,
   matchesBannedUserRecord,
+  normalizeGetCodeChannelUrl,
   normalizePlayerBanId,
   normalizeTelegramChannelEntry,
   parseAdConfigTemplate,
@@ -86,13 +85,14 @@ import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
 
 interface AdminPanelViewProps {
   playerId: string;
+  adminUnlocked: boolean;
+  onVerifyAdminPasscode: (passcode: string) => Promise<{ ok: boolean; error?: string }>;
+  onLockAdmin?: () => void;
   withdrawRequests: WithdrawRequestRecord[];
   customTasks: TaskDefinition[];
   adConfig: AdConfig;
   channelsConfig: ChannelsConfig;
   promoCodes: DynamicPromoCode[];
-  seasonConfig: SeasonConfig;
-  leaderboardEntries: LeaderboardEntry[];
   recentPlayers: UserFarmProfile[];
   bannedUsers: BannedUserRecord[];
   adminsConfig: AdminsConfig;
@@ -129,8 +129,6 @@ interface AdminPanelViewProps {
   }) => Promise<DynamicPromoCode | null>;
   onTogglePromoCode: (code: string, isActive: boolean) => Promise<void>;
   onDeletePromoCode: (code: string) => Promise<void>;
-  onSaveSeasonConfig: (config: Omit<SeasonConfig, 'updatedAtMs'>) => Promise<void>;
-  onDistributeSeasonPrizes: (nextDurationDays: number) => Promise<void>;
   onBanPlayer: (input: {
     targetId: string;
     displayName?: string;
@@ -249,13 +247,14 @@ function formatExpiryLabel(hours: number): string {
 
 export function AdminPanelView({
   playerId,
+  adminUnlocked,
+  onVerifyAdminPasscode,
+  onLockAdmin,
   withdrawRequests,
   customTasks,
   adConfig,
   channelsConfig,
   promoCodes,
-  seasonConfig,
-  leaderboardEntries,
   recentPlayers,
   bannedUsers,
   adminsConfig,
@@ -270,8 +269,6 @@ export function AdminPanelView({
   onCreatePromoCode,
   onTogglePromoCode,
   onDeletePromoCode,
-  onSaveSeasonConfig,
-  onDistributeSeasonPrizes,
   onBanPlayer,
   onUnbanPlayer,
   onSearchUsers,
@@ -289,8 +286,12 @@ export function AdminPanelView({
   );
   const isAuthorizedAdmin = isAdminPlayerId(playerId, extraAdminIds);
 
+  const [passcodeInput, setPasscodeInput] = useState('');
+  const [passcodeError, setPasscodeError] = useState<string | null>(null);
+  const [verifyingPasscode, setVerifyingPasscode] = useState(false);
+
   const [tab, setTab] = useState<
-    'withdrawals' | 'users' | 'admins' | 'channels' | 'promos' | 'tasks' | 'ads' | 'ad_ids' | 'season'
+    'withdrawals' | 'users' | 'admins' | 'channels' | 'promos' | 'tasks' | 'ads' | 'ad_ids'
   >('withdrawals');
   const [wdFilter, setWdFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
   const [wdSearch, setWdSearch] = useState('');
@@ -343,10 +344,13 @@ export function AdminPanelView({
     text: string;
   } | null>(null);
 
-  // Check Channels management draft state
+  // Check Channels & Get Code channel management draft state
   const [channelsEnabledDraft, setChannelsEnabledDraft] = useState<boolean>(channelsConfig.enabled);
   const [channelsDraft, setChannelsDraft] = useState<RequiredTelegramChannel[]>(
     channelsConfig.channels,
+  );
+  const [getCodeChannelDraft, setGetCodeChannelDraft] = useState<string>(
+    channelsConfig.getCodeChannelUrl ?? DEFAULT_GET_CODE_CHANNEL_URL,
   );
   const [newChannelHandle, setNewChannelHandle] = useState('');
   const [newChannelTitle, setNewChannelTitle] = useState('');
@@ -358,6 +362,7 @@ export function AdminPanelView({
   useEffect(() => {
     setChannelsEnabledDraft(channelsConfig.enabled);
     setChannelsDraft(channelsConfig.channels);
+    setGetCodeChannelDraft(channelsConfig.getCodeChannelUrl ?? DEFAULT_GET_CODE_CHANNEL_URL);
   }, [channelsConfig]);
 
   // New task form state
@@ -387,22 +392,11 @@ export function AdminPanelView({
   const [lastCreatedPromo, setLastCreatedPromo] = useState<DynamicPromoCode | null>(null);
   const [promoFilter, setPromoFilter] = useState<'all' | 'active' | 'ended'>('all');
 
-  // Season draft state
-  const [seasonTitleDraft, setSeasonTitleDraft] = useState(seasonConfig.title);
-  const [seasonPrizeDraft, setSeasonPrizeDraft] = useState(String(seasonConfig.prizePoolCoins));
-  const [seasonDaysDraft, setSeasonDaysDraft] = useState('7');
-  const [savingSeason, setSavingSeason] = useState(false);
-  const [distributingPrizes, setDistributingPrizes] = useState(false);
-
-  useEffect(() => {
-    setSeasonTitleDraft(seasonConfig.title);
-    setSeasonPrizeDraft(String(seasonConfig.prizePoolCoins));
-  }, [seasonConfig]);
-
   // Ad config draft state
   const [adDraft, setAdDraft] = useState<Omit<AdConfig, 'updatedAtMs'>>(() => ({
     provider: adConfig.provider,
     adsgramBlockId: adConfig.adsgramBlockId,
+    adsgramTaskBlockId: adConfig.adsgramTaskBlockId || '',
     gigapubProjectId: adConfig.gigapubProjectId || '',
     monetagZoneId: adConfig.monetagZoneId,
     customTitle: adConfig.customTitle,
@@ -420,6 +414,7 @@ export function AdminPanelView({
     formatAdConfigTemplate({
       provider: adConfig.provider,
       adsgramBlockId: adConfig.adsgramBlockId,
+      adsgramTaskBlockId: adConfig.adsgramTaskBlockId || '',
       gigapubProjectId: adConfig.gigapubProjectId || '',
       monetagZoneId: adConfig.monetagZoneId,
       customTitle: adConfig.customTitle,
@@ -439,6 +434,7 @@ export function AdminPanelView({
     const synced = {
       provider: adConfig.provider,
       adsgramBlockId: adConfig.adsgramBlockId,
+      adsgramTaskBlockId: adConfig.adsgramTaskBlockId || '',
       gigapubProjectId: adConfig.gigapubProjectId || '',
       monetagZoneId: adConfig.monetagZoneId,
       customTitle: adConfig.customTitle,
@@ -580,10 +576,18 @@ export function AdminPanelView({
 
   const savedAdIdsCount = useMemo(
     () =>
-      [adConfig.adsgramBlockId, adConfig.gigapubProjectId, adConfig.monetagZoneId].filter(
-        (v) => Boolean(v && v.trim()),
-      ).length,
-    [adConfig.adsgramBlockId, adConfig.gigapubProjectId, adConfig.monetagZoneId],
+      [
+        adConfig.adsgramBlockId,
+        adConfig.adsgramTaskBlockId,
+        adConfig.gigapubProjectId,
+        adConfig.monetagZoneId,
+      ].filter((v) => Boolean(v && v.trim())).length,
+    [
+      adConfig.adsgramBlockId,
+      adConfig.adsgramTaskBlockId,
+      adConfig.gigapubProjectId,
+      adConfig.monetagZoneId,
+    ],
   );
 
   const handleGenerateGiftSubmit = async (e: React.FormEvent) => {
@@ -624,33 +628,6 @@ export function AdminPanelView({
       }
     } finally {
       setSavingPromo(false);
-    }
-  };
-
-  const handleSaveSeasonSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSavingSeason(true);
-    try {
-      const days = Math.max(1, Math.min(90, Number(seasonDaysDraft) || 7));
-      await onSaveSeasonConfig({
-        seasonNumber: seasonConfig.seasonNumber,
-        title: seasonTitleDraft.trim() || `Harvest Cup Season ${seasonConfig.seasonNumber}`,
-        prizePoolCoins: Math.max(0, Number(seasonPrizeDraft) || 0),
-        endsAtMs: Date.now() + days * 86_400_000,
-        lastWinners: seasonConfig.lastWinners ?? [],
-      });
-    } finally {
-      setSavingSeason(false);
-    }
-  };
-
-  const handleDistributeClick = async () => {
-    setDistributingPrizes(true);
-    try {
-      const days = Math.max(1, Math.min(90, Number(seasonDaysDraft) || 7));
-      await onDistributeSeasonPrizes(days);
-    } finally {
-      setDistributingPrizes(false);
     }
   };
 
@@ -713,9 +690,13 @@ export function AdminPanelView({
   const handleSaveChannelsSubmit = async () => {
     setSavingChannels(true);
     try {
+      const resolvedGetCode =
+        normalizeGetCodeChannelUrl(getCodeChannelDraft) || getCodeChannelDraft.trim();
+      setGetCodeChannelDraft(resolvedGetCode);
       await onSaveChannelsConfig({
         enabled: channelsEnabledDraft,
         channels: channelsDraft,
+        getCodeChannelUrl: resolvedGetCode,
       });
     } finally {
       setSavingChannels(false);
@@ -1158,6 +1139,27 @@ export function AdminPanelView({
     }
   };
 
+  const handleUnlockSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = passcodeInput.trim();
+    if (!clean) {
+      setPasscodeError('Please enter your Admin Passcode.');
+      return;
+    }
+    setPasscodeError(null);
+    setVerifyingPasscode(true);
+    try {
+      const result = await onVerifyAdminPasscode(clean);
+      if (result.ok) {
+        setPasscodeInput('');
+      } else {
+        setPasscodeError(result.error || 'Incorrect Admin Passcode.');
+      }
+    } finally {
+      setVerifyingPasscode(false);
+    }
+  };
+
   if (!isAuthorizedAdmin) {
     return (
       <div className="animate-clay-enter space-y-6 pb-8">
@@ -1190,17 +1192,17 @@ export function AdminPanelView({
             </div>
             <div>
               <h2 className="text-base font-extrabold tracking-tight">Admin Access Restricted</h2>
-              <p className="text-xs text-stone-300">Automatic Telegram ID authentication</p>
+              <p className="text-xs text-stone-300">Admin ID detection + Passcode required</p>
             </div>
           </div>
 
           <div className="p-5 space-y-4">
             <p className="text-xs font-semibold text-stone-600 dark:text-stone-300 leading-relaxed">
-              Owner console opens automatically only for Telegram Admin ID{' '}
+              Owner console opens only for authorized Admin IDs (Primary:{' '}
               <span className="font-mono-num font-extrabold text-stone-900 dark:text-stone-100">
                 {PRIMARY_ADMIN_TELEGRAM_ID}
               </span>
-              . No passcode is used.
+              ) after entering the Admin Passcode.
             </p>
             <div className="clay-inset !rounded-xl px-3.5 py-2.5 flex items-center justify-between text-xs">
               <span className="font-bold text-stone-500 dark:text-stone-400">Current Account ID</span>
@@ -1220,6 +1222,107 @@ export function AdminPanelView({
             </button>
           </div>
         </div>
+      </div>
+    );
+  }
+
+  if (!adminUnlocked) {
+    const detectedDisplayId = isAdminPlayerId(playerId)
+      ? PRIMARY_ADMIN_TELEGRAM_ID
+      : extractTelegramNumericUserId(playerId) || playerId;
+
+    return (
+      <div className="animate-clay-enter space-y-6 pb-8">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => {
+              onTabTap?.();
+              onBack();
+            }}
+            aria-label="Back from admin panel"
+            className="clay-btn clay-btn-neutral w-10 h-10 rounded-2xl flex items-center justify-center text-stone-700 dark:text-stone-200"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+          <div>
+            <h1 className="text-xl font-extrabold text-stone-900 dark:text-stone-100 tracking-tight">
+              Admin Passcode Verification
+            </h1>
+            <p className="text-xs text-stone-500 dark:text-stone-400">
+              Admin ID detected · Enter your Admin Passcode to unlock
+            </p>
+          </div>
+        </div>
+
+        <form onSubmit={(e) => void handleUnlockSubmit(e)} className="clay-card overflow-hidden max-w-md mx-auto">
+          <div className="bg-stone-900 dark:bg-stone-950 border-b border-stone-800 px-5 py-4 text-white flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center shrink-0">
+                <Lock className="w-5 h-5 text-emerald-300" />
+              </div>
+              <div>
+                <h2 className="text-base font-extrabold tracking-tight">Unlock Admin Console</h2>
+                <p className="text-xs text-stone-300">Verified Admin ID: {detectedDisplayId}</p>
+              </div>
+            </div>
+            <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-500/20 border border-emerald-400/30 px-2 py-0.5 text-[10px] font-extrabold text-emerald-200 shrink-0">
+              <ShieldCheck className="w-3 h-3" />
+              <span>Detected</span>
+            </span>
+          </div>
+
+          <div className="p-5 space-y-4">
+            <div className="space-y-1.5">
+              <label htmlFor="admin-passcode-input" className="text-xs font-extrabold text-stone-700 dark:text-stone-300">
+                Admin Passcode
+              </label>
+              <input
+                id="admin-passcode-input"
+                type="password"
+                autoComplete="current-password"
+                autoFocus
+                value={passcodeInput}
+                onChange={(e) => {
+                  setPasscodeInput(e.target.value);
+                  setPasscodeError(null);
+                }}
+                placeholder="Enter admin passcode..."
+                className="clay-inset w-full min-h-[46px] px-3.5 text-sm font-mono-num font-extrabold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+              />
+            </div>
+
+            {passcodeError && (
+              <div
+                role="alert"
+                className="rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800/70 px-3 py-2 text-xs font-bold text-rose-700 dark:text-rose-300"
+              >
+                {passcodeError}
+              </div>
+            )}
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  onTabTap?.();
+                  onBack();
+                }}
+                className="clay-btn clay-btn-neutral min-h-[46px] px-4 rounded-2xl font-extrabold text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={verifyingPasscode}
+                className="clay-btn clay-btn-emerald flex-1 min-h-[46px] rounded-2xl font-extrabold text-sm flex items-center justify-center gap-2 disabled:opacity-55"
+              >
+                <KeyRound className="w-4 h-4" />
+                <span>{verifyingPasscode ? 'Verifying...' : 'Open Admin Panel'}</span>
+              </button>
+            </div>
+          </div>
+        </form>
       </div>
     );
   }
@@ -1270,6 +1373,20 @@ export function AdminPanelView({
             </p>
           </div>
         </div>
+        {onLockAdmin && (
+          <button
+            type="button"
+            onClick={() => {
+              onTabTap?.();
+              onLockAdmin();
+            }}
+            aria-label="Lock Admin Console"
+            className="h-9 px-3 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-xs font-extrabold text-stone-100 inline-flex items-center gap-1.5 shrink-0 cursor-pointer transition-colors"
+          >
+            <Lock className="w-3.5 h-3.5" />
+            <span>Lock</span>
+          </button>
+        )}
       </div>
 
       {/* 4-Column Executive KPI Strip */}
@@ -1371,7 +1488,6 @@ export function AdminPanelView({
             { id: 'tasks', label: 'Tasks', icon: ListPlus, count: 0 },
             { id: 'ads', label: 'Ads', icon: Megaphone, count: 0 },
             { id: 'ad_ids', label: 'Block IDs', icon: KeyRound, count: savedAdIdsCount },
-            { id: 'season', label: 'Season', icon: Trophy, count: 0 },
           ] as const
         ).map((item) => {
           const Icon = item.icon;
@@ -2296,7 +2412,7 @@ export function AdminPanelView({
                   <span>Add Admin by ID</span>
                 </h2>
                 <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
-                  Grant Admin Console access directly by Telegram numeric ID or player UID without any passcode.
+                  Grant Admin Console access to a Telegram numeric ID or player UID (protected by the Admin Passcode).
                 </p>
               </div>
               <span className="rounded-lg bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800/70 px-2 py-1 text-[10px] font-extrabold font-mono-num text-emerald-700 dark:text-emerald-300 shrink-0">
@@ -2652,6 +2768,69 @@ export function AdminPanelView({
                   );
                 })
               )}
+            </div>
+
+            {/* Get Code Channel (Tasks Promo Link) */}
+            <div className="clay-inset !rounded-2xl p-3.5 space-y-2.5">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="text-xs font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-1.5">
+                    <Ticket className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                    <span>Get Code Channel (Tasks Promo Button)</span>
+                  </div>
+                  <p className="text-[11px] text-stone-500 dark:text-stone-400 mt-0.5">
+                    Where the clickable &ldquo;Get code&rdquo; button in Tasks sends players to find gift codes.
+                  </p>
+                </div>
+                {normalizeGetCodeChannelUrl(getCodeChannelDraft) && (
+                  <a
+                    href={normalizeGetCodeChannelUrl(getCodeChannelDraft)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="clay-btn clay-btn-sky min-h-[32px] px-2.5 rounded-xl text-[11px] font-extrabold inline-flex items-center gap-1 shrink-0"
+                  >
+                    <span>Test</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+              </div>
+
+              <input
+                type="text"
+                value={getCodeChannelDraft}
+                onChange={(e) => setGetCodeChannelDraft(e.target.value)}
+                placeholder="@AIRDROP_GALAXYS or https://t.me/AIRDROP_GALAXYS"
+                aria-label="Get code channel username or URL"
+                maxLength={256}
+                className="clay-card !rounded-xl w-full min-h-[40px] px-3 text-xs font-semibold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-sky-400"
+              />
+
+              {channelsDraft.length > 0 && (
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-[10px] font-bold text-stone-500 dark:text-stone-400">
+                    Quick fill:
+                  </span>
+                  {channelsDraft
+                    .filter((ch) => Boolean(ch.url))
+                    .map((ch) => (
+                      <button
+                        key={`getcode-fill-${ch.id}`}
+                        type="button"
+                        onClick={() => {
+                          onTabTap?.();
+                          setGetCodeChannelDraft(ch.url);
+                        }}
+                        className="rounded-lg bg-sky-50 dark:bg-sky-950/60 border border-sky-200 dark:border-sky-800/70 px-2 py-0.5 text-[10px] font-extrabold text-sky-700 dark:text-sky-300 hover:bg-sky-100 cursor-pointer"
+                      >
+                        {ch.handle}
+                      </button>
+                    ))}
+                </div>
+              )}
+
+              <div className="text-[10px] font-mono-num text-stone-500 dark:text-stone-400 truncate">
+                Resolved URL: {normalizeGetCodeChannelUrl(getCodeChannelDraft) || 'Not set (uses default payout channel)'}
+              </div>
             </div>
 
             <button
@@ -4020,15 +4199,15 @@ export function AdminPanelView({
 
           {/* All Network Block / Project / Zone IDs (Always Visible) */}
           <div className="clay-inset !rounded-2xl p-3 space-y-2.5">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
               <span className="text-xs font-extrabold text-stone-800 dark:text-stone-200">
                 Ad Network Block &amp; Zone IDs
               </span>
               <span className="text-[10px] font-bold text-stone-500 dark:text-stone-400">
-                Used by Gates &amp; Daily Ad Tasks
+                Primary runs 1st · Next site runs during 60s cooldown
               </span>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
               <div className="space-y-1">
                 <label htmlFor="admin-adsgram-id" className="text-[11px] font-bold text-stone-700 dark:text-stone-300 flex items-center justify-between">
                   <span>AdsGram Block ID</span>
@@ -4042,6 +4221,23 @@ export function AdminPanelView({
                   value={adDraft.adsgramBlockId}
                   onChange={(e) => setAdDraft((d) => ({ ...d, adsgramBlockId: e.target.value }))}
                   placeholder="e.g. 1234"
+                  className="clay-card !rounded-xl w-full min-h-[40px] px-3 text-xs font-mono-num text-stone-900 dark:text-stone-100"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label htmlFor="admin-adsgram-task-id" className="text-[11px] font-bold text-stone-700 dark:text-stone-300 flex items-center justify-between">
+                  <span>AdsGram Bot-Joins ID</span>
+                  {(adDraft.adsgramTaskBlockId || '').trim() && (
+                    <span className="text-[10px] font-extrabold text-indigo-700 dark:text-indigo-300">Task</span>
+                  )}
+                </label>
+                <input
+                  id="admin-adsgram-task-id"
+                  type="text"
+                  value={adDraft.adsgramTaskBlockId || ''}
+                  onChange={(e) => setAdDraft((d) => ({ ...d, adsgramTaskBlockId: e.target.value }))}
+                  placeholder="e.g. task-5678"
                   className="clay-card !rounded-xl w-full min-h-[40px] px-3 text-xs font-mono-num text-stone-900 dark:text-stone-100"
                 />
               </div>
@@ -4342,7 +4538,7 @@ export function AdminPanelView({
           <div className="clay-card p-4 space-y-3.5">
             <div>
               <h3 className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
-                Network Block &amp; Zone IDs ({[adDraft.adsgramBlockId, adDraft.gigapubProjectId, adDraft.monetagZoneId].filter((v) => Boolean(v && v.trim())).length}/3)
+                Network Block &amp; Zone IDs ({[adDraft.adsgramBlockId, adDraft.adsgramTaskBlockId, adDraft.gigapubProjectId, adDraft.monetagZoneId].filter((v) => Boolean(v && v.trim())).length}/4)
               </h3>
               <p className="text-xs text-stone-500 dark:text-stone-400">
                 Paste each SDK ID directly or populate via template above
@@ -4371,6 +4567,31 @@ export function AdminPanelView({
                   value={adDraft.adsgramBlockId}
                   onChange={(e) => setAdDraft((d) => ({ ...d, adsgramBlockId: e.target.value }))}
                   placeholder="Paste AdsGram Block ID (e.g. 1234 or int-1234)"
+                  className="clay-card !rounded-xl w-full min-h-[42px] px-3 text-sm font-mono-num text-stone-900 dark:text-stone-100"
+                />
+              </div>
+
+              <div className="clay-inset !rounded-2xl p-3 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label htmlFor="tpl-adsgram-task-id" className="text-xs font-extrabold text-stone-800 dark:text-stone-200">
+                    AdsGram Bot-Joins / Task Block ID
+                  </label>
+                  <span
+                    className={`rounded-md border px-1.5 py-0.5 text-[10px] font-extrabold ${
+                      (adDraft.adsgramTaskBlockId || '').trim()
+                        ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                        : 'bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800/70 text-amber-800 dark:text-amber-300'
+                    }`}
+                  >
+                    {(adDraft.adsgramTaskBlockId || '').trim() ? 'Ready' : 'Empty'}
+                  </span>
+                </div>
+                <input
+                  id="tpl-adsgram-task-id"
+                  type="text"
+                  value={adDraft.adsgramTaskBlockId || ''}
+                  onChange={(e) => setAdDraft((d) => ({ ...d, adsgramTaskBlockId: e.target.value }))}
+                  placeholder="Paste AdsGram Task Block ID (e.g. task-5678)"
                   className="clay-card !rounded-xl w-full min-h-[42px] px-3 text-sm font-mono-num text-stone-900 dark:text-stone-100"
                 />
               </div>
@@ -4482,8 +4703,9 @@ export function AdminPanelView({
                   'Egg Harvest (Collect)',
                   'Miner Buy (Packs)',
                   'Gift / Promo Claim',
-                  'Daily Ad Network Cards',
-                  'Watch X/10 Hen Step',
+                  '3× Watch & Earn Coins',
+                  'Watch & Earn Free Eggs',
+                  'AdsGram Bot Joins & Clicks',
                 ].map((gate) => (
                   <div
                     key={gate}
@@ -4505,142 +4727,6 @@ export function AdminPanelView({
             </button>
           </div>
         </form>
-      )}
-
-      {/* ========================================================================
-          SEASON TAB
-         ======================================================================== */}
-      {tab === 'season' && (
-        <div key="admin-tab-season" className="animate-clay-enter space-y-4">
-          <form
-            onSubmit={(e) => void handleSaveSeasonSubmit(e)}
-            className="clay-card p-4 space-y-3.5"
-          >
-            <div className="flex items-center justify-between gap-2">
-              <div>
-                <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100">
-                  Season #{seasonConfig.seasonNumber} Settings
-                </h2>
-                <p className="text-xs text-stone-500 dark:text-stone-400">
-                  Live leaderboard countdown &amp; Top 3 prize split (50% / 30% / 20%)
-                </p>
-              </div>
-              <div className="w-10 h-10 rounded-2xl clay-icon-well flex items-center justify-center shrink-0">
-                <Award className="w-5 h-5 text-amber-500" />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-              <div className="sm:col-span-2 space-y-1">
-                <label htmlFor="admin-season-title" className="text-xs font-bold text-stone-700 dark:text-stone-300">
-                  Season Title
-                </label>
-                <input
-                  id="admin-season-title"
-                  type="text"
-                  required
-                  minLength={2}
-                  maxLength={80}
-                  value={seasonTitleDraft}
-                  onChange={(e) => setSeasonTitleDraft(e.target.value)}
-                  className="clay-inset w-full min-h-[42px] px-3 text-sm font-bold text-stone-900 dark:text-stone-100"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label htmlFor="admin-season-days" className="text-xs font-bold text-stone-700 dark:text-stone-300">
-                  Reset Duration (days)
-                </label>
-                <input
-                  id="admin-season-days"
-                  type="number"
-                  min={1}
-                  max={90}
-                  value={seasonDaysDraft}
-                  onChange={(e) => setSeasonDaysDraft(e.target.value)}
-                  className="clay-inset w-full min-h-[42px] px-3 text-sm font-mono-num font-extrabold text-stone-900 dark:text-stone-100"
-                />
-              </div>
-            </div>
-
-            <div className="space-y-1">
-              <label htmlFor="admin-season-pool" className="text-xs font-bold text-stone-700 dark:text-stone-300">
-                Total Prize Pool (Coins)
-              </label>
-              <input
-                id="admin-season-pool"
-                type="number"
-                min={0}
-                max={10000000}
-                value={seasonPrizeDraft}
-                onChange={(e) => setSeasonPrizeDraft(e.target.value)}
-                className="clay-inset w-full min-h-[42px] px-3 text-sm font-mono-num font-extrabold text-stone-900 dark:text-stone-100"
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={savingSeason}
-              className="clay-btn clay-btn-emerald w-full min-h-[44px] rounded-2xl disabled:opacity-50 font-extrabold text-sm"
-            >
-              {savingSeason ? 'Saving Season...' : 'Save Season Settings'}
-            </button>
-          </form>
-
-          <div className="clay-card p-4 space-y-3">
-            <div>
-              <h3 className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
-                Current Top 3 Leaders Preview
-              </h3>
-              <p className="text-xs text-stone-500 dark:text-stone-400 font-mono-num">
-                Ends {new Date(seasonConfig.endsAtMs).toLocaleString()}
-              </p>
-            </div>
-
-            {leaderboardEntries.length === 0 ? (
-              <div className="clay-inset p-4 text-center text-xs text-stone-500 dark:text-stone-400">
-                Leaderboard entries will appear here once players join.
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {[...leaderboardEntries]
-                  .sort((a, b) => b.buyerPoints - a.buyerPoints || b.eggs - a.eggs)
-                  .slice(0, 3)
-                  .map((entry, idx) => {
-                    const shares = [0.5, 0.3, 0.2];
-                    const prize = Math.round(seasonConfig.prizePoolCoins * (shares[idx] ?? 0));
-                    return (
-                      <div
-                        key={entry.uid}
-                        className="clay-inset !rounded-xl px-3 py-2.5 flex items-center justify-between text-xs"
-                      >
-                        <span className="font-extrabold text-stone-900 dark:text-stone-100 truncate">
-                          #{idx + 1} {entry.displayName}{' '}
-                          <span className="font-mono-num font-semibold text-stone-500 dark:text-stone-400">
-                            ({entry.buyerPoints.toLocaleString()} pts)
-                          </span>
-                        </span>
-                        <span className="font-mono-num font-extrabold text-emerald-700 dark:text-emerald-400 shrink-0">
-                          +{prize.toLocaleString()} coins
-                        </span>
-                      </div>
-                    );
-                  })}
-              </div>
-            )}
-
-            <button
-              type="button"
-              disabled={distributingPrizes || leaderboardEntries.length === 0}
-              onClick={() => void handleDistributeClick()}
-              className="clay-btn clay-btn-amber w-full min-h-[44px] rounded-2xl disabled:opacity-50 font-extrabold text-sm"
-            >
-              {distributingPrizes
-                ? 'Distributing Prizes...'
-                : `Distribute Season #${seasonConfig.seasonNumber} Prizes & Start #${seasonConfig.seasonNumber + 1}`}
-            </button>
-          </div>
-        </div>
       )}
     </div>
   );

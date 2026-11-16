@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Award, Package, Sparkles, Trees, X, Zap } from 'lucide-react';
-import { motion } from 'motion/react';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import type { ChickenBreedId, UserFarmProfile } from '../types/farm';
 import {
   calculateProductionRate,
@@ -46,6 +47,19 @@ interface RoamingHen {
   y: number;
   facingLeft: boolean;
   delayMs: number;
+}
+
+interface FlyingEggParticle {
+  id: string;
+  startX: number;
+  startY: number;
+  midX: number;
+  midY: number;
+  endX: number;
+  endY: number;
+  delay: number;
+  duration: number;
+  rotateDeg: number;
 }
 
 const SPAWN_SPOTS = [
@@ -117,10 +131,16 @@ export function FarmMeadow({
   onActivateBooster,
   onBuyChickens,
 }: FarmMeadowProps) {
+  const prefersReducedMotion = useReducedMotion();
   const [bgFailed, setBgFailed] = useState(false);
   const [stepTick, setStepTick] = useState(0);
   const [liveNowMs, setLiveNowMs] = useState(() => Date.now());
   const [chirps, setChirps] = useState<Array<{ seq: number; henId: string; text: string; isGolden: boolean }>>([]);
+  const [tapBursts, setTapBursts] = useState<Array<{ seq: number; henId: string; isGolden: boolean }>>([]);
+  const [harvestBurst, setHarvestBurst] = useState<{ seq: number; amount: number } | null>(null);
+  const [isCollectPopping, setIsCollectPopping] = useState(false);
+  const [collectRippleSeq, setCollectRippleSeq] = useState(0);
+  const [flyingEggs, setFlyingEggs] = useState<FlyingEggParticle[]>([]);
   const [poppedHen, setPoppedHen] = useState<{ id: string; seq: number } | null>(null);
   const [poppedArtifact, setPoppedArtifact] = useState<{ id: FarmArtifactId; seq: number; label: string } | null>(null);
   const [activeMilestone, setActiveMilestone] = useState<ChickenMilestoneInfo | null>(null);
@@ -128,8 +148,14 @@ export function FarmMeadow({
   const prevUidRef = useRef<string>(profile.uid);
   const prevTotalChickensRef = useRef<number | null>(null);
   const chirpSeqRef = useRef(0);
+  const harvestSeqRef = useRef(0);
+  const flyingBatchSeqRef = useRef(0);
+  const collectBtnRef = useRef<HTMLButtonElement | null>(null);
   const popTimerRef = useRef<number | null>(null);
+  const collectPopTimerRef = useRef<number | null>(null);
   const artifactPopTimerRef = useRef<number | null>(null);
+  const harvestTimerRef = useRef<number | null>(null);
+  const effectTimersRef = useRef<number[]>([]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -209,9 +235,82 @@ export function FarmMeadow({
     return () => {
       window.clearInterval(id);
       if (popTimerRef.current) window.clearTimeout(popTimerRef.current);
+      if (collectPopTimerRef.current) window.clearTimeout(collectPopTimerRef.current);
       if (artifactPopTimerRef.current) window.clearTimeout(artifactPopTimerRef.current);
+      if (harvestTimerRef.current) window.clearTimeout(harvestTimerRef.current);
+      for (const timerId of effectTimersRef.current) {
+        window.clearTimeout(timerId);
+      }
+      effectTimersRef.current = [];
     };
   }, []);
+
+  const triggerCollectEffects = () => {
+    setIsCollectPopping(false);
+    window.requestAnimationFrame(() => {
+      setIsCollectPopping(true);
+    });
+    setCollectRippleSeq((s) => s + 1);
+    if (collectPopTimerRef.current) window.clearTimeout(collectPopTimerRef.current);
+    collectPopTimerRef.current = window.setTimeout(() => {
+      setIsCollectPopping(false);
+    }, 460);
+
+    if (prefersReducedMotion || typeof window === 'undefined') {
+      window.dispatchEvent(new CustomEvent('alphagram:coin-arrival'));
+      return;
+    }
+
+    const btnRect = collectBtnRef.current?.getBoundingClientRect();
+    const targetEl = document.querySelector('[data-coin-balance-target="true"]');
+    const targetRect = targetEl?.getBoundingClientRect();
+
+    const originX = btnRect ? btnRect.left + btnRect.width * 0.32 : window.innerWidth * 0.65;
+    const originY = btnRect ? btnRect.top + btnRect.height * 0.45 : window.innerHeight * 0.6;
+    const endX =
+      targetRect && targetRect.width > 0 && targetRect.height > 0
+        ? targetRect.left + targetRect.width / 2
+        : window.innerWidth * 0.22;
+    const endY =
+      targetRect && targetRect.width > 0 && targetRect.height > 0
+        ? targetRect.top + targetRect.height / 2
+        : 84;
+
+    const batchId = ++flyingBatchSeqRef.current;
+    const count = 8;
+    const created: FlyingEggParticle[] = Array.from({ length: count }, (_, idx) => {
+      const spreadX = (idx - (count - 1) / 2) * 14;
+      const spreadY = ((idx % 3) - 1) * 7;
+      const startX = originX + spreadX;
+      const startY = originY + spreadY;
+      const arcBend = (idx % 2 === 0 ? -1 : 1) * (24 + (idx % 4) * 14);
+      const midX = (startX + endX) / 2 + arcBend;
+      const midY = Math.min(startY, endY) - 44 - (idx % 3) * 24;
+      return {
+        id: `fly-egg-${batchId}-${idx}`,
+        startX,
+        startY,
+        midX,
+        midY,
+        endX,
+        endY,
+        delay: idx * 0.045,
+        duration: 0.64 + (idx % 3) * 0.06,
+        rotateDeg: (idx % 2 === 0 ? 1 : -1) * (18 + idx * 5),
+      };
+    });
+
+    setFlyingEggs((prev) => [...prev.slice(-16), ...created]);
+
+    const arrivalTimer = window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('alphagram:coin-arrival'));
+    }, 600);
+    const cleanupTimer = window.setTimeout(() => {
+      const ids = new Set(created.map((p) => p.id));
+      setFlyingEggs((prev) => prev.filter((p) => !ids.has(p.id)));
+    }, 1250);
+    effectTimersRef.current.push(arrivalTimer, cleanupTimer);
+  };
 
   const placedArtifacts = useMemo(() => {
     return FARM_ARTIFACTS.flatMap((def) => {
@@ -268,16 +367,35 @@ export function FarmMeadow({
         />
       )}
 
-      {/* Ambient sunlit golden pollen motes */}
+      {/* Soft sunlit morning rays & ambient golden pollen motes */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden" aria-hidden="true">
+        <div
+          className="animate-sunbeam absolute -top-16 -left-10 w-64 h-[135%] bg-gradient-to-b from-amber-100/45 via-amber-50/15 to-transparent blur-xl"
+        />
+        <div
+          style={{ animationDelay: '2.4s' }}
+          className="animate-sunbeam absolute -top-20 left-1/3 w-48 h-[135%] bg-gradient-to-b from-white/35 via-amber-100/10 to-transparent blur-xl"
+        />
         {POLLEN_MOTES.map((mote, idx) => (
           <span
             key={idx}
             style={{ left: mote.left, top: mote.top, animationDelay: mote.delay }}
-            className={`animate-pollen-drift absolute ${mote.size} rounded-full bg-amber-200/80 shadow-[0_0_8px_rgba(253,230,138,0.8)]`}
+            className={`animate-pollen-drift absolute ${mote.size} rounded-full ${
+              boosterActive
+                ? 'bg-emerald-200/90 shadow-[0_0_10px_rgba(52,211,153,0.9)]'
+                : 'bg-amber-200/80 shadow-[0_0_8px_rgba(253,230,138,0.8)]'
+            }`}
           />
         ))}
       </div>
+
+      {/* 2x Laying Feed Active Booster Aura */}
+      {boosterActive && (
+        <div
+          aria-hidden="true"
+          className="animate-booster-aura pointer-events-none absolute inset-0 z-[15] rounded-[2rem] ring-4 ring-inset ring-emerald-400/55 shadow-[inset_0_0_32px_rgba(16,185,129,0.28)]"
+        />
+      )}
 
       {/* Subtle bottom scrim so dock controls maintain high readability */}
       <div className="absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-black/50 via-black/15 to-transparent pointer-events-none" />
@@ -463,8 +581,13 @@ export function FarmMeadow({
                   ...prev.slice(-6),
                   { seq: nextSeq, henId: hen.id, text: nextText, isGolden: triggeredGold },
                 ]);
+                setTapBursts((prev) => [
+                  ...prev.slice(-4),
+                  { seq: nextSeq, henId: hen.id, isGolden: triggeredGold },
+                ]);
                 window.setTimeout(() => {
                   setChirps((prev) => prev.filter((item) => item.seq !== nextSeq));
+                  setTapBursts((prev) => prev.filter((item) => item.seq !== nextSeq));
                 }, 1300);
 
                 setPoppedHen((prev) => ({ id: hen.id, seq: (prev?.seq ?? 0) + 1 }));
@@ -479,10 +602,37 @@ export function FarmMeadow({
                 top: `${hen.y}%`,
                 transition: 'left 2.6s ease-in-out, top 2.6s ease-in-out',
               }}
-              className={`group absolute -translate-x-1/2 -translate-y-1/2 p-1 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 rounded-full ${
-                isGoldenTarget ? 'ring-2 ring-amber-300/90 bg-amber-300/20' : ''
-              } pointer-events-auto`}
+              className="group absolute -translate-x-1/2 -translate-y-1/2 p-1 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 rounded-full pointer-events-auto"
             >
+              {isGoldenTarget && (
+                <>
+                  <span
+                    aria-hidden="true"
+                    className="animate-collect-halo pointer-events-none absolute -inset-2 rounded-full bg-amber-300/35 blur-sm"
+                  />
+                  <span
+                    aria-hidden="true"
+                    className="animate-golden-ring pointer-events-none absolute -inset-1.5 rounded-full border-2 border-dashed border-amber-300 shadow-[0_0_12px_rgba(251,191,36,0.85)]"
+                  />
+                </>
+              )}
+              {tapBursts
+                .filter((b) => b.henId === hen.id)
+                .map((b) => (
+                  <span key={`burst-${b.seq}`} aria-hidden="true" className="pointer-events-none absolute inset-0">
+                    {[0, 60, 120, 180, 240, 300].map((angle) => (
+                      <span
+                        key={angle}
+                        style={{ '--burst-angle': `${angle}deg` } as React.CSSProperties}
+                        className={`animate-sparkle-burst absolute left-1/2 top-1/2 w-2 h-2 rounded-full ${
+                          b.isGolden
+                            ? 'bg-amber-300 shadow-[0_0_8px_rgba(251,191,36,0.95)]'
+                            : 'bg-amber-100 shadow-[0_0_6px_rgba(255,255,255,0.9)]'
+                        }`}
+                      />
+                    ))}
+                  </span>
+                ))}
               {chirps
                 .filter((c) => c.henId === hen.id)
                 .map((c) => (
@@ -497,7 +647,11 @@ export function FarmMeadow({
                     {c.text}
                   </span>
                 ))}
-              <div className="transition-transform duration-200 ease-out group-hover:scale-110 group-hover:-translate-y-1 group-active:scale-95">
+              <div className="relative transition-transform duration-200 ease-out group-hover:scale-110 group-hover:-translate-y-1 group-active:scale-95">
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute -bottom-0.5 left-1/2 -translate-x-1/2 w-10 h-2.5 rounded-full bg-black/30 blur-[2px]"
+                />
                 <div
                   key={isPopping ? `pop-${poppedHen.seq}` : 'idle'}
                   className={isPopping ? 'animate-chicken-pop' : ''}
@@ -508,7 +662,7 @@ export function FarmMeadow({
                   >
                     <ChickenSprite
                       breed={hen.breed}
-                      className="w-11 h-11 sm:w-12 sm:h-12 drop-shadow-[0_6px_8px_rgba(15,23,42,0.32)] group-hover:drop-shadow-[0_8px_12px_rgba(15,23,42,0.4)] transition-all duration-200"
+                      className="w-14 h-14 sm:w-16 sm:h-16 drop-shadow-[0_6px_8px_rgba(15,23,42,0.36)] group-hover:drop-shadow-[0_9px_14px_rgba(15,23,42,0.44)] transition-all duration-200"
                       facingLeft={hen.facingLeft}
                     />
                   </div>
@@ -582,6 +736,17 @@ export function FarmMeadow({
         </button>
 
         <div className="relative flex-1">
+          {harvestBurst && (
+            <div
+              key={`harvest-${harvestBurst.seq}`}
+              aria-hidden="true"
+              className="animate-harvest-rise pointer-events-none absolute -top-9 left-1/2 z-30 flex items-center gap-1 rounded-full bg-gradient-to-r from-emerald-500 to-amber-400 text-stone-950 border border-white/70 px-3 py-1 text-xs font-extrabold shadow-xl whitespace-nowrap"
+            >
+              <Sparkles className="w-3.5 h-3.5 shrink-0" />
+              <span className="font-mono-num">+{harvestBurst.amount.toLocaleString()} Eggs!</span>
+            </div>
+          )}
+
           {pendingEggs > 0 && (
             <>
               <div
@@ -595,19 +760,55 @@ export function FarmMeadow({
             </>
           )}
 
+          <AnimatePresence>
+            {collectRippleSeq > 0 && !prefersReducedMotion && (
+              <motion.span
+                key={`collect-ripple-${collectRippleSeq}`}
+                aria-hidden="true"
+                initial={{ opacity: 0.72, scale: 0.92 }}
+                animate={{ opacity: 0, scale: 1.3 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
+                className="pointer-events-none absolute inset-0 rounded-2xl border-2 border-amber-300 shadow-[0_0_20px_rgba(251,191,36,0.65)]"
+              />
+            )}
+          </AnimatePresence>
+
           <motion.button
+            ref={collectBtnRef}
             type="button"
-            whileTap={pendingEggs > 0 ? { scale: 0.96 } : undefined}
-            onClick={onCollect}
+            animate={
+              isCollectPopping && !prefersReducedMotion
+                ? {
+                    scale: [1, 1.15, 0.94, 1.04, 1],
+                    y: [0, -5, 1, 0],
+                  }
+                : { scale: 1, y: 0 }
+            }
+            transition={{ duration: 0.44, ease: [0.16, 1, 0.3, 1] }}
+            whileHover={pendingEggs > 0 && !prefersReducedMotion ? { scale: 1.025 } : undefined}
+            whileTap={pendingEggs > 0 ? { scale: 0.92 } : undefined}
+            onClick={() => {
+              if (pendingEggs > 0) {
+                const nextSeq = ++harvestSeqRef.current;
+                setHarvestBurst({ seq: nextSeq, amount: pendingEggs });
+                if (harvestTimerRef.current) window.clearTimeout(harvestTimerRef.current);
+                harvestTimerRef.current = window.setTimeout(() => {
+                  setHarvestBurst((cur) => (cur?.seq === nextSeq ? null : cur));
+                }, 1350);
+                triggerCollectEffects();
+              }
+              onCollect();
+            }}
             disabled={pendingEggs <= 0}
             className={`clay-btn relative w-full min-h-[56px] rounded-2xl px-4 py-2 font-extrabold flex items-center justify-between gap-2 ${
               pendingEggs > 0
-                ? 'clay-btn-amber'
+                ? 'clay-btn-amber clay-cta-sheen'
                 : 'clay-btn-neutral opacity-85 cursor-not-allowed text-stone-500 dark:text-stone-400'
             }`}
           >
             <div className="flex items-center gap-1.5">
-              <EggIcon className="w-5 h-5 shrink-0" />
+              <EggIcon className={`w-5 h-5 shrink-0 ${pendingEggs > 0 ? 'animate-egg-wiggle' : ''}`} />
               <span className="text-sm sm:text-base">{collectLabel}</span>
             </div>
             <div className="flex flex-col items-end">
@@ -616,7 +817,7 @@ export function FarmMeadow({
               </span>
               <div className="w-12 h-2 rounded-full bg-black/15 mt-1 overflow-hidden p-[1px]">
                 <div
-                  className={`h-full bg-emerald-500 rounded-full transition-all ${
+                  className={`h-full bg-emerald-500 rounded-full transition-all duration-300 ${
                     pendingEggs > 0 ? 'clay-shimmer-bar' : ''
                   }`}
                   style={{ width: `${fillPct}%` }}
@@ -626,6 +827,44 @@ export function FarmMeadow({
           </motion.button>
         </div>
       </div>
+
+      {typeof document !== 'undefined' &&
+        flyingEggs.length > 0 &&
+        createPortal(
+          <div
+            aria-hidden="true"
+            className="pointer-events-none fixed inset-0 z-[70] overflow-hidden"
+          >
+            {flyingEggs.map((particle) => (
+              <motion.div
+                key={particle.id}
+                initial={{
+                  x: particle.startX - 14,
+                  y: particle.startY - 14,
+                  scale: 0.45,
+                  opacity: 0,
+                  rotate: 0,
+                }}
+                animate={{
+                  x: [particle.startX - 14, particle.midX - 14, particle.endX - 14],
+                  y: [particle.startY - 14, particle.midY - 14, particle.endY - 14],
+                  scale: [0.5, 1.25, 0.95, 0.42],
+                  opacity: [0, 1, 1, 0.15],
+                  rotate: [0, particle.rotateDeg, particle.rotateDeg * 0.4, 0],
+                }}
+                transition={{
+                  duration: particle.duration,
+                  delay: particle.delay,
+                  ease: [0.22, 1, 0.36, 1],
+                }}
+                className="absolute top-0 left-0 w-7 h-7 flex items-center justify-center will-change-transform drop-shadow-[0_4px_10px_rgba(245,158,11,0.55)]"
+              >
+                <EggIcon className="w-7 h-7" />
+              </motion.div>
+            ))}
+          </div>,
+          document.body,
+        )}
     </section>
   );
 }

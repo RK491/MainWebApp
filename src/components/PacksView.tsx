@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Minus, Plus } from 'lucide-react';
+import { motion } from 'motion/react';
 import { CHICKEN_PACKS, coinsToUsd } from '../game/economy';
 import type { ChickenBreedId, UserFarmProfile } from '../types/farm';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
@@ -78,13 +79,16 @@ export function PacksView({ profile, buyingBusy = false, onBuy, onTopUp }: Packs
           const owned = ownedCount(pack.id);
 
           return (
-            <div
+            <motion.div
               key={pack.id}
-              style={{ animationDelay: `${index * 45}ms` }}
-              className="animate-clay-enter clay-card clay-hover-lift p-4 space-y-3"
+              initial={{ opacity: 0, y: 12, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              transition={{ duration: 0.24, delay: index * 0.05, ease: [0.16, 1, 0.3, 1] }}
+              whileHover={{ y: -2 }}
+              className="group clay-card p-4 space-y-3"
             >
               <div className="flex items-center gap-3.5">
-                <div className="w-16 h-16 rounded-2xl clay-icon-well flex items-center justify-center shrink-0">
+                <div className="w-16 h-16 rounded-2xl clay-icon-well flex items-center justify-center shrink-0 transition-transform duration-200 group-hover:scale-105 group-hover:-rotate-3">
                   <ChickenSprite breed={pack.id} className="w-13 h-13 animate-chicken-bob" />
                 </div>
 
@@ -110,9 +114,15 @@ export function PacksView({ profile, buyingBusy = false, onBuy, onTopUp }: Packs
               <div className="flex items-center justify-between gap-3 pt-2 border-t border-stone-200/60 dark:border-stone-800/80">
                 <div className="flex items-center gap-1.5 min-w-0">
                   <CoinIcon className="w-5 h-5 shrink-0" />
-                  <span className="text-base font-extrabold text-stone-900 dark:text-stone-100 font-mono-num">
+                  <motion.span
+                    key={totalCost}
+                    initial={{ scale: 1.12 }}
+                    animate={{ scale: 1 }}
+                    transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+                    className="text-base font-extrabold text-stone-900 dark:text-stone-100 font-mono-num origin-left"
+                  >
                     {totalCost.toLocaleString()}
-                  </span>
+                  </motion.span>
                   <span className="text-xs font-medium text-stone-400 dark:text-stone-500 font-mono-num">
                     ${totalUsd}
                   </span>
@@ -151,19 +161,20 @@ export function PacksView({ profile, buyingBusy = false, onBuy, onTopUp }: Packs
                     +{qty}
                   </span>
 
-                  <button
+                  <motion.button
                     type="button"
+                    whileTap={{ scale: 0.95 }}
                     disabled={buyingBusy}
                     onClick={() => onBuy(pack.id, qty)}
                     className={`clay-btn min-h-[42px] px-4 rounded-2xl text-sm font-extrabold whitespace-nowrap disabled:opacity-60 ${
-                      canAfford ? 'clay-btn-emerald' : 'clay-btn-amber'
+                      canAfford ? 'clay-btn-emerald clay-cta-sheen' : 'clay-btn-amber'
                     }`}
                   >
                     {buyingBusy ? 'Opening...' : 'Buy'}
-                  </button>
+                  </motion.button>
                 </div>
               </div>
-            </div>
+            </motion.div>
           );
         })}
       </div>

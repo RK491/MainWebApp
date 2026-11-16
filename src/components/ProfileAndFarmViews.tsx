@@ -342,7 +342,12 @@ export function ProfileView({
               <div className="w-9 h-9 rounded-xl clay-icon-well flex items-center justify-center">
                 <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
               </div>
-              <span className="text-sm font-bold text-stone-900 dark:text-stone-100">Admin Panel</span>
+              <div>
+                <span className="block text-sm font-bold text-stone-900 dark:text-stone-100">Admin Panel</span>
+                <span className="block text-[11px] font-semibold text-stone-500 dark:text-stone-400">
+                  Admin ID detected · Enter passcode to open
+                </span>
+              </div>
             </div>
             <span className="text-xs font-extrabold text-emerald-700 dark:text-emerald-400 font-mono-num">
               ID {isAdminPlayerId(profile.uid) ? PRIMARY_ADMIN_TELEGRAM_ID : displayUserId}

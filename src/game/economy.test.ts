@@ -5,10 +5,12 @@ import {
   AD_EXEMPT_ACTIONS,
   AD_GATED_ACTIONS,
   AD_NETWORK_TASKS,
+  ADSGRAM_BOT_JOIN_TASK,
   buildDeterministicDepositIds,
   buildEarningsChartSeries,
   buildInvitedFriendsList,
   buildLeaderboardRankings,
+  buildReferralBotNotificationMessage,
   buildReferralGrowthSeries,
   buyChickens,
   calculateBuyerPoints,
@@ -23,6 +25,7 @@ import {
   canRemoveAdminPlayerId,
   claimAchievement,
   claimAdNetworkReward,
+  claimAdsgramBotJoinReward,
   claimDailyStreak,
   claimGoldenEggDrop,
   claimPromoCode,
@@ -38,7 +41,9 @@ import {
   decodeAchievementsAndAds,
   decodePromoLabelMeta,
   decodeTaskSubtitleMeta,
+  DEFAULT_AD_CONFIG,
   DEFAULT_CHANNELS_CONFIG,
+  DEFAULT_GET_CODE_CHANNEL_URL,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
   detectTop10RankCelebration,
@@ -56,10 +61,13 @@ import {
   formatChannelsHandleSummary,
   formatPromoRewardSummary,
   formatReferralHandle,
+  FREE_EGGS_MILESTONE_BONUS,
+  FREE_EGGS_PER_AD,
   generateGiftCodeString,
   getAchievementsProgress,
   getActiveRequiredChannels,
   getAdNetworkClaimCountToday,
+  getBotJoinClaimCountToday,
   getChickenMilestoneReached,
   getEffectiveAdminIds,
   getTaskRemainingSlots,
@@ -80,11 +88,13 @@ import {
   mergeTaskDefinitions,
   MIN_DEPOSIT_COINS,
   MIN_WITHDRAW_ADS_WATCHED,
+  normalizeGetCodeChannelUrl,
   normalizePlayerBanId,
   normalizeTelegramChannelEntry,
   normalizeTelegramChannelHandle,
   parseAdConfigTemplate,
   PRIMARY_ADMIN_TELEGRAM_ID,
+  REFERRAL_DEPOSIT_COMMISSION_RATE,
   REFERRAL_MILESTONE_CRATES,
   REFERRER_LIFETIME_EGG_COMMISSION_RATE,
   REFERRER_SIGNUP_BONUS_COINS,
@@ -99,7 +109,17 @@ import {
   upgradeBasket,
   watchAdStep,
 } from './economy';
-import { hasConfiguredAdNetworkSdk, resolveEffectiveAdConfig } from '../utils/ads';
+import {
+  clearAdNetworkCooldowns,
+  getAdNetworkCooldownRemainingMs,
+  getOrderedConfiguredAdNetworks,
+  hasConfiguredAdNetworkSdk,
+  hasConfiguredAdsgramTaskSdk,
+  isAdNetworkOnCooldown,
+  resolveEffectiveAdConfig,
+  selectAvailableAdNetworks,
+  setAdNetworkCooldown,
+} from '../utils/ads';
 import {
   buildAcceptedDepositMemos,
   buildGramTransferUrl,
@@ -1699,7 +1719,7 @@ test('dynamic admin promo codes validate active status, maxUses, expiry, and def
   assert.ok(season.endsAtMs > NOW);
 });
 
-test('daily ad-network tasks reward 80/90/100 coins, enforce 5/day limit, prune stale dates, and unlock free Leghorn at 10 ads', () => {
+test('daily Watch & Earn Coins tasks reward 80/90/100 coins, enforce 5/day limit, prune stale dates, and do not grant free chickens', () => {
   assert.deepEqual(
     AD_NETWORK_TASKS.map((n) => [n.id, n.rewardCoins, n.dailyLimit]),
     [
@@ -1710,22 +1730,19 @@ test('daily ad-network tasks reward 80/90/100 coins, enforce 5/day limit, prune 
   );
 
   const { profile } = createDefaultProfile('player_adnet', 'Kiran', '@kiran', NOW);
-  // Seed stale ad entry from yesterday and 9 watched ads toward the 10-ad hen unlock
   let current = {
     ...profile,
-    watchedAdsCount: 9,
     completedTaskIds: ['milestone_react', 'ad_adsgram_2026-11-13_1'],
   };
 
-  // 1st claim today on Monetag (+100 coins) also hits 10/10 watched ads -> unlocks 1 White Leghorn
+  // 1st claim today on Monetag (+100 coins) increments totalAdsWatched without adding chickens
   const monetagRes = claimAdNetworkReward(current, 'monetag', '2026-11-14', NOW);
   assert.ok(!('error' in monetagRes));
   assert.equal(monetagRes.rewardCoins, 100);
   assert.equal(monetagRes.watchedToday, 1);
-  assert.equal(monetagRes.unlockedChicken, true);
   assert.equal(monetagRes.profile.coins, current.coins + 100);
-  assert.equal(monetagRes.profile.leghornCount, 1);
-  assert.equal(monetagRes.profile.watchedAdsCount, 0);
+  assert.equal(monetagRes.profile.leghornCount, 0);
+  assert.equal(getTotalAdsWatched(monetagRes.profile), 1);
   assert.ok(monetagRes.profile.completedTaskIds.includes('milestone_react'));
   assert.ok(!monetagRes.profile.completedTaskIds.includes('ad_adsgram_2026-11-13_1'));
   assert.equal(getAdNetworkClaimCountToday(monetagRes.profile.completedTaskIds, 'monetag', '2026-11-14'), 1);
@@ -1738,7 +1755,8 @@ test('daily ad-network tasks reward 80/90/100 coins, enforce 5/day limit, prune 
   const gigapubRes = claimAdNetworkReward(adsgramRes.profile, 'gigapub', '2026-11-14', NOW + 2000);
   assert.ok(!('error' in gigapubRes));
   assert.equal(gigapubRes.rewardCoins, 90);
-  assert.equal(gigapubRes.profile.watchedAdsCount, 2);
+  assert.equal(gigapubRes.profile.leghornCount, 0);
+  assert.equal(getTotalAdsWatched(gigapubRes.profile), 3);
 
   // Exhaust remaining 4 AdsGram claims today -> 6th claim fails
   current = gigapubRes.profile;
@@ -1987,7 +2005,7 @@ test('sortTasks orders tasks accurately by Most Reward, Newest, and Ending Soon'
   );
 });
 
-test('totalAdsWatched accumulates across 10-ad chicken resets and unlocks withdrawal at 30 ads', () => {
+test('totalAdsWatched accumulates across Free Eggs ads (with 10/10 chest) and coin ads to unlock withdrawal at 30 ads', () => {
   const { profile } = createDefaultProfile('player_ads30', 'Kabir', '@kabir', NOW);
   let current = { ...profile, eggs: 250 };
 
@@ -1995,12 +2013,24 @@ test('totalAdsWatched accumulates across 10-ad chicken resets and unlocks withdr
   assert.equal(getWithdrawAdGateStatus(current).unlocked, false);
   assert.equal(getWithdrawAdGateStatus(current).remaining, 30);
 
-  // Watch 29 ads via watchAdStep & claimAdNetworkReward (triggers 2 chicken resets at 10 and 20)
+  // Watch 20 Free Eggs ads -> grants 150 eggs on steps 1-9 & 11-19 and 650 eggs on steps 10 & 20; zero chickens
+  let totalFreeEggsAdded = 0;
   for (let i = 0; i < 20; i += 1) {
-    current = watchAdStep(current, NOW + i * 1000).profile;
+    const stepRes = watchAdStep(current, NOW + i * 1000);
+    current = stepRes.profile;
+    totalFreeEggsAdded += stepRes.rewardEggs;
+    const isTenth = (i + 1) % 10 === 0;
+    assert.equal(stepRes.hitMilestone, isTenth);
+    assert.equal(
+      stepRes.rewardEggs,
+      isTenth ? FREE_EGGS_PER_AD + FREE_EGGS_MILESTONE_BONUS : FREE_EGGS_PER_AD,
+    );
+    assert.equal(stepRes.transaction.currency, 'eggs');
   }
   assert.equal(current.watchedAdsCount, 0);
-  assert.equal(current.leghornCount, 2);
+  assert.equal(current.leghornCount, 0);
+  assert.equal(totalFreeEggsAdded, 20 * FREE_EGGS_PER_AD + 2 * FREE_EGGS_MILESTONE_BONUS);
+  assert.equal(current.eggs, 250 + totalFreeEggsAdded);
   assert.equal(getTotalAdsWatched(current), 20);
 
   for (let i = 0; i < 5; i += 1) {
@@ -2018,7 +2048,7 @@ test('totalAdsWatched accumulates across 10-ad chicken resets and unlocks withdr
   assert.equal(getWithdrawAdGateStatus(current).unlocked, false);
   assert.equal(getWithdrawAdGateStatus(current).remaining, 1);
 
-  // 30th ad unlocks withdrawals!
+  // 30th ad via Monetag unlocks withdrawals!
   const net30 = claimAdNetworkReward(current, 'monetag', '2026-11-14', NOW + 50_000);
   assert.ok(!('error' in net30));
   current = net30.profile;
@@ -2362,6 +2392,7 @@ test('formatAdConfigTemplate and parseAdConfigTemplate parse KEY=VALUE, VITE_* a
   const initialDraft = {
     provider: 'countdown' as const,
     adsgramBlockId: '',
+    adsgramTaskBlockId: '',
     gigapubProjectId: '',
     monetagZoneId: '',
     customTitle: 'Sponsored Bonus',
@@ -2586,4 +2617,149 @@ test('filterPlayersBySearchQuery, computeAdminCoinAdjustment, and computeAdminRe
   assert.equal(computeAdminReferralCountAdjustment(0, -1).ok, false);
   assert.equal(computeAdminReferralCountAdjustment(5, 0).ok, false);
 });
+
+test('referral reward is 150 coins, deposit commission is 5%, and bot notification copy formats in English', () => {
+  assert.equal(REFERRER_SIGNUP_BONUS_COINS, 150);
+  assert.equal(REFERRAL_DEPOSIT_COMMISSION_RATE, 0.05);
+
+  const referredPlayer = {
+    ...createDefaultProfile('tg_987654321', 'Alex <script>', 'alex_gram', NOW).profile,
+    referredBy: 'tg_7508911853',
+  };
+  const depRes = executeDeposit(referredPlayer, 5000, 'GRAM_TON', NOW, 'hash_ref_dep_001');
+  assert.ok(!('error' in depRes));
+  assert.equal(depRes.referrerCommissionCoins, 250);
+
+  const joinMsg = buildReferralBotNotificationMessage({
+    event: 'referral_joined',
+    referredName: 'Alex <script>',
+    referredHandle: 'alex_gram',
+    rewardCoins: REFERRER_SIGNUP_BONUS_COINS,
+  });
+  assert.ok(joinMsg.includes('New Referral Received'));
+  assert.ok(joinMsg.includes('+150 Coins'));
+  assert.ok(joinMsg.includes('5% share'));
+  assert.ok(joinMsg.includes('deposit'));
+  assert.ok(joinMsg.includes('Alex &lt;script&gt;'));
+  assert.ok(joinMsg.includes('@alex_gram'));
+
+  const commissionMsg = buildReferralBotNotificationMessage({
+    event: 'deposit_commission',
+    referredName: 'Alex',
+    referredHandle: '@alex_gram',
+    rewardCoins: 250,
+    depositGram: '0.4413 GRAM',
+    depositUsd: 0.5,
+  });
+  assert.ok(commissionMsg.includes('Referral Deposit Commission Received'));
+  assert.ok(commissionMsg.includes('+250 Coins'));
+  assert.ok(commissionMsg.includes('0.4413 GRAM'));
+  assert.ok(commissionMsg.includes('5%'));
+});
+
+test('sequential ad network rotation serves primary site first, moves to next site on cooldown, and restores on expiry', () => {
+  clearAdNetworkCooldowns();
+  const baseTime = 1_750_000_000_000;
+  const multiAdConfig = {
+    provider: 'adsgram' as const,
+    adsgramBlockId: 'block-101',
+    gigapubProjectId: 'gp-202',
+    monetagZoneId: 'zone-303',
+    customTitle: 'Test Sponsor',
+    customDescription: 'Desc',
+    customUrl: '',
+    watchSeconds: 5,
+    bannerEnabled: false,
+    bannerTitle: '',
+    bannerSubtitle: '',
+    bannerCtaText: 'Open',
+    bannerUrl: '',
+    updatedAtMs: baseTime,
+  };
+
+  // Primary provider comes first, followed by remaining configured networks
+  assert.deepEqual(getOrderedConfiguredAdNetworks(multiAdConfig), ['adsgram', 'gigapub', 'monetag']);
+  assert.deepEqual(
+    getOrderedConfiguredAdNetworks({ ...multiAdConfig, provider: 'monetag' }),
+    ['monetag', 'adsgram', 'gigapub'],
+  );
+
+  // Initially all configured sites are ready
+  assert.deepEqual(selectAvailableAdNetworks(multiAdConfig, baseTime), [
+    'adsgram',
+    'gigapub',
+    'monetag',
+  ]);
+
+  // First site runs and enters 60s cooldown -> second site (gigapub) becomes next
+  setAdNetworkCooldown('adsgram', 60_000, baseTime);
+  assert.equal(isAdNetworkOnCooldown('adsgram', baseTime + 1_000), true);
+  assert.equal(getAdNetworkCooldownRemainingMs('adsgram', baseTime + 15_000), 45_000);
+  assert.deepEqual(selectAvailableAdNetworks(multiAdConfig, baseTime + 15_000), [
+    'gigapub',
+    'monetag',
+  ]);
+
+  // Second site runs and enters 60s cooldown -> third site (monetag) becomes next
+  setAdNetworkCooldown('gigapub', 60_000, baseTime + 15_000);
+  assert.deepEqual(selectAvailableAdNetworks(multiAdConfig, baseTime + 20_000), ['monetag']);
+
+  // Third site runs and enters cooldown -> none left until first cooldown expires
+  setAdNetworkCooldown('monetag', 60_000, baseTime + 20_000);
+  assert.deepEqual(selectAvailableAdNetworks(multiAdConfig, baseTime + 25_000), []);
+
+  // Once first site cooldown expires at +60_000ms, AdsGram returns first in rotation
+  assert.equal(isAdNetworkOnCooldown('adsgram', baseTime + 60_000), false);
+  assert.deepEqual(selectAvailableAdNetworks(multiAdConfig, baseTime + 60_000), ['adsgram']);
+
+  clearAdNetworkCooldowns();
+});
+
+test('AdsGram Bot Joins & Clicks enforces 5/day limit, prunes stale tokens, and parses/formats Get Code channel & Task Block ID', () => {
+  const { profile } = createDefaultProfile('player_botjoin', 'Riya', '@riya', NOW);
+  let current = {
+    ...profile,
+    completedTaskIds: ['milestone_tg', 'botjoin_2026-11-13_1'],
+  };
+
+  for (let i = 0; i < ADSGRAM_BOT_JOIN_TASK.dailyLimit; i += 1) {
+    const res = claimAdsgramBotJoinReward(current, '2026-11-14', NOW + i * 1000);
+    assert.ok(!('error' in res));
+    assert.equal(res.rewardCoins, ADSGRAM_BOT_JOIN_TASK.rewardCoins);
+    assert.equal(res.claimedToday, i + 1);
+    current = res.profile;
+  }
+
+  assert.equal(getBotJoinClaimCountToday(current.completedTaskIds, '2026-11-14'), 5);
+  assert.ok(current.completedTaskIds.includes('milestone_tg'));
+  assert.ok(!current.completedTaskIds.includes('botjoin_2026-11-13_1'));
+  assert.equal(
+    current.coins,
+    profile.coins + ADSGRAM_BOT_JOIN_TASK.dailyLimit * ADSGRAM_BOT_JOIN_TASK.rewardCoins,
+  );
+  assert.equal(getTotalAdsWatched(current), ADSGRAM_BOT_JOIN_TASK.dailyLimit);
+
+  const overLimit = claimAdsgramBotJoinReward(current, '2026-11-14', NOW + 99_000);
+  assert.ok('error' in overLimit);
+
+  // Get Code channel URL normalization
+  assert.equal(normalizeGetCodeChannelUrl('@promo_codes_ch'), 'https://t.me/promo_codes_ch');
+  assert.equal(normalizeGetCodeChannelUrl('https://t.me/custom_drops'), 'https://t.me/custom_drops');
+  assert.equal(normalizeGetCodeChannelUrl('   '), '');
+  assert.equal(DEFAULT_CHANNELS_CONFIG.getCodeChannelUrl, DEFAULT_GET_CODE_CHANNEL_URL);
+
+  // AdsGram Task Block ID template round-trip & SDK helper
+  const parsed = parseAdConfigTemplate(
+    'ACTIVE_PROVIDER=adsgram\nADSGRAM_BLOCK_ID=1234\nADSGRAM_TASK_BLOCK_ID=task-7788',
+    resolveEffectiveAdConfig(DEFAULT_AD_CONFIG),
+  );
+  assert.equal(parsed.next.adsgramTaskBlockId, 'task-7788');
+  assert.ok(parsed.appliedKeys.includes('ADSGRAM_TASK_BLOCK_ID'));
+  assert.equal(hasConfiguredAdsgramTaskSdk({ ...parsed.next, updatedAtMs: NOW }), true);
+
+  const formatted = formatAdConfigTemplate(parsed.next);
+  assert.ok(formatted.includes('ADSGRAM_TASK_BLOCK_ID=task-7788'));
+});
+
+
 

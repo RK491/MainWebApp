@@ -176,6 +176,7 @@
       "properties": {
         "provider": { "type": "string", "enum": ["countdown", "adsgram", "gigapub", "monetag", "custom_sponsor"] },
         "adsgramBlockId": { "type": "string", "maxLength": 64 },
+        "adsgramTaskBlockId": { "type": "string", "maxLength": 64 },
         "gigapubProjectId": { "type": "string", "maxLength": 64 },
         "monetagZoneId": { "type": "string", "maxLength": 64 },
         "customTitle": { "type": "string", "maxLength": 80 },
@@ -285,6 +286,7 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "channels": { "type": "array" },
+        "getCodeChannelUrl": { "type": "string", "maxLength": 256 },
         "updatedAtMs": { "type": "number" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },

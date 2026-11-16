@@ -1,6 +1,20 @@
 import { useId, useMemo, useState } from 'react';
 import QRCode from 'qrcode';
 import type { ChickenBreedId } from '../types/farm';
+import leghornRealImg from '../assets/images/hens/leghorn.png';
+import rhodeRealImg from '../assets/images/hens/rhode.png';
+import orpingtonRealImg from '../assets/images/hens/orpington.png';
+import australorpRealImg from '../assets/images/hens/australorp.png';
+
+const REALISTIC_HEN_ASSETS: Record<
+  ChickenBreedId,
+  { src: string; alt: string }
+> = {
+  leghorn: { src: leghornRealImg, alt: 'White Leghorn hen' },
+  rhode: { src: rhodeRealImg, alt: 'Rhode Island Red hen' },
+  orpington: { src: orpingtonRealImg, alt: 'Buff Orpington hen' },
+  australorp: { src: australorpRealImg, alt: 'Black Australorp hen' },
+};
 
 export function PlayerAvatar({
   photoUrl,
@@ -99,6 +113,23 @@ export function ChickenSprite({
   className?: string;
   facingLeft?: boolean;
 }) {
+  const [imgFailed, setImgFailed] = useState(false);
+  const asset = REALISTIC_HEN_ASSETS[breed];
+
+  if (!imgFailed && asset?.src) {
+    return (
+      <img
+        src={asset.src}
+        alt={asset.alt}
+        referrerPolicy="no-referrer"
+        draggable={false}
+        onError={() => setImgFailed(true)}
+        className={`object-contain select-none ${className}`}
+        style={{ transform: facingLeft ? 'scaleX(-1)' : undefined }}
+      />
+    );
+  }
+
   const palette: Record<
     ChickenBreedId,
     { body: string; wing: string; belly: string; beak: string; comb: string; outline: string; eye: string }
@@ -150,32 +181,21 @@ export function ChickenSprite({
       style={{ transform: facingLeft ? 'scaleX(-1)' : undefined }}
       aria-hidden="true"
     >
-      {/* Ground shadow */}
       <ellipse cx="24" cy="43" rx="12" ry="3.2" fill="rgba(15,23,42,0.24)" />
-      {/* Legs */}
       <path d="M20 35v6m0 0l-3 1.5M20 41l2.5 1.2M28 35v6m0 0l-2.5 1.2M28 41l3 1.5" stroke="#EA580C" strokeWidth="2.4" strokeLinecap="round" />
-      {/* Tail feathers */}
       <path d="M11 23c-4-4-6-1-4 4-3 0-3 4 1 5l6-2z" fill={c.wing} stroke={c.outline} strokeWidth="2" strokeLinejoin="round" />
-      {/* Comb */}
       <path d="M26 10c0-3 3-4 4-1.5 1.5-2.5 4.5-1 4 1.5 2-.5 3 2 1 3.5h-9z" fill={c.comb} stroke={c.outline} strokeWidth="1.8" strokeLinejoin="round" />
-      {/* Main Body */}
       <path
         d="M12 27c0-7 5-13 13-13 5.5 0 10 3.5 10 9.5 0 7.5-5.2 13.5-12.5 13.5-6.2 0-10.5-4.2-10.5-10z"
         fill={c.body}
         stroke={c.outline}
         strokeWidth="2.1"
       />
-      {/* Clay specular highlight */}
       <ellipse cx="22" cy="19" rx="4.5" ry="2.2" transform="rotate(-20 22 19)" fill="#FFFFFF" opacity="0.38" />
-      {/* Belly highlight */}
       <path d="M17 31c2.5 3.2 7.5 3.8 11 1.5" stroke={c.belly} strokeWidth="3" strokeLinecap="round" fill="none" />
-      {/* Wing */}
       <path d="M16 25c0-3.5 3.8-5.5 8-4.5 2.5.6 3.5 3.5 1.5 5.8-2.2 2.5-9.5 2.2-9.5-1.3z" fill={c.wing} stroke={c.outline} strokeWidth="1.8" />
-      {/* Wattle */}
       <path d="M33 23c1.5 1.2 1.2 3.8-.5 4-1.4.2-1.8-1.8-.8-3.5" fill={c.comb} stroke={c.outline} strokeWidth="1.5" />
-      {/* Beak */}
       <path d="M34 18.5l6 2-6 2.5z" fill={c.beak} stroke={c.outline} strokeWidth="1.8" strokeLinejoin="round" />
-      {/* Eye */}
       <circle cx="30.5" cy="18" r="1.9" fill={c.eye} />
       <circle cx="30" cy="17.3" r="0.6" fill="#FFFFFF" opacity="0.85" />
       {breed === 'australorp' && <circle cx="31" cy="17.5" r="0.7" fill="#0F172A" />}

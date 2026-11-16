@@ -1,5 +1,6 @@
-import { Globe, Plus, Trophy, Volume2, VolumeX } from 'lucide-react';
-import { motion } from 'motion/react';
+import { useEffect, useState } from 'react';
+import { Globe, Plus, ShieldCheck, Volume2, VolumeX } from 'lucide-react';
+import { motion, useReducedMotion } from 'motion/react';
 import type { UserFarmProfile } from '../types/farm';
 import { CoinIcon, EggIcon, PlayerAvatar } from './GameIcons';
 import { PWAInstallButton } from './PWAControls';
@@ -11,8 +12,9 @@ interface TopBarProps {
   isAllMuted: boolean;
   muteAllLabel: string;
   unmuteAllLabel: string;
+  isAdmin?: boolean;
   onOpenProfile: () => void;
-  onOpenLeaderboard: () => void;
+  onOpenAdmin?: () => void;
   onToggleMuteAll: () => void;
   onOpenSettings: () => void;
   onOpenDeposit: () => void;
@@ -25,12 +27,25 @@ export function TopBar({
   isAllMuted,
   muteAllLabel,
   unmuteAllLabel,
+  isAdmin = false,
   onOpenProfile,
-  onOpenLeaderboard,
+  onOpenAdmin,
   onToggleMuteAll,
   onOpenSettings,
   onOpenDeposit,
 }: TopBarProps) {
+  const prefersReducedMotion = useReducedMotion();
+  const [coinArrivalPulse, setCoinArrivalPulse] = useState(0);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleArrival = () => {
+      setCoinArrivalPulse((n) => n + 1);
+    };
+    window.addEventListener('alphagram:coin-arrival', handleArrival);
+    return () => window.removeEventListener('alphagram:coin-arrival', handleArrival);
+  }, []);
+
   return (
     <header className="sticky top-0 z-30 clay-header px-3 sm:px-5 py-2 transition-colors">
       <div className="max-w-6xl mx-auto flex flex-col gap-2">
@@ -38,9 +53,13 @@ export function TopBar({
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             <div className="hidden sm:flex items-center gap-2 pr-2.5 border-r border-stone-300/60 dark:border-stone-700/60 shrink-0">
-              <div className="alpha-brand-crest w-9 h-9 rounded-xl text-sm font-extrabold flex items-center justify-center tracking-tight">
+              <motion.div
+                whileHover={{ rotate: [0, -8, 6, 0], scale: 1.08 }}
+                transition={{ duration: 0.35 }}
+                className="alpha-brand-crest clay-cta-sheen w-9 h-9 rounded-xl text-sm font-extrabold flex items-center justify-center tracking-tight select-none cursor-default"
+              >
                 αG
-              </div>
+              </motion.div>
               <span className="font-display text-base font-extrabold tracking-tight text-stone-900 dark:text-stone-100 whitespace-nowrap">
                 Alpha Gram
               </span>
@@ -79,15 +98,18 @@ export function TopBar({
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <PWAInstallButton compact />
 
-            <motion.button
-              type="button"
-              whileTap={{ scale: 0.92 }}
-              onClick={onOpenLeaderboard}
-              aria-label="Open Top 10 Leaderboard"
-              className="clay-btn clay-btn-neutral w-10 h-10 rounded-2xl flex items-center justify-center text-amber-600 dark:text-amber-400"
-            >
-              <Trophy className="w-5 h-5" />
-            </motion.button>
+            {isAdmin && onOpenAdmin && (
+              <motion.button
+                type="button"
+                whileTap={{ scale: 0.94 }}
+                onClick={onOpenAdmin}
+                aria-label="Open Admin Panel"
+                className="clay-btn clay-btn-emerald h-10 px-2.5 sm:px-3 rounded-2xl flex items-center justify-center gap-1.5 text-xs font-extrabold whitespace-nowrap"
+              >
+                <ShieldCheck className="w-4 h-4 shrink-0" />
+                <span className="hidden sm:inline">Admin Panel</span>
+              </motion.button>
+            )}
 
             <motion.button
               type="button"
@@ -127,15 +149,31 @@ export function TopBar({
 
         {/* Row 2: Coins & Eggs Clay Resource Wells */}
         <div className="grid grid-cols-2 gap-2.5">
-          <div className="clay-card !rounded-2xl flex items-center justify-between gap-2 px-3 py-1.5">
+          <motion.div
+            key={`coin-card-${coinArrivalPulse}`}
+            animate={
+              coinArrivalPulse > 0 && !prefersReducedMotion
+                ? { scale: [1, 1.05, 0.985, 1] }
+                : { scale: 1 }
+            }
+            transition={{ duration: 0.36, ease: [0.16, 1, 0.3, 1] }}
+            className="clay-card !rounded-2xl flex items-center justify-between gap-2 px-3 py-1.5"
+          >
             <div className="flex items-center gap-2 min-w-0">
-              <div className="w-8 h-8 rounded-xl clay-icon-well flex items-center justify-center shrink-0">
+              <motion.div
+                key={`coin-icon-${profile.coins}-${coinArrivalPulse}`}
+                data-coin-balance-target="true"
+                initial={prefersReducedMotion ? false : { scale: 1.24, rotate: -12 }}
+                animate={{ scale: 1, rotate: 0 }}
+                transition={{ type: 'spring', stiffness: 440, damping: 18 }}
+                className="w-8 h-8 rounded-xl clay-icon-well flex items-center justify-center shrink-0"
+              >
                 <CoinIcon className="w-5 h-5" />
-              </div>
+              </motion.div>
               <div className="min-w-0">
                 <motion.div
                   key={profile.coins}
-                  initial={{ scale: 1.09 }}
+                  initial={prefersReducedMotion ? false : { scale: 1.09 }}
                   animate={{ scale: 1 }}
                   transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
                   className="text-sm sm:text-base font-extrabold text-stone-900 dark:text-stone-100 font-mono-num leading-none truncate origin-left"
@@ -152,16 +190,22 @@ export function TopBar({
               whileTap={{ scale: 0.9 }}
               onClick={onOpenDeposit}
               aria-label="Top up coins"
-              className="clay-btn clay-btn-emerald w-8 h-8 rounded-xl flex items-center justify-center shrink-0"
+              className="clay-btn clay-btn-emerald clay-cta-sheen w-8 h-8 rounded-xl flex items-center justify-center shrink-0"
             >
               <Plus className="w-4 h-4 stroke-[2.75]" />
             </motion.button>
-          </div>
+          </motion.div>
 
           <div className="clay-card !rounded-2xl flex items-center gap-2 px-3 py-1.5">
-            <div className="w-8 h-8 rounded-xl clay-icon-well flex items-center justify-center shrink-0">
+            <motion.div
+              key={`egg-icon-${profile.eggs}`}
+              initial={{ scale: 1.18, rotate: 10 }}
+              animate={{ scale: 1, rotate: 0 }}
+              transition={{ type: 'spring', stiffness: 420, damping: 20 }}
+              className="w-8 h-8 rounded-xl clay-icon-well flex items-center justify-center shrink-0"
+            >
               <EggIcon className="w-5 h-5" />
-            </div>
+            </motion.div>
             <div className="min-w-0">
               <motion.div
                 key={profile.eggs}

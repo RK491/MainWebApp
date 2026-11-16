@@ -248,13 +248,14 @@ service cloud.firestore {
           'updatedAtMs', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'provider', 'adsgramBlockId', 'gigapubProjectId', 'monetagZoneId', 'customTitle',
+          'provider', 'adsgramBlockId', 'adsgramTaskBlockId', 'gigapubProjectId', 'monetagZoneId', 'customTitle',
           'customDescription', 'customUrl', 'watchSeconds', 'bannerEnabled',
           'bannerTitle', 'bannerSubtitle', 'bannerCtaText', 'bannerUrl',
           'updatedAtMs', 'updatedAt'
         ])
         && data.provider in ['countdown', 'adsgram', 'gigapub', 'monetag', 'custom_sponsor']
         && data.adsgramBlockId is string && data.adsgramBlockId.size() <= 64
+        && (!('adsgramTaskBlockId' in data) || (data.adsgramTaskBlockId is string && data.adsgramTaskBlockId.size() <= 64))
         && (!('gigapubProjectId' in data) || (data.gigapubProjectId is string && data.gigapubProjectId.size() <= 64))
         && data.monetagZoneId is string && data.monetagZoneId.size() <= 64
         && data.customTitle is string && data.customTitle.size() <= 80
@@ -327,8 +328,9 @@ service cloud.firestore {
 
     function isValidChannelsConfig(data) {
       return data.keys().hasAll(['enabled', 'channels', 'updatedAtMs', 'updatedAt'])
-        && data.keys().hasOnly(['enabled', 'channels', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['enabled', 'channels', 'getCodeChannelUrl', 'updatedAtMs', 'updatedAt'])
         && data.enabled is bool
+        && (!('getCodeChannelUrl' in data) || (data.getCodeChannelUrl is string && data.getCodeChannelUrl.size() <= 256))
         && data.channels is list
         && data.channels.size() <= 10
         && (data.channels.size() == 0 || (

@@ -3,7 +3,6 @@ import {
   ArrowDown,
   ArrowUpDown,
   Check,
-  ChevronRight,
   Clock,
   Crown,
   ExternalLink,
@@ -26,13 +25,19 @@ import {
   X,
   Zap,
 } from 'lucide-react';
+import { motion, useReducedMotion } from 'motion/react';
 import {
   AD_NETWORK_TASKS,
+  ADSGRAM_BOT_JOIN_TASK,
   calculatePaidTaskCost,
   calculateProductionRate,
   CHICKEN_PACKS,
   DAILY_STREAK_REWARDS,
+  DEFAULT_GET_CODE_CHANNEL_URL,
+  FREE_EGGS_MILESTONE_BONUS,
+  FREE_EGGS_PER_AD,
   getAdNetworkClaimCountToday,
+  getBotJoinClaimCountToday,
   getTaskRemainingSlots,
   mergeTaskDefinitions,
   REQUIRED_TELEGRAM_CHANNELS,
@@ -55,9 +60,9 @@ import type {
   UserFarmProfile,
 } from '../types/farm';
 import { getTelegramChannelUrl, notifyTelegramOpenLink } from '../utils/telegram';
-import { hasConfiguredAdNetworkSdk } from '../utils/ads';
+import { hasConfiguredAdNetworkSdk, hasConfiguredAdsgramTaskSdk } from '../utils/ads';
 import { ChannelCheckCard } from './ChannelCheckPanel';
-import { ChickenSprite, CoinIcon } from './GameIcons';
+import { CoinIcon, EggIcon } from './GameIcons';
 
 type FilterTab = 'social' | 'daily' | 'exclusive' | 'partner';
 type TaskCheckStage = 'idle' | 'checking' | 'ready';
@@ -70,8 +75,10 @@ interface TasksViewProps {
   requiredChannels?: RequiredTelegramChannel[];
   channelsGateEnabled?: boolean;
   payoutChannelUrl?: string;
+  getCodeChannelUrl?: string;
   watchingAd?: boolean;
   activeAdNetwork?: AdNetworkId | null;
+  activeAdAction?: 'watch_ad' | 'ad_network' | 'adsgram_task' | null;
   channelVerification?: ChannelVerificationResult | null;
   checkingChannels?: boolean;
   onCheckChannels?: () => Promise<ChannelVerificationResult | null> | void;
@@ -81,6 +88,7 @@ interface TasksViewProps {
   onCompleteTask: (taskId: string) => void;
   onTriggerWatchAd: () => void;
   onTriggerAdNetwork: (network: AdNetworkId) => void;
+  onTriggerAdsgramTask?: () => void;
   onOpenDeposit?: () => void;
   onRefreshTasks?: (silent?: boolean) => Promise<boolean>;
   onCreateTask: (input: {
@@ -107,8 +115,10 @@ export function TasksView({
   requiredChannels,
   channelsGateEnabled = true,
   payoutChannelUrl = DEFAULT_PAYOUT_CHANNEL_URL,
+  getCodeChannelUrl,
   watchingAd = false,
   activeAdNetwork = null,
+  activeAdAction = null,
   channelVerification = null,
   checkingChannels = false,
   onCheckChannels,
@@ -118,10 +128,16 @@ export function TasksView({
   onCompleteTask,
   onTriggerWatchAd,
   onTriggerAdNetwork,
+  onTriggerAdsgramTask,
   onOpenDeposit,
   onRefreshTasks,
   onCreateTask,
 }: TasksViewProps) {
+  const shouldReduceMotion = useReducedMotion();
+  const resolvedGetCodeUrl =
+    (getCodeChannelUrl || '').trim() ||
+    (payoutChannelUrl || '').trim() ||
+    DEFAULT_GET_CODE_CHANNEL_URL;
   const activeRequiredChannels = (requiredChannels ?? REQUIRED_TELEGRAM_CHANNELS).filter(
     (ch) => ch.enabled !== false && Boolean(ch.handle),
   );
@@ -270,16 +286,19 @@ export function TasksView({
       return left === null || left > 0;
     }).length;
 
-  const adNetworksRemainingToday = AD_NETWORK_TASKS.reduce((sum, net) => {
-    const watched = getAdNetworkClaimCountToday(profile.completedTaskIds, net.id, todayStr);
-    return sum + Math.max(0, net.dailyLimit - watched);
-  }, 0);
+  const botJoinsToday = getBotJoinClaimCountToday(profile.completedTaskIds, todayStr);
+  const botJoinsLeftToday = Math.max(0, ADSGRAM_BOT_JOIN_TASK.dailyLimit - botJoinsToday);
+  const availableAdNetworksCount = AD_NETWORK_TASKS.filter(
+    (net) => getAdNetworkClaimCountToday(profile.completedTaskIds, net.id, todayStr) < net.dailyLimit,
+  ).length;
 
   const tabCounts: Record<FilterTab, number> = {
     social: countAvailableTasks(socialTasks),
     daily:
       (dailyClaimedToday ? 0 : 1) +
-      (adNetworksRemainingToday > 0 ? AD_NETWORK_TASKS.filter((n) => getAdNetworkClaimCountToday(profile.completedTaskIds, n.id, todayStr) < n.dailyLimit).length : 0) +
+      availableAdNetworksCount +
+      1 +
+      (botJoinsLeftToday > 0 ? 1 : 0) +
       countAvailableTasks(dailyTasks),
     exclusive: countAvailableTasks(exclusiveTasks),
     partner: countAvailableTasks(partnerTasks),
@@ -637,17 +656,22 @@ export function TasksView({
                   aria-valuenow={remainingSlots}
                   aria-valuemin={0}
                   aria-valuemax={totalSlots}
-                  className="h-2 w-full rounded-lg clay-inset overflow-hidden"
+                  className="h-2.5 w-full rounded-lg clay-inset overflow-hidden"
                 >
-                  <div
-                    className={`h-full rounded-lg transition-all duration-300 ${
+                  <motion.div
+                    initial={shouldReduceMotion ? false : { width: 0 }}
+                    animate={{ width: `${slotPct}%` }}
+                    transition={{
+                      duration: shouldReduceMotion ? 0 : 0.48,
+                      ease: [0.16, 1, 0.3, 1],
+                    }}
+                    className={`h-full rounded-lg ${
                       remainingSlots === 0
                         ? 'bg-rose-400'
                         : isLowSlots
                           ? 'bg-gradient-to-r from-orange-400 to-amber-500'
                           : 'bg-gradient-to-r from-emerald-400 to-emerald-500'
                     }`}
-                    style={{ width: `${slotPct}%` }}
                   />
                 </div>
               </div>
@@ -852,19 +876,19 @@ export function TasksView({
             </div>
           </div>
           <a
-            href={payoutChannelUrl}
+            href={resolvedGetCodeUrl}
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => {
               onTabTap?.();
-              if (notifyTelegramOpenLink(payoutChannelUrl)) {
+              if (notifyTelegramOpenLink(resolvedGetCodeUrl)) {
                 e.preventDefault();
               }
             }}
-            className="clay-btn clay-btn-neutral inline-flex items-center gap-1 min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-extrabold text-indigo-700 dark:text-indigo-300 shrink-0"
+            className="clay-btn clay-btn-sky inline-flex items-center gap-1 min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-extrabold shrink-0"
           >
-            <span>Get codes</span>
-            <ChevronRight className="w-3.5 h-3.5" />
+            <span>Get code</span>
+            <ExternalLink className="w-3.5 h-3.5" />
           </a>
         </div>
 
@@ -912,12 +936,19 @@ export function TasksView({
                 onTabTap?.();
                 setFilterTab(tab.id);
               }}
-              className={`clay-btn min-h-[42px] px-1.5 rounded-xl text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1 ${
+              className={`relative min-h-[42px] px-1.5 rounded-xl text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
                 isActive
-                  ? 'clay-btn-amber'
+                  ? 'text-amber-950'
                   : 'text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200'
               }`}
             >
+              {isActive && (
+                <motion.span
+                  layoutId="tasks-category-active"
+                  transition={{ type: 'spring', stiffness: 420, damping: 30 }}
+                  className="clay-btn-amber absolute inset-0 rounded-xl -z-10"
+                />
+              )}
               <span className="truncate">{tab.label}</span>
               {count > 0 && (
                 <span
@@ -1002,14 +1033,15 @@ export function TasksView({
                   })}
                 </div>
               </div>
-              <button
+              <motion.button
                 type="button"
+                whileTap={!dailyClaimedToday ? { scale: 0.95 } : undefined}
                 onClick={onClaimDaily}
                 disabled={dailyClaimedToday}
                 className={`clay-btn min-h-[42px] px-4 rounded-2xl text-xs font-extrabold flex items-center gap-1.5 ${
                   dailyClaimedToday
                     ? 'clay-inset text-emerald-700 dark:text-emerald-300 cursor-default shadow-none'
-                    : 'clay-btn-emerald'
+                    : 'clay-btn-emerald clay-cta-sheen'
                 }`}
               >
                 {dailyClaimedToday ? (
@@ -1020,7 +1052,36 @@ export function TasksView({
                 ) : (
                   <span>Claim +{nextDailyReward}</span>
                 )}
-              </button>
+              </motion.button>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-[11px] font-bold px-0.5">
+                <span className="text-stone-500 dark:text-stone-400">7-Day Streak Progress</span>
+                <span className="font-mono-num font-extrabold text-emerald-700 dark:text-emerald-400">
+                  {Math.min(7, Math.max(0, profile.dailyStreak))}/7 days
+                </span>
+              </div>
+              <div
+                role="progressbar"
+                aria-label="Daily login 7-day streak progress"
+                aria-valuenow={Math.min(7, Math.max(0, profile.dailyStreak))}
+                aria-valuemin={0}
+                aria-valuemax={7}
+                className="h-2.5 w-full rounded-full clay-inset overflow-hidden"
+              >
+                <motion.div
+                  initial={shouldReduceMotion ? false : { width: 0 }}
+                  animate={{
+                    width: `${Math.round((Math.min(7, Math.max(0, profile.dailyStreak)) / 7) * 100)}%`,
+                  }}
+                  transition={{
+                    duration: shouldReduceMotion ? 0 : 0.52,
+                    ease: [0.16, 1, 0.3, 1],
+                  }}
+                  className="h-full rounded-full bg-gradient-to-r from-emerald-400 via-emerald-500 to-teal-500"
+                />
+              </div>
             </div>
 
             <div className="grid grid-cols-7 gap-1.5">
@@ -1035,7 +1096,7 @@ export function TasksView({
                       claimed
                         ? 'clay-card-mint !rounded-2xl text-emerald-900 dark:text-emerald-200'
                         : isNext
-                          ? 'clay-card-warm !rounded-2xl text-amber-950 dark:text-amber-200 scale-[1.03]'
+                          ? 'clay-card-warm !rounded-2xl text-amber-950 dark:text-amber-200 scale-[1.04] ring-2 ring-amber-400/70'
                           : 'clay-inset !rounded-2xl text-stone-600 dark:text-stone-400'
                     }`}
                   >
@@ -1050,11 +1111,11 @@ export function TasksView({
             </div>
           </div>
 
-          {/* Ad-Network Tasks (Daily): AdsGram, Gigapub, Monetag (+80 to +100 coins per ad) */}
+          {/* 3× Watch & Earn Coins (AdsGram, Gigapub, Monetag) */}
           <div className="space-y-2.5">
             <div className="flex items-center justify-between px-1">
               <h3 className="text-sm font-extrabold text-stone-700 dark:text-stone-300">
-                Ad-Network Tasks (Daily)
+                Watch &amp; Earn Coins (3 Sites)
               </h3>
               <span className="rounded-lg bg-amber-100 dark:bg-amber-950/60 border border-amber-300/70 dark:border-amber-800/60 px-2 py-0.5 text-[11px] font-extrabold text-amber-800 dark:text-amber-300 font-mono-num">
                 +80 to +100 / ad
@@ -1068,6 +1129,10 @@ export function TasksView({
                 todayStr,
               );
               const leftToday = Math.max(0, network.dailyLimit - watchedToday);
+              const netPct = Math.max(
+                0,
+                Math.min(100, Math.round((watchedToday / network.dailyLimit) * 100)),
+              );
               const isBusy = watchingAd && activeAdNetwork === network.id;
               const maxedOut = leftToday === 0;
               const sdkConfigured = hasConfiguredAdNetworkSdk(network.id, adConfig);
@@ -1075,120 +1140,307 @@ export function TasksView({
               return (
                 <div
                   key={network.id}
-                  className="clay-card clay-hover-lift !rounded-2xl p-3.5 flex items-center justify-between gap-3"
+                  className="clay-card clay-hover-lift !rounded-2xl p-3.5 space-y-2.5"
                 >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-11 h-11 rounded-2xl clay-icon-well flex items-center justify-center shrink-0">
-                      {renderAdNetworkIcon(network.id)}
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-11 h-11 rounded-2xl clay-icon-well flex items-center justify-center shrink-0">
+                        {renderAdNetworkIcon(network.id)}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
+                            {network.name}
+                          </span>
+                          <span className="rounded-md bg-stone-100 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 px-1.5 py-0.5 text-[10px] font-bold text-stone-600 dark:text-stone-300">
+                            {network.badge}
+                          </span>
+                          <span
+                            className={`rounded-md border px-1.5 py-0.5 text-[10px] font-extrabold ${
+                              sdkConfigured
+                                ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800/60 text-emerald-700 dark:text-emerald-300'
+                                : 'bg-sky-50 dark:bg-sky-950/60 border-sky-200 dark:border-sky-800/60 text-sky-700 dark:text-sky-300'
+                            }`}
+                          >
+                            {sdkConfigured ? 'SDK Live' : 'Timer Ad'}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-stone-500 dark:text-stone-400 truncate mt-0.5">
+                          {network.subtitle}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                          <span className="inline-flex items-center gap-1 rounded-lg bg-amber-50 dark:bg-amber-950/50 border border-amber-200/80 dark:border-amber-800/60 px-2 py-0.5 text-xs font-extrabold text-amber-700 dark:text-amber-300">
+                            <CoinIcon className="w-3.5 h-3.5" />
+                            <span className="font-mono-num">+{network.rewardCoins} coins</span>
+                          </span>
+                          <span
+                            className={`rounded-lg border px-2 py-0.5 text-[11px] font-extrabold font-mono-num ${
+                              maxedOut
+                                ? 'bg-stone-100 dark:bg-stone-800 border-stone-200 dark:border-stone-700 text-stone-500 dark:text-stone-400'
+                                : 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800/60 text-emerald-700 dark:text-emerald-300'
+                            }`}
+                          >
+                            {leftToday}/{network.dailyLimit} left today
+                          </span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
-                          {network.name}
-                        </span>
-                        <span className="rounded-md bg-stone-100 dark:bg-stone-800 border border-stone-200 dark:border-stone-700 px-1.5 py-0.5 text-[10px] font-bold text-stone-600 dark:text-stone-300">
-                          {network.badge}
-                        </span>
-                        <span
-                          className={`rounded-md border px-1.5 py-0.5 text-[10px] font-extrabold ${
-                            sdkConfigured
-                              ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800/60 text-emerald-700 dark:text-emerald-300'
-                              : 'bg-sky-50 dark:bg-sky-950/60 border-sky-200 dark:border-sky-800/60 text-sky-700 dark:text-sky-300'
-                          }`}
-                        >
-                          {sdkConfigured ? 'SDK Live' : 'Timer Ad'}
-                        </span>
-                      </div>
-                      <div className="text-[11px] text-stone-500 dark:text-stone-400 truncate mt-0.5">
-                        {network.subtitle}
-                      </div>
-                      <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
-                        <span className="inline-flex items-center gap-1 rounded-lg bg-amber-50 dark:bg-amber-950/50 border border-amber-200/80 dark:border-amber-800/60 px-2 py-0.5 text-xs font-extrabold text-amber-700 dark:text-amber-300">
-                          <CoinIcon className="w-3.5 h-3.5" />
-                          <span className="font-mono-num">+{network.rewardCoins} / ad</span>
-                        </span>
-                        <span
-                          className={`rounded-lg border px-2 py-0.5 text-[11px] font-extrabold font-mono-num ${
-                            maxedOut
-                              ? 'bg-stone-100 dark:bg-stone-800 border-stone-200 dark:border-stone-700 text-stone-500 dark:text-stone-400'
-                              : 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800/60 text-emerald-700 dark:text-emerald-300'
-                          }`}
-                        >
-                          {leftToday}/{network.dailyLimit} left today
-                        </span>
-                      </div>
-                    </div>
+
+                    <button
+                      type="button"
+                      disabled={watchingAd || maxedOut}
+                      onClick={() => {
+                        onTabTap?.();
+                        onTriggerAdNetwork(network.id);
+                      }}
+                      className={`clay-btn min-h-[42px] min-w-[104px] px-3 rounded-2xl text-xs font-extrabold flex items-center justify-center gap-1.5 shrink-0 ${
+                        maxedOut
+                          ? 'clay-inset text-emerald-700 dark:text-emerald-300 cursor-default shadow-none'
+                          : 'clay-btn-emerald'
+                      }`}
+                    >
+                      {maxedOut ? (
+                        <>
+                          <Check className="w-3.5 h-3.5" />
+                          <span>Done</span>
+                        </>
+                      ) : isBusy ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>Loading</span>
+                        </>
+                      ) : (
+                        <>
+                          <Play className="w-3.5 h-3.5 fill-current" />
+                          <span>Earn Coins</span>
+                        </>
+                      )}
+                    </button>
                   </div>
 
-                  <button
-                    type="button"
-                    disabled={watchingAd || maxedOut}
-                    onClick={() => {
-                      onTabTap?.();
-                      onTriggerAdNetwork(network.id);
-                    }}
-                    className={`clay-btn min-h-[42px] min-w-[82px] px-3.5 rounded-2xl text-xs font-extrabold flex items-center justify-center gap-1.5 shrink-0 ${
-                      maxedOut
-                        ? 'clay-inset text-emerald-700 dark:text-emerald-300 cursor-default shadow-none'
-                        : 'clay-btn-emerald'
-                    }`}
-                  >
-                    {maxedOut ? (
-                      <>
-                        <Check className="w-3.5 h-3.5" />
-                        <span>Done</span>
-                      </>
-                    ) : isBusy ? (
-                      <>
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        <span>Loading</span>
-                      </>
-                    ) : (
-                      <>
-                        <Play className="w-3.5 h-3.5 fill-current" />
-                        <span>Watch</span>
-                      </>
-                    )}
-                  </button>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px] font-bold px-0.5">
+                      <span className="text-stone-500 dark:text-stone-400">Daily quota</span>
+                      <span className="font-mono-num font-extrabold text-emerald-700 dark:text-emerald-400">
+                        {watchedToday}/{network.dailyLimit} watched
+                      </span>
+                    </div>
+                    <div
+                      role="progressbar"
+                      aria-label={`${network.name} daily quota`}
+                      aria-valuenow={watchedToday}
+                      aria-valuemin={0}
+                      aria-valuemax={network.dailyLimit}
+                      className="h-2 w-full rounded-full clay-inset overflow-hidden"
+                    >
+                      <motion.div
+                        initial={shouldReduceMotion ? false : { width: 0 }}
+                        animate={{ width: `${netPct}%` }}
+                        transition={{
+                          duration: shouldReduceMotion ? 0 : 0.45,
+                          ease: [0.16, 1, 0.3, 1],
+                        }}
+                        className="h-full rounded-full bg-gradient-to-r from-amber-400 via-amber-500 to-emerald-500"
+                      />
+                    </div>
+                  </div>
                 </div>
               );
             })}
           </div>
 
-          {/* Interactive Watch 10 Ads Card */}
-          <div className="clay-card clay-hover-lift !rounded-2xl p-3.5 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="w-11 h-11 rounded-2xl clay-icon-well flex items-center justify-center shrink-0">
-                <ChickenSprite breed="leghorn" className="w-8 h-8" />
+          {/* 1× Watch & Earn Free Eggs */}
+          <div className="clay-card clay-hover-lift !rounded-2xl p-3.5 space-y-2.5">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-11 h-11 rounded-2xl clay-icon-well flex items-center justify-center shrink-0">
+                  <EggIcon className="w-7 h-7" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
+                      Get Free Eggs
+                    </span>
+                    <span className="rounded-md bg-amber-100/90 dark:bg-amber-950/60 border border-amber-300/70 dark:border-amber-800/60 px-1.5 py-0.5 text-[10px] font-extrabold text-amber-800 dark:text-amber-300">
+                      Watch &amp; Earn
+                    </span>
+                  </div>
+                  <div className="text-[11px] font-semibold text-stone-500 dark:text-stone-400 mt-0.5">
+                    +{FREE_EGGS_PER_AD} Free Eggs per ad · +{FREE_EGGS_MILESTONE_BONUS} bonus chest at 10/10
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                    <span className="inline-flex items-center gap-1 rounded-lg bg-amber-50 dark:bg-amber-950/50 border border-amber-200/80 dark:border-amber-800/60 px-2 py-0.5 text-xs font-extrabold text-amber-700 dark:text-amber-300">
+                      <EggIcon className="w-3.5 h-3.5" />
+                      <span className="font-mono-num">+{FREE_EGGS_PER_AD} eggs / ad</span>
+                    </span>
+                    <span className="rounded-lg bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800/60 px-2 py-0.5 text-[11px] font-extrabold font-mono-num text-emerald-700 dark:text-emerald-300">
+                      {profile.watchedAdsCount}/10 bonus chest
+                    </span>
+                  </div>
+                </div>
               </div>
-              <div className="min-w-0">
-                <div className="text-sm font-bold text-stone-900 dark:text-stone-100">
-                  Watch 10 ads, get a free chicken
-                </div>
-                <div className="text-xs font-semibold text-stone-500 dark:text-stone-400 mt-0.5">
-                  +1 White Leghorn · Progress{' '}
-                  <span className="font-mono-num text-emerald-700 dark:text-emerald-400 font-bold">
-                    {profile.watchedAdsCount}/10
-                  </span>
-                </div>
-                <div className="mt-1">
-                  {renderPreviewReward({
-                    id: 'watch_10_ads',
-                    eggBoostPerHour: leghornPack.eggsPerHour,
-                  })}
-                </div>
-              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  onTabTap?.();
+                  onTriggerWatchAd();
+                }}
+                disabled={watchingAd}
+                className="clay-btn clay-btn-amber min-h-[42px] min-w-[104px] px-3 rounded-2xl text-xs font-extrabold flex items-center justify-center gap-1.5 shrink-0"
+              >
+                {watchingAd && (activeAdAction === 'watch_ad' || (!activeAdNetwork && activeAdAction !== 'adsgram_task')) ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Loading</span>
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-3.5 h-3.5 fill-current" />
+                    <span>Earn Eggs</span>
+                  </>
+                )}
+              </button>
             </div>
 
-            <button
-              type="button"
-              onClick={onTriggerWatchAd}
-              disabled={watchingAd}
-              className="clay-btn clay-btn-amber min-h-[42px] px-3.5 rounded-2xl text-xs font-extrabold flex items-center gap-1.5 shrink-0"
-            >
-              <Play className="w-3.5 h-3.5 fill-current" />
-              <span>{watchingAd && !activeAdNetwork ? 'Loading...' : `Watch ${profile.watchedAdsCount}/10`}</span>
-            </button>
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-[10px] font-bold px-0.5">
+                <span className="text-stone-500 dark:text-stone-400">
+                  10/10 Bonus Eggs Chest (+{FREE_EGGS_MILESTONE_BONUS} extra eggs)
+                </span>
+                <span className="font-mono-num font-extrabold text-amber-700 dark:text-amber-300">
+                  {profile.watchedAdsCount}/10
+                </span>
+              </div>
+              <div
+                role="progressbar"
+                aria-label="Free eggs ad bonus chest progress"
+                aria-valuenow={Math.min(10, profile.watchedAdsCount)}
+                aria-valuemin={0}
+                aria-valuemax={10}
+                className="h-2.5 w-full rounded-full clay-inset overflow-hidden"
+              >
+                <motion.div
+                  initial={shouldReduceMotion ? false : { width: 0 }}
+                  animate={{
+                    width: `${Math.min(100, Math.round((Math.min(10, profile.watchedAdsCount) / 10) * 100))}%`,
+                  }}
+                  transition={{
+                    duration: shouldReduceMotion ? 0 : 0.48,
+                    ease: [0.16, 1, 0.3, 1],
+                  }}
+                  className="h-full rounded-full bg-gradient-to-r from-amber-400 via-orange-400 to-rose-400"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* 1× AdsGram Bot Joins & Clicks */}
+          <div className="clay-card clay-hover-lift !rounded-2xl p-3.5 space-y-2.5">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-11 h-11 rounded-2xl clay-icon-well flex items-center justify-center shrink-0">
+                  <Send className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
+                      {ADSGRAM_BOT_JOIN_TASK.name}
+                    </span>
+                    <span className="rounded-md bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800/60 px-1.5 py-0.5 text-[10px] font-extrabold text-indigo-700 dark:text-indigo-300">
+                      AdsGram Clicks
+                    </span>
+                    <span
+                      className={`rounded-md border px-1.5 py-0.5 text-[10px] font-extrabold ${
+                        hasConfiguredAdsgramTaskSdk(adConfig)
+                          ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800/60 text-emerald-700 dark:text-emerald-300'
+                          : 'bg-sky-50 dark:bg-sky-950/60 border-sky-200 dark:border-sky-800/60 text-sky-700 dark:text-sky-300'
+                      }`}
+                    >
+                      {hasConfiguredAdsgramTaskSdk(adConfig) ? 'SDK Live' : 'Verified Offer'}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-stone-500 dark:text-stone-400 truncate mt-0.5">
+                    {ADSGRAM_BOT_JOIN_TASK.subtitle}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                    <span className="inline-flex items-center gap-1 rounded-lg bg-amber-50 dark:bg-amber-950/50 border border-amber-200/80 dark:border-amber-800/60 px-2 py-0.5 text-xs font-extrabold text-amber-700 dark:text-amber-300">
+                      <CoinIcon className="w-3.5 h-3.5" />
+                      <span className="font-mono-num">+{ADSGRAM_BOT_JOIN_TASK.rewardCoins} coins</span>
+                    </span>
+                    <span
+                      className={`rounded-lg border px-2 py-0.5 text-[11px] font-extrabold font-mono-num ${
+                        botJoinsLeftToday === 0
+                          ? 'bg-stone-100 dark:bg-stone-800 border-stone-200 dark:border-stone-700 text-stone-500 dark:text-stone-400'
+                          : 'bg-indigo-50 dark:bg-indigo-950/50 border-indigo-200 dark:border-indigo-800/60 text-indigo-700 dark:text-indigo-300'
+                      }`}
+                    >
+                      {botJoinsLeftToday}/{ADSGRAM_BOT_JOIN_TASK.dailyLimit} left today
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                disabled={watchingAd || botJoinsLeftToday === 0 || !onTriggerAdsgramTask}
+                onClick={() => {
+                  onTabTap?.();
+                  onTriggerAdsgramTask?.();
+                }}
+                className={`clay-btn min-h-[42px] min-w-[104px] px-3 rounded-2xl text-xs font-extrabold flex items-center justify-center gap-1.5 shrink-0 ${
+                  botJoinsLeftToday === 0
+                    ? 'clay-inset text-emerald-700 dark:text-emerald-300 cursor-default shadow-none'
+                    : 'clay-btn-sky'
+                }`}
+              >
+                {botJoinsLeftToday === 0 ? (
+                  <>
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Done</span>
+                  </>
+                ) : watchingAd && activeAdAction === 'adsgram_task' ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Loading</span>
+                  </>
+                ) : (
+                  <>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Bot Joins</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-[10px] font-bold px-0.5">
+                <span className="text-stone-500 dark:text-stone-400">Daily bot clicks</span>
+                <span className="font-mono-num font-extrabold text-indigo-700 dark:text-indigo-300">
+                  {botJoinsToday}/{ADSGRAM_BOT_JOIN_TASK.dailyLimit} completed
+                </span>
+              </div>
+              <div
+                role="progressbar"
+                aria-label="AdsGram Bot Joins daily progress"
+                aria-valuenow={botJoinsToday}
+                aria-valuemin={0}
+                aria-valuemax={ADSGRAM_BOT_JOIN_TASK.dailyLimit}
+                className="h-2.5 w-full rounded-full clay-inset overflow-hidden"
+              >
+                <motion.div
+                  initial={shouldReduceMotion ? false : { width: 0 }}
+                  animate={{
+                    width: `${Math.min(100, Math.round((botJoinsToday / ADSGRAM_BOT_JOIN_TASK.dailyLimit) * 100))}%`,
+                  }}
+                  transition={{
+                    duration: shouldReduceMotion ? 0 : 0.48,
+                    ease: [0.16, 1, 0.3, 1],
+                  }}
+                  className="h-full rounded-full bg-gradient-to-r from-sky-400 via-indigo-500 to-emerald-500"
+                />
+              </div>
+            </div>
           </div>
 
           {/* Every day tasks */}

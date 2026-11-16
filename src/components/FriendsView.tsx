@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CalendarDays, Check, Clock, Copy, Gift, Share2, TrendingUp, Users } from 'lucide-react';
+import { motion, useReducedMotion } from 'motion/react';
 import {
   Area,
   AreaChart,
@@ -13,6 +14,7 @@ import {
   buildInvitedFriendsList,
   buildReferralGrowthSeries,
   type DailyReferralGrowthPoint,
+  REFERRAL_DEPOSIT_COMMISSION_RATE,
   REFERRAL_MILESTONE_CRATES,
   REFERRER_LIFETIME_EGG_COMMISSION_RATE,
   REFERRER_SIGNUP_BONUS_COINS,
@@ -79,7 +81,8 @@ export function FriendsView({
   appShortName,
   onClaimReferralMilestone,
 }: FriendsViewProps) {
-  const [feedback, setFeedback] = useState<'shared' | 'copied-link' | 'copied-code' | 'error' | null>(null);
+  const shouldReduceMotion = useReducedMotion();
+  const [feedback, setFeedback] = useState<'shared' | 'copied-link' | 'error' | null>(null);
   const [isSharing, setIsSharing] = useState(false);
   const [heroImgFailed, setHeroImgFailed] = useState(false);
   const [basketImgFailed, setBasketImgFailed] = useState(false);
@@ -93,7 +96,7 @@ export function FriendsView({
     };
   }, []);
 
-  const showFeedback = (next: 'shared' | 'copied-link' | 'copied-code' | 'error') => {
+  const showFeedback = (next: 'shared' | 'copied-link' | 'error') => {
     if (feedbackTimerRef.current !== null) {
       window.clearTimeout(feedbackTimerRef.current);
     }
@@ -132,9 +135,9 @@ export function FriendsView({
     [profile.displayName, referralStartId, referralUrl],
   );
 
-  const handleCopy = async (text: string, which: 'copied-link' | 'copied-code') => {
+  const handleCopy = async (text: string) => {
     const ok = await copyTextWithFallback(text);
-    showFeedback(ok ? which : 'error');
+    showFeedback(ok ? 'copied-link' : 'error');
   };
 
   const handleShare = async () => {
@@ -179,6 +182,7 @@ export function FriendsView({
     [referralGrowthSeries],
   );
   const eggPercentLabel = `${Math.round(REFERRER_LIFETIME_EGG_COMMISSION_RATE * 100)}%`;
+  const depositPercentLabel = `${Math.round(REFERRAL_DEPOSIT_COMMISSION_RATE * 100)}%`;
 
   const shareButtonLabel = isSharing
     ? 'Sharing...'
@@ -193,13 +197,17 @@ export function FriendsView({
       <div>
         <h1 className="text-2xl font-extrabold text-stone-900 dark:text-stone-100">Invite Friends</h1>
         <p className="text-sm text-stone-500 dark:text-stone-400">
-          Earn +{REFERRER_SIGNUP_BONUS_COINS} coins &amp; {eggPercentLabel} lifetime eggs from every friend
+          Earn +{REFERRER_SIGNUP_BONUS_COINS} coins per referral &amp; {depositPercentLabel} commission on every friend deposit
         </p>
       </div>
 
       {/* Clay Mascot & Reward Trio Hero */}
-      <div className="flex items-center justify-center gap-4 py-1">
-        <div className="w-16 h-16 rounded-2xl clay-icon-well p-1 flex items-center justify-center overflow-hidden">
+      <div className="relative flex items-center justify-center gap-4 py-1">
+        <motion.div
+          whileHover={{ scale: 1.08, rotate: -6 }}
+          transition={{ type: 'spring', stiffness: 360, damping: 20 }}
+          className="w-16 h-16 rounded-2xl clay-icon-well p-1 flex items-center justify-center overflow-hidden"
+        >
           {!basketImgFailed ? (
             <img
               src={clayEggBasket}
@@ -211,23 +219,37 @@ export function FriendsView({
           ) : (
             <Gift className="w-8 h-8 text-amber-600 dark:text-amber-400" />
           )}
+        </motion.div>
+        <div className="relative">
+          <span
+            aria-hidden="true"
+            className="animate-collect-halo pointer-events-none absolute -inset-2 rounded-3xl bg-amber-300/35 blur-md"
+          />
+          <motion.div
+            whileHover={{ scale: 1.08, rotate: 2 }}
+            transition={{ type: 'spring', stiffness: 340, damping: 18 }}
+            className="animate-clay-float relative w-24 h-24 rounded-3xl clay-card-warm p-1.5 flex items-center justify-center overflow-hidden"
+          >
+            {!heroImgFailed ? (
+              <img
+                src={clayHenMascot}
+                alt="Clay Alpha Gram mascot"
+                referrerPolicy="no-referrer"
+                onError={() => setHeroImgFailed(true)}
+                className="w-full h-full object-cover rounded-[1.25rem]"
+              />
+            ) : (
+              <ChickenSprite breed="leghorn" className="w-18 h-18" />
+            )}
+          </motion.div>
         </div>
-        <div className="animate-clay-float w-24 h-24 rounded-3xl clay-card-warm p-1.5 flex items-center justify-center overflow-hidden">
-          {!heroImgFailed ? (
-            <img
-              src={clayHenMascot}
-              alt="Clay Alpha Gram mascot"
-              referrerPolicy="no-referrer"
-              onError={() => setHeroImgFailed(true)}
-              className="w-full h-full object-cover rounded-[1.25rem]"
-            />
-          ) : (
-            <ChickenSprite breed="leghorn" className="w-18 h-18" />
-          )}
-        </div>
-        <div className="w-16 h-16 rounded-2xl clay-icon-well flex items-center justify-center text-rose-500 dark:text-rose-400">
+        <motion.div
+          whileHover={{ scale: 1.08, rotate: 6 }}
+          transition={{ type: 'spring', stiffness: 360, damping: 20 }}
+          className="w-16 h-16 rounded-2xl clay-icon-well flex items-center justify-center text-rose-500 dark:text-rose-400"
+        >
           <Gift className="w-8 h-8" />
-        </div>
+        </motion.div>
       </div>
 
       {/* Share Referral Link */}
@@ -235,43 +257,34 @@ export function FriendsView({
         <div>
           <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100">Referral rewards</h2>
           <p className="text-xs text-stone-500 dark:text-stone-400">
-            Get +{REFERRER_SIGNUP_BONUS_COINS} coins when your friend buys their 1st chicken, plus {eggPercentLabel} of all eggs they collect forever
+            Get +{REFERRER_SIGNUP_BONUS_COINS} coins immediately when a friend joins via your link, plus a {depositPercentLabel} coin commission whenever they deposit (and {eggPercentLabel} lifetime eggs).
           </p>
         </div>
 
         <div className="grid grid-cols-2 gap-2.5">
-          <div className="clay-card-mint !rounded-2xl p-3 text-center">
+          <div className="clay-card-mint clay-hover-lift !rounded-2xl p-3 text-center">
             <div className="flex items-center justify-center gap-1 text-xl font-extrabold text-emerald-700 dark:text-emerald-400 font-mono-num">
               <CoinIcon className="w-5 h-5" />
               <span>+{REFERRER_SIGNUP_BONUS_COINS}</span>
             </div>
-            <div className="text-xs font-semibold text-stone-600 dark:text-stone-300 mt-0.5">Coins per referral</div>
+            <div className="text-xs font-semibold text-stone-600 dark:text-stone-300 mt-0.5">Instant coins per referral</div>
           </div>
-          <div className="clay-card-warm !rounded-2xl p-3 text-center">
+          <div className="clay-card-warm clay-hover-lift !rounded-2xl p-3 text-center">
             <div className="flex items-center justify-center gap-1 text-xl font-extrabold text-amber-700 dark:text-amber-400 font-mono-num">
-              <EggIcon className="w-5 h-5" />
-              <span>{eggPercentLabel}</span>
+              <CoinIcon className="w-5 h-5" />
+              <span>{depositPercentLabel}</span>
             </div>
-            <div className="text-xs font-semibold text-stone-600 dark:text-stone-300 mt-0.5">Lifetime eggs earning</div>
+            <div className="text-xs font-semibold text-stone-600 dark:text-stone-300 mt-0.5">Share on every deposit</div>
           </div>
+        </div>
+
+        <div className="clay-inset !rounded-2xl px-3.5 py-2.5 text-[11px] font-semibold text-stone-600 dark:text-stone-300 text-center">
+          Instant Telegram Bot alerts notify you as soon as a referral joins (+{REFERRER_SIGNUP_BONUS_COINS} coins) and whenever they make a deposit ({depositPercentLabel} share).
         </div>
 
         <div className="space-y-1.5">
           <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-1.5 min-w-0">
-              <span className="text-xs font-bold text-stone-500 dark:text-stone-400">Your Referral Link</span>
-              <span className="px-1.5 py-0.5 rounded-md bg-sky-50 dark:bg-sky-950/50 border border-sky-200 dark:border-sky-800/70 text-[10px] font-extrabold text-sky-700 dark:text-sky-300 truncate">
-                @{botConfig.botUsername}
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => void handleCopy(referralStartId, 'copied-code')}
-              className="text-xs font-extrabold font-mono-num text-emerald-700 dark:text-emerald-400 hover:underline flex items-center gap-1 cursor-pointer shrink-0"
-            >
-              <span>ID: {referralStartId}</span>
-              {feedback === 'copied-code' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-            </button>
+            <span className="text-xs font-bold text-stone-500 dark:text-stone-400">Your Referral Link</span>
           </div>
           <div className="flex items-center gap-2">
             <input
@@ -283,7 +296,7 @@ export function FriendsView({
             />
             <button
               type="button"
-              onClick={() => void handleCopy(referralUrl, 'copied-link')}
+              onClick={() => void handleCopy(referralUrl)}
               aria-label="Copy referral link"
               className="clay-btn clay-btn-emerald min-h-[44px] min-w-[44px] rounded-2xl flex items-center justify-center shrink-0"
             >
@@ -294,11 +307,12 @@ export function FriendsView({
 
         <div className="space-y-1.5">
           <div className="flex items-center gap-2">
-            <button
+            <motion.button
               type="button"
+              whileTap={{ scale: 0.96 }}
               disabled={isSharing}
               onClick={() => void handleShare()}
-              className="clay-btn clay-btn-amber flex-1 min-h-[48px] rounded-2xl disabled:opacity-60 font-extrabold text-sm flex items-center justify-center gap-2"
+              className="clay-btn clay-btn-amber clay-cta-sheen flex-1 min-h-[48px] rounded-2xl disabled:opacity-60 font-extrabold text-sm flex items-center justify-center gap-2"
             >
               {feedback === 'shared' || feedback === 'copied-link' ? (
                 <Check className="w-4 h-4" />
@@ -306,7 +320,7 @@ export function FriendsView({
                 <Share2 className="w-4 h-4" />
               )}
               <span>{shareButtonLabel}</span>
-            </button>
+            </motion.button>
             <a
               href={telegramShareUrl}
               target="_blank"
@@ -459,10 +473,27 @@ export function FriendsView({
                     </span>
                   )}
                 </div>
-                <div className="h-2 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-amber-400 to-emerald-500 transition-all"
-                    style={{ width: `${pct}%` }}
+                <div
+                  role="progressbar"
+                  aria-label={`${crate.title} progress`}
+                  aria-valuenow={Math.min(effectiveActive, crate.targetActive)}
+                  aria-valuemin={0}
+                  aria-valuemax={crate.targetActive}
+                  className="h-2.5 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden p-[1px]"
+                >
+                  <motion.div
+                    initial={{ width: 0 }}
+                    animate={{ width: `${pct}%` }}
+                    transition={
+                      shouldReduceMotion
+                        ? { duration: 0 }
+                        : { duration: 0.65, ease: [0.16, 1, 0.3, 1] }
+                    }
+                    className={`h-full rounded-full ${
+                      unlocked
+                        ? 'bg-gradient-to-r from-emerald-400 to-emerald-500 clay-shimmer-bar'
+                        : 'bg-gradient-to-r from-amber-400 via-amber-500 to-emerald-500'
+                    }`}
                   />
                 </div>
               </div>
@@ -519,8 +550,8 @@ export function FriendsView({
         {invitedFriends.length === 0 ? (
           <div className="clay-inset p-5 text-center text-xs text-stone-500 dark:text-stone-400">
             No invited friends yet. Share your invite link to earn{' '}
-            <span className="font-bold text-emerald-700 dark:text-emerald-400">+{REFERRER_SIGNUP_BONUS_COINS} coins</span> and{' '}
-            <span className="font-bold text-amber-700 dark:text-amber-400">{eggPercentLabel} lifetime eggs</span> from every friend!
+            <span className="font-bold text-emerald-700 dark:text-emerald-400">+{REFERRER_SIGNUP_BONUS_COINS} coins</span> instantly and a{' '}
+            <span className="font-bold text-amber-700 dark:text-amber-400">{depositPercentLabel} deposit commission share</span> from every friend!
           </div>
         ) : (
           <ul aria-label="Invited Friends" className="divide-y divide-stone-100 dark:divide-stone-800">

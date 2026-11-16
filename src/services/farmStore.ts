@@ -439,7 +439,16 @@ export async function ensurePlayerInFirestore(
 export async function applyReferralCodeInFirestore(
   currentProfile: UserFarmProfile,
   rawCodeOrId: string,
-): Promise<{ profile: UserFarmProfile; transaction: TransactionEntry; referrerName: string } | { error: string }> {
+): Promise<
+  | {
+      profile: UserFarmProfile;
+      transaction: TransactionEntry;
+      referrerUid: string;
+      referrerName: string;
+      coinsRewarded: number;
+    }
+  | { error: string }
+> {
   const rawTrimmed = rawCodeOrId.trim();
   const strippedParam = rawTrimmed.replace(/^(?:ref|r)_/i, '').trim();
   const codeUpper = rawTrimmed.toUpperCase();
@@ -515,9 +524,17 @@ export async function applyReferralCodeInFirestore(
     }
 
     const nowMs = Date.now();
-    const nextProfile: UserFarmProfile = {
+    const rewardCoins = REFERRER_SIGNUP_BONUS_COINS;
+    const playerRef = doc(db, 'players', currentProfile.uid);
+    const playerLbRef = doc(db, 'leaderboard', currentProfile.uid);
+    const referrerPlayerRef = doc(db, 'players', referrerUid);
+    const referrerLbRef = doc(db, 'leaderboard', referrerUid);
+    const referralDocRef = doc(db, 'players', referrerUid, 'referrals', currentProfile.uid);
+
+    let nextProfile: UserFarmProfile = {
       ...currentProfile,
       referredBy: referrerUid,
+      referralActivated: true,
       coins: currentProfile.coins + REFERRED_WELCOME_BONUS_COINS,
     };
 
@@ -533,36 +550,107 @@ export async function applyReferralCodeInFirestore(
       createdAtMs: nowMs,
     };
 
-    const batch = writeBatch(db);
-    batch.update(doc(db, 'players', currentProfile.uid), toFirestoreProfilePayload(nextProfile, false));
-    batch.set(doc(db, 'leaderboard', currentProfile.uid), toLeaderboardPayload(nextProfile));
-    batch.set(doc(db, 'players', currentProfile.uid, 'transactions', userTx.id), {
-      userId: currentProfile.uid,
-      type: userTx.type,
-      title: userTx.title,
-      amount: userTx.amount,
-      currency: userTx.currency,
-      usdValue: userTx.usdValue,
-      status: userTx.status,
-      createdAtMs: userTx.createdAtMs,
-      createdAt: serverTimestamp(),
+    let alreadyLinked = false;
+    await runTransaction(db, async (transaction) => {
+      const [playerSnap, referrerPlayerSnap, referrerLbSnap, existingRefSnap] = await Promise.all([
+        transaction.get(playerRef),
+        transaction.get(referrerPlayerRef),
+        transaction.get(referrerLbRef),
+        transaction.get(referralDocRef),
+      ]);
+
+      if (existingRefSnap.exists() || (playerSnap.exists() && playerSnap.data().referredBy)) {
+        alreadyLinked = true;
+        return;
+      }
+
+      const liveCoins = playerSnap.exists()
+        ? Number(playerSnap.data().coins ?? currentProfile.coins)
+        : currentProfile.coins;
+      nextProfile = {
+        ...currentProfile,
+        referredBy: referrerUid,
+        referralActivated: true,
+        coins: liveCoins + REFERRED_WELCOME_BONUS_COINS,
+      };
+
+      transaction.update(playerRef, toFirestoreProfilePayload(nextProfile, false));
+      transaction.set(playerLbRef, toLeaderboardPayload(nextProfile));
+      transaction.set(doc(db, 'players', currentProfile.uid, 'transactions', userTx.id), {
+        userId: currentProfile.uid,
+        type: userTx.type,
+        title: userTx.title,
+        amount: userTx.amount,
+        currency: userTx.currency,
+        usdValue: userTx.usdValue,
+        status: userTx.status,
+        createdAtMs: userTx.createdAtMs,
+        createdAt: serverTimestamp(),
+      });
+
+      const safeReferredName = (currentProfile.displayName || 'Farmer').trim().slice(0, 60) || 'Farmer';
+      const safeReferredHandle = formatReferralHandle(currentProfile.handle, currentProfile.uid).slice(0, 40);
+
+      // Immediately activate referral and award +150 coins to the referrer upon detection
+      transaction.set(referralDocRef, {
+        referrerUid,
+        referredUid: currentProfile.uid,
+        referredName: safeReferredName,
+        referredHandle: safeReferredHandle,
+        status: 'active',
+        coinsEarned: rewardCoins,
+        toppedUpUsd: 0,
+        createdAtMs: nowMs,
+        createdAt: serverTimestamp(),
+      });
+
+      if (referrerPlayerSnap.exists()) {
+        const rp = referrerPlayerSnap.data();
+        const nextRefPlayerCoins = Number(rp.coins ?? 0) + rewardCoins;
+        const nextRefCount = Number(rp.referralCount ?? 0) + 1;
+        const nextRefCoinsEarned = Number(rp.referralCoinsEarned ?? 0) + rewardCoins;
+
+        transaction.update(referrerPlayerRef, {
+          coins: nextRefPlayerCoins,
+          referralCount: nextRefCount,
+          referralCoinsEarned: nextRefCoinsEarned,
+          updatedAt: serverTimestamp(),
+        });
+
+        if (referrerLbSnap.exists()) {
+          transaction.update(referrerLbRef, {
+            inviterCount: nextRefCount,
+            updatedAt: serverTimestamp(),
+          });
+        }
+
+        const refRewardTxId = `tx_ref_earned_${currentProfile.uid.replace(/[^a-zA-Z0-9_-]/g, '').slice(-16)}_${nowMs}`.slice(0, 64);
+        transaction.set(doc(db, 'players', referrerUid, 'transactions', refRewardTxId), {
+          userId: referrerUid,
+          type: 'referral',
+          title: `Referral reward (+${rewardCoins} coins): ${safeReferredName}`.slice(0, 80),
+          amount: rewardCoins,
+          currency: 'coins',
+          usdValue: Number((rewardCoins / 10000).toFixed(4)),
+          status: 'completed',
+          createdAtMs: nowMs,
+          createdAt: serverTimestamp(),
+        });
+      }
     });
 
-    // Referrals start as Pending until the invited player buys their 1st chicken using welcome bonus coins
-    batch.set(doc(db, 'players', referrerUid, 'referrals', currentProfile.uid), {
+    if (alreadyLinked) {
+      return { error: 'You have already used a referral link on this account.' };
+    }
+
+    saveCachedPlayerProfile(nextProfile);
+    return {
+      profile: nextProfile,
+      transaction: userTx,
       referrerUid,
-      referredUid: currentProfile.uid,
-      referredName: currentProfile.displayName.slice(0, 60),
-      referredHandle: currentProfile.handle.slice(0, 40),
-      status: 'pending',
-      coinsEarned: 0,
-      toppedUpUsd: 0,
-      createdAtMs: nowMs,
-      createdAt: serverTimestamp(),
-    });
-
-    await batch.commit();
-    return { profile: nextProfile, transaction: userTx, referrerName };
+      referrerName,
+      coinsRewarded: rewardCoins,
+    };
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `referrals/${rawTrimmed}`);
   }
@@ -1568,6 +1656,7 @@ export function subscribeToAdConfig(onUpdate: (config: AdConfig) => void): () =>
       onUpdate({
         provider: (d.provider as AdConfig['provider']) || 'countdown',
         adsgramBlockId: String(d.adsgramBlockId || ''),
+        adsgramTaskBlockId: String(d.adsgramTaskBlockId || ''),
         gigapubProjectId: String(d.gigapubProjectId || ''),
         monetagZoneId: String(d.monetagZoneId || ''),
         customTitle: String(d.customTitle || DEFAULT_AD_CONFIG.customTitle),
@@ -1593,6 +1682,7 @@ export async function saveAdConfigInFirestore(
   const payload: AdConfig = {
     provider: config.provider,
     adsgramBlockId: config.adsgramBlockId.trim().slice(0, 64),
+    adsgramTaskBlockId: (config.adsgramTaskBlockId || '').trim().slice(0, 64),
     gigapubProjectId: (config.gigapubProjectId || '').trim().slice(0, 64),
     monetagZoneId: config.monetagZoneId.trim().slice(0, 64),
     customTitle: config.customTitle.trim().slice(0, 80) || DEFAULT_AD_CONFIG.customTitle,
@@ -1839,6 +1929,10 @@ export function subscribeToChannelsConfig(
       onUpdate({
         enabled: d.enabled !== false,
         channels: parsedChannels,
+        getCodeChannelUrl:
+          typeof d.getCodeChannelUrl === 'string' && d.getCodeChannelUrl.trim()
+            ? String(d.getCodeChannelUrl).trim().slice(0, 256)
+            : DEFAULT_CHANNELS_CONFIG.getCodeChannelUrl,
         updatedAtMs: Number(d.updatedAtMs ?? 0),
       });
     },
@@ -1855,9 +1949,12 @@ export async function saveChannelsConfigInFirestore(
     .filter((ch): ch is RequiredTelegramChannel => Boolean(ch))
     .slice(0, 10);
 
+  const rawGetCode = String(config.getCodeChannelUrl ?? '').trim().slice(0, 256);
+
   const payload: ChannelsConfig = {
     enabled: Boolean(config.enabled),
     channels: normalizedChannels,
+    getCodeChannelUrl: rawGetCode,
     updatedAtMs: nowMs,
   };
 
