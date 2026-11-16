@@ -23,20 +23,30 @@ import {
   buildDeterministicDepositIds,
   calculateBuyerPoints,
   calculateTotalChickens,
+  canAddAdminPlayerId,
   canBanPlayerId,
+  canRemoveAdminPlayerId,
+  coinsToUsd,
+  computeAdminCoinAdjustment,
+  computeAdminReferralCountAdjustment,
   createDefaultProfile,
   createDefaultSeasonConfig,
   decodeAchievementsAndAds,
   decodePromoLabelMeta,
   decodeTaskSubtitleMeta,
   DEFAULT_AD_CONFIG,
+  DEFAULT_ADMINS_CONFIG,
   DEFAULT_CHANNELS_CONFIG,
   eggsToUsd,
   encodeAchievementsWithAds,
   encodePromoLabelMeta,
   encodeTaskSubtitleMeta,
+  extractTelegramNumericUserId,
+  filterPlayersBySearchQuery,
   formatReferralHandle,
+  getEffectiveAdminIds,
   isAdminPlayerId,
+  matchesAdminRecord,
   normalizePlayerBanId,
   normalizeTelegramChannelEntry,
   REFERRED_WELCOME_BONUS_COINS,
@@ -49,6 +59,8 @@ import {
 } from '../game/economy';
 import type {
   AdConfig,
+  AdminRoleEntry,
+  AdminsConfig,
   BannedUserRecord,
   ChannelsConfig,
   ChickenBreedId,
@@ -2076,11 +2088,12 @@ export async function banPlayerInFirestore(params: {
   handle?: string;
   reason?: string;
   bannedBy: string;
+  extraAdminIds?: readonly string[];
 }): Promise<BannedUserRecord> {
-  if (!isAdminPlayerId(params.bannedBy)) {
-    throw new Error('Only authorized Owner Admin ID can block or ban players.');
+  if (!isAdminPlayerId(params.bannedBy, params.extraAdminIds)) {
+    throw new Error('Only authorized Admins can block or ban players.');
   }
-  const check = canBanPlayerId(params.targetId);
+  const check = canBanPlayerId(params.targetId, params.extraAdminIds);
   if (!check.ok) {
     throw new Error(check.error);
   }
@@ -2129,6 +2142,736 @@ export async function unbanPlayerInFirestore(targetId: string): Promise<void> {
     await deleteDoc(doc(db, 'banned_users', canonicalId));
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `banned_users/${canonicalId}`);
+  }
+}
+
+function parseAdminsConfigDoc(d: Record<string, unknown> | undefined): AdminsConfig {
+  if (!d) return DEFAULT_ADMINS_CONFIG;
+  const rawAdmins = Array.isArray(d.admins) ? d.admins : [];
+  const admins: AdminRoleEntry[] = rawAdmins
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+    .map((item) => ({
+      uid: normalizePlayerBanId(item.uid) || String(item.uid || '').trim(),
+      displayName: String(item.displayName || '').trim().slice(0, 60),
+      handle: String(item.handle || '').trim().slice(0, 40),
+      addedBy: String(item.addedBy || '').trim().slice(0, 64),
+      addedAtMs: Number(item.addedAtMs ?? 0),
+    }))
+    .filter((entry) => Boolean(entry.uid))
+    .slice(0, 30);
+
+  const rawIds = Array.isArray(d.adminIds)
+    ? d.adminIds.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
+  const mergedIds = Array.from(
+    new Set([...rawIds, ...admins.map((a) => a.uid)]),
+  ).slice(0, 30);
+
+  return {
+    adminIds: mergedIds,
+    admins,
+    updatedAtMs: Number(d.updatedAtMs ?? 0),
+  };
+}
+
+export function subscribeToAdminsConfig(
+  onUpdate: (config: AdminsConfig) => void,
+): () => void {
+  return onSnapshot(
+    doc(db, 'app_config', 'admins'),
+    (snap) => {
+      if (!snap.exists()) {
+        onUpdate(DEFAULT_ADMINS_CONFIG);
+        return;
+      }
+      onUpdate(parseAdminsConfigDoc(snap.data()));
+    },
+    (err) => logSubscriptionError('app_config/admins', err),
+  );
+}
+
+export async function addAdminInFirestore(params: {
+  actorUid: string;
+  targetId: string;
+  displayName?: string;
+  handle?: string;
+}): Promise<AdminsConfig> {
+  const adminsRef = doc(db, 'app_config', 'admins');
+  try {
+    const snap = await getDoc(adminsRef);
+    const currentConfig = snap.exists()
+      ? parseAdminsConfigDoc(snap.data())
+      : DEFAULT_ADMINS_CONFIG;
+
+    const currentExtraIds = getEffectiveAdminIds(currentConfig);
+    if (!isAdminPlayerId(params.actorUid, currentExtraIds)) {
+      throw new Error('Only an authorized Admin can add another Admin.');
+    }
+
+    const check = canAddAdminPlayerId(params.targetId, currentConfig);
+    if (!check.ok) {
+      throw new Error(check.error);
+    }
+
+    const canonicalId = check.canonicalId;
+    let resolvedName = String(params.displayName || '').trim().slice(0, 60);
+    let resolvedHandle = String(params.handle || '').trim().slice(0, 40);
+
+    if (!resolvedName || !resolvedHandle) {
+      const playerSnap = await getDoc(doc(db, 'players', canonicalId));
+      if (playerSnap.exists()) {
+        const pd = playerSnap.data();
+        resolvedName = resolvedName || String(pd.displayName || '').trim().slice(0, 60);
+        resolvedHandle = resolvedHandle || String(pd.handle || '').trim().slice(0, 40);
+      } else {
+        const lbSnap = await getDoc(doc(db, 'leaderboard', canonicalId));
+        if (lbSnap.exists()) {
+          const ld = lbSnap.data();
+          resolvedName = resolvedName || String(ld.displayName || '').trim().slice(0, 60);
+          resolvedHandle = resolvedHandle || String(ld.handle || '').trim().slice(0, 40);
+        }
+      }
+    }
+
+    const nowMs = Date.now();
+    const numericId = extractTelegramNumericUserId(canonicalId);
+    const entry: AdminRoleEntry = {
+      uid: canonicalId,
+      displayName: resolvedName || (numericId ? `Admin ${numericId}` : `Admin ${canonicalId.slice(-4)}`),
+      handle: resolvedHandle || (numericId ? `@tg_${numericId}` : `@${canonicalId.slice(-6)}`),
+      addedBy: (normalizePlayerBanId(params.actorUid) || params.actorUid).slice(0, 64),
+      addedAtMs: nowMs,
+    };
+
+    const nextAdmins = [...currentConfig.admins, entry].slice(0, 30);
+    // Include both canonical ID (e.g. tg_123) and numeric ID so Firestore rule checks match both formats
+    const nextAdminIds = Array.from(
+      new Set(
+        nextAdmins.flatMap((a) => {
+          const num = extractTelegramNumericUserId(a.uid);
+          return num ? [a.uid, num] : [a.uid];
+        }),
+      ),
+    ).slice(0, 30);
+
+    const payload: AdminsConfig = {
+      adminIds: nextAdminIds,
+      admins: nextAdmins,
+      updatedAtMs: nowMs,
+    };
+
+    await setDoc(adminsRef, {
+      ...payload,
+      updatedAt: serverTimestamp(),
+    });
+    return payload;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('Admin') || error.message.includes('Player ID') || error.message.includes('Maximum'))
+    ) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.WRITE, 'app_config/admins');
+  }
+}
+
+export async function removeAdminInFirestore(params: {
+  actorUid: string;
+  targetId: string;
+}): Promise<AdminsConfig> {
+  const adminsRef = doc(db, 'app_config', 'admins');
+  try {
+    const snap = await getDoc(adminsRef);
+    const currentConfig = snap.exists()
+      ? parseAdminsConfigDoc(snap.data())
+      : DEFAULT_ADMINS_CONFIG;
+
+    const currentExtraIds = getEffectiveAdminIds(currentConfig);
+    if (!isAdminPlayerId(params.actorUid, currentExtraIds)) {
+      throw new Error('Only an authorized Admin can remove an Admin.');
+    }
+
+    const check = canRemoveAdminPlayerId(params.targetId);
+    if (!check.ok) {
+      throw new Error(check.error);
+    }
+
+    const nextAdmins = currentConfig.admins.filter(
+      (a) => !matchesAdminRecord(check.canonicalId, a),
+    );
+    const nextAdminIds = Array.from(
+      new Set(
+        nextAdmins.flatMap((a) => {
+          const num = extractTelegramNumericUserId(a.uid);
+          return num ? [a.uid, num] : [a.uid];
+        }),
+      ),
+    ).slice(0, 30);
+
+    const nowMs = Date.now();
+    const payload: AdminsConfig = {
+      adminIds: nextAdminIds,
+      admins: nextAdmins,
+      updatedAtMs: nowMs,
+    };
+
+    await setDoc(adminsRef, {
+      ...payload,
+      updatedAt: serverTimestamp(),
+    });
+    return payload;
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('Admin')) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.WRITE, 'app_config/admins');
+  }
+}
+
+export async function fetchPlayerByIdOrCodeFromFirestore(
+  rawIdOrCode: string,
+): Promise<UserFarmProfile | null> {
+  const trimmed = rawIdOrCode.trim();
+  if (!trimmed) return null;
+
+  const normalized = normalizePlayerBanId(trimmed);
+  const candidateIds = Array.from(
+    new Set(
+      [normalized, trimmed].filter(
+        (id): id is string => Boolean(id && /^[a-zA-Z0-9_-]{3,64}$/.test(id)),
+      ),
+    ),
+  );
+
+  for (const id of candidateIds) {
+    try {
+      const snap = await getDoc(doc(db, 'players', id));
+      if (snap.exists()) {
+        return parseProfileDoc(snap.data(), snap.id);
+      }
+    } catch {
+      // ignore single lookup miss
+    }
+  }
+
+  // Fallback to referral code lookup in leaderboard
+  try {
+    const codeUpper = trimmed.toUpperCase();
+    const q = query(
+      collection(db, 'leaderboard'),
+      where('referralCode', '==', codeUpper),
+      limit(1),
+    );
+    const lbMatches = await getDocs(q);
+    if (!lbMatches.empty) {
+      const uid = lbMatches.docs[0].id;
+      const pSnap = await getDoc(doc(db, 'players', uid));
+      if (pSnap.exists()) {
+        return parseProfileDoc(pSnap.data(), pSnap.id);
+      }
+    }
+  } catch {
+    // ignore fallback miss
+  }
+
+  return null;
+}
+
+export async function searchUsersInFirestore(
+  rawQuery: string,
+  cachedPlayers: ReadonlyArray<UserFarmProfile> = [],
+): Promise<UserFarmProfile[]> {
+  const trimmed = rawQuery.trim();
+  if (!trimmed) {
+    return [...cachedPlayers];
+  }
+
+  const byUid = new Map<string, UserFarmProfile>();
+  for (const localMatch of filterPlayersBySearchQuery(cachedPlayers, trimmed)) {
+    byUid.set(localMatch.uid, localMatch);
+  }
+
+  // 1. Direct exact ID or referralCode lookup
+  const exactPlayer = await fetchPlayerByIdOrCodeFromFirestore(trimmed);
+  if (exactPlayer) {
+    byUid.set(exactPlayer.uid, exactPlayer);
+  }
+
+  // 2. Scan latest players & top leaderboard docs in Firestore to catch users beyond the cached slice
+  try {
+    const [playersSnap, lbSnap] = await Promise.all([
+      getDocs(query(collection(db, 'players'), orderBy('createdAtMs', 'desc'), limit(50))),
+      getDocs(query(collection(db, 'leaderboard'), limit(50))),
+    ]);
+
+    const fetchedProfiles = playersSnap.docs.map((d) => parseProfileDoc(d.data(), d.id));
+    for (const matched of filterPlayersBySearchQuery(fetchedProfiles, trimmed)) {
+      byUid.set(matched.uid, matched);
+    }
+
+    const low = trimmed.toLowerCase();
+    const noAt = low.replace(/^@+/, '');
+    const lbMatchIds: string[] = [];
+    for (const lbDoc of lbSnap.docs) {
+      const ld = lbDoc.data();
+      const uid = String(ld.uid || lbDoc.id);
+      if (byUid.has(uid)) continue;
+      const nameLow = String(ld.displayName || '').toLowerCase();
+      const handleLow = String(ld.handle || '').toLowerCase();
+      const refCodeLow = String(ld.referralCode || '').toLowerCase();
+      const numId = (extractTelegramNumericUserId(uid) || '').toLowerCase();
+      if (
+        uid.toLowerCase().includes(low) ||
+        (numId && numId.includes(noAt)) ||
+        nameLow.includes(low) ||
+        handleLow.includes(low) ||
+        (noAt && handleLow.replace(/^@+/, '').includes(noAt)) ||
+        refCodeLow.includes(low)
+      ) {
+        lbMatchIds.push(uid);
+      }
+    }
+
+    if (lbMatchIds.length > 0) {
+      const extraSnaps = await Promise.all(
+        lbMatchIds.slice(0, 10).map((uid) => getDoc(doc(db, 'players', uid))),
+      );
+      for (const s of extraSnaps) {
+        if (s.exists()) {
+          const p = parseProfileDoc(s.data(), s.id);
+          byUid.set(p.uid, p);
+        }
+      }
+    }
+  } catch (error) {
+    if (byUid.size === 0) {
+      handleFirestoreError(error, OperationType.LIST, 'players');
+    }
+  }
+
+  return Array.from(byUid.values()).sort(
+    (a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0),
+  );
+}
+
+export async function fetchPlayerReferralsFromFirestore(
+  playerUid: string,
+): Promise<ReferralRecord[]> {
+  const cleanUid = playerUid.trim();
+  if (!cleanUid) return [];
+  try {
+    const q = query(
+      collection(db, 'players', cleanUid, 'referrals'),
+      orderBy('createdAtMs', 'desc'),
+      limit(50),
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map((docSnap) => {
+      const d = docSnap.data();
+      return {
+        id: docSnap.id,
+        referrerUid: String(d.referrerUid ?? cleanUid),
+        referredUid: String(d.referredUid ?? docSnap.id),
+        referredName: String(d.referredName ?? 'Invited Friend'),
+        referredHandle: String(d.referredHandle ?? ''),
+        status: d.status === 'pending' ? 'pending' : 'active',
+        coinsEarned: Number(d.coinsEarned ?? 0),
+        toppedUpUsd: Number(d.toppedUpUsd ?? 0),
+        createdAtMs: Number(d.createdAtMs ?? 0),
+      };
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, `players/${cleanUid}/referrals`);
+  }
+}
+
+export async function adjustPlayerCoinsInFirestore(params: {
+  adminUid: string;
+  targetUid: string;
+  deltaCoins: number;
+  note?: string;
+  extraAdminIds?: readonly string[];
+}): Promise<{ profile: UserFarmProfile; actualDelta: number }> {
+  if (!isAdminPlayerId(params.adminUid, params.extraAdminIds)) {
+    throw new Error('Only authorized Admins can adjust player coins.');
+  }
+  const cleanTargetUid = params.targetUid.trim();
+  if (!cleanTargetUid) {
+    throw new Error('Select a valid player.');
+  }
+
+  const nowMs = Date.now();
+  const txId = `tx_adm_coins_${nowMs}_${Math.random().toString(36).slice(2, 6)}`.slice(0, 64);
+  const playerRef = doc(db, 'players', cleanTargetUid);
+
+  try {
+    const result = await runTransaction(db, async (tx) => {
+      const playerSnap = await tx.get(playerRef);
+      if (!playerSnap.exists()) {
+        throw new Error(`Player "${cleanTargetUid}" not found in Firestore.`);
+      }
+      const currentProfile = parseProfileDoc(playerSnap.data(), cleanTargetUid);
+      const calc = computeAdminCoinAdjustment(currentProfile.coins, params.deltaCoins);
+      if (!calc.ok) {
+        throw new Error(calc.error);
+      }
+
+      const nextProfile: UserFarmProfile = {
+        ...currentProfile,
+        coins: calc.nextCoins,
+      };
+
+      const customNote = String(params.note || '').trim();
+      const title = (
+        customNote ||
+        (calc.actualDelta >= 0
+          ? `Admin Added +${calc.actualDelta.toLocaleString()} coins`
+          : `Admin Removed ${Math.abs(calc.actualDelta).toLocaleString()} coins`)
+      ).slice(0, 80);
+
+      tx.update(playerRef, {
+        coins: calc.nextCoins,
+        updatedAt: serverTimestamp(),
+      });
+      tx.set(doc(db, 'players', cleanTargetUid, 'transactions', txId), {
+        userId: cleanTargetUid,
+        type: 'admin_adjustment',
+        title,
+        amount: calc.actualDelta,
+        currency: 'coins',
+        usdValue: coinsToUsd(Math.abs(calc.actualDelta)),
+        status: 'completed',
+        createdAtMs: nowMs,
+        createdAt: serverTimestamp(),
+      });
+
+      return { profile: nextProfile, actualDelta: calc.actualDelta };
+    });
+
+    return result;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('not found') ||
+        error.message.includes('coins') ||
+        error.message.includes('Admin'))
+    ) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.WRITE, `players/${cleanTargetUid}`);
+  }
+}
+
+export async function adjustPlayerReferralCountInFirestore(params: {
+  adminUid: string;
+  targetUid: string;
+  deltaRefers: number;
+  extraAdminIds?: readonly string[];
+}): Promise<{ profile: UserFarmProfile; actualDelta: number }> {
+  if (!isAdminPlayerId(params.adminUid, params.extraAdminIds)) {
+    throw new Error('Only authorized Admins can adjust referral counts.');
+  }
+  const cleanTargetUid = params.targetUid.trim();
+  if (!cleanTargetUid) {
+    throw new Error('Select a valid player.');
+  }
+
+  const playerRef = doc(db, 'players', cleanTargetUid);
+  const lbRef = doc(db, 'leaderboard', cleanTargetUid);
+
+  try {
+    const result = await runTransaction(db, async (tx) => {
+      const [playerSnap, lbSnap] = await Promise.all([tx.get(playerRef), tx.get(lbRef)]);
+      if (!playerSnap.exists()) {
+        throw new Error(`Player "${cleanTargetUid}" not found in Firestore.`);
+      }
+      const currentProfile = parseProfileDoc(playerSnap.data(), cleanTargetUid);
+      const calc = computeAdminReferralCountAdjustment(
+        currentProfile.referralCount,
+        params.deltaRefers,
+      );
+      if (!calc.ok) {
+        throw new Error(calc.error);
+      }
+
+      const nextProfile: UserFarmProfile = {
+        ...currentProfile,
+        referralCount: calc.nextCount,
+      };
+
+      tx.update(playerRef, {
+        referralCount: calc.nextCount,
+        updatedAt: serverTimestamp(),
+      });
+      if (lbSnap.exists()) {
+        tx.update(lbRef, {
+          inviterCount: calc.nextCount,
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      return { profile: nextProfile, actualDelta: calc.actualDelta };
+    });
+
+    return result;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('not found') ||
+        error.message.includes('referral') ||
+        error.message.includes('Admin'))
+    ) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.WRITE, `players/${cleanTargetUid}`);
+  }
+}
+
+export async function adminAddReferralRelationInFirestore(params: {
+  adminUid: string;
+  referrerIdOrCode: string;
+  referredIdOrCode: string;
+  bonusCoins?: number;
+  extraAdminIds?: readonly string[];
+}): Promise<{
+  referrerProfile: UserFarmProfile;
+  referredProfile: UserFarmProfile;
+  referralRecord: ReferralRecord;
+}> {
+  if (!isAdminPlayerId(params.adminUid, params.extraAdminIds)) {
+    throw new Error('Only authorized Admins can manage referrals.');
+  }
+
+  const referrerResolved = await fetchPlayerByIdOrCodeFromFirestore(params.referrerIdOrCode);
+  if (!referrerResolved) {
+    throw new Error(`Referrer "${params.referrerIdOrCode.trim()}" not found.`);
+  }
+  const referredResolved = await fetchPlayerByIdOrCodeFromFirestore(params.referredIdOrCode);
+  if (!referredResolved) {
+    throw new Error(`Referred player "${params.referredIdOrCode.trim()}" not found.`);
+  }
+  if (referrerResolved.uid === referredResolved.uid) {
+    throw new Error('Referrer and referred player cannot be the same account.');
+  }
+
+  const referrerUid = referrerResolved.uid;
+  const referredUid = referredResolved.uid;
+  const rewardCoins = Math.max(
+    0,
+    Math.min(100_000, Math.round(params.bonusCoins ?? REFERRER_SIGNUP_BONUS_COINS)),
+  );
+  const nowMs = Date.now();
+
+  const referrerRef = doc(db, 'players', referrerUid);
+  const referrerLbRef = doc(db, 'leaderboard', referrerUid);
+  const referredRef = doc(db, 'players', referredUid);
+  const referralDocRef = doc(db, 'players', referrerUid, 'referrals', referredUid);
+
+  try {
+    const res = await runTransaction(db, async (tx) => {
+      const [referrerSnap, referrerLbSnap, referredSnap, existingRefSnap] = await Promise.all([
+        tx.get(referrerRef),
+        tx.get(referrerLbRef),
+        tx.get(referredRef),
+        tx.get(referralDocRef),
+      ]);
+
+      if (!referrerSnap.exists() || !referredSnap.exists()) {
+        throw new Error('Referrer or referred player record no longer exists.');
+      }
+      if (existingRefSnap.exists() && existingRefSnap.data().status === 'active') {
+        throw new Error('This friend is already an active referral of that referrer.');
+      }
+
+      const curReferrer = parseProfileDoc(referrerSnap.data(), referrerUid);
+      const curReferred = parseProfileDoc(referredSnap.data(), referredUid);
+
+      const nextRefCount = Math.max(0, Math.floor(curReferrer.referralCount)) + 1;
+      const nextRefCoinsEarned = Math.max(0, curReferrer.referralCoinsEarned) + rewardCoins;
+      const nextReferrerCoins = Math.max(0, curReferrer.coins) + rewardCoins;
+
+      const updatedReferrer: UserFarmProfile = {
+        ...curReferrer,
+        referralCount: nextRefCount,
+        referralCoinsEarned: nextRefCoinsEarned,
+        coins: nextReferrerCoins,
+      };
+      const updatedReferred: UserFarmProfile = {
+        ...curReferred,
+        referredBy: referrerUid,
+        referralActivated: true,
+      };
+
+      const refRecord: ReferralRecord = {
+        id: referredUid,
+        referrerUid,
+        referredUid,
+        referredName: curReferred.displayName.slice(0, 60),
+        referredHandle: curReferred.handle.slice(0, 40),
+        status: 'active',
+        coinsEarned: rewardCoins,
+        toppedUpUsd: 0,
+        createdAtMs: nowMs,
+      };
+
+      if (existingRefSnap.exists()) {
+        tx.update(referralDocRef, {
+          status: 'active',
+          coinsEarned: rewardCoins,
+        });
+      } else {
+        tx.set(referralDocRef, {
+          referrerUid: refRecord.referrerUid,
+          referredUid: refRecord.referredUid,
+          referredName: refRecord.referredName,
+          referredHandle: refRecord.referredHandle,
+          status: 'active',
+          coinsEarned: rewardCoins,
+          toppedUpUsd: 0,
+          createdAtMs: nowMs,
+          createdAt: serverTimestamp(),
+        });
+      }
+
+      tx.update(referrerRef, {
+        referralCount: nextRefCount,
+        referralCoinsEarned: nextRefCoinsEarned,
+        coins: nextReferrerCoins,
+        updatedAt: serverTimestamp(),
+      });
+
+      if (referrerLbSnap.exists()) {
+        tx.update(referrerLbRef, {
+          inviterCount: nextRefCount,
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      tx.update(referredRef, {
+        referredBy: referrerUid,
+        referralActivated: true,
+        updatedAt: serverTimestamp(),
+      });
+
+      if (rewardCoins > 0) {
+        const txId = `tx_adm_ref_${nowMs}`.slice(0, 64);
+        tx.set(doc(db, 'players', referrerUid, 'transactions', txId), {
+          userId: referrerUid,
+          type: 'referral',
+          title: `Admin Linked Refer: ${curReferred.displayName}`.slice(0, 80),
+          amount: rewardCoins,
+          currency: 'coins',
+          usdValue: coinsToUsd(rewardCoins),
+          status: 'completed',
+          createdAtMs: nowMs,
+          createdAt: serverTimestamp(),
+        });
+      }
+
+      return {
+        referrerProfile: updatedReferrer,
+        referredProfile: updatedReferred,
+        referralRecord: refRecord,
+      };
+    });
+
+    return res;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('not found') ||
+        error.message.includes('already') ||
+        error.message.includes('same account') ||
+        error.message.includes('Admin'))
+    ) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.WRITE, `players/${referrerUid}/referrals/${referredUid}`);
+  }
+}
+
+export async function adminRemoveReferralRelationInFirestore(params: {
+  adminUid: string;
+  referrerUid: string;
+  referredUid: string;
+  extraAdminIds?: readonly string[];
+}): Promise<{ referrerProfile?: UserFarmProfile; referredProfile?: UserFarmProfile }> {
+  if (!isAdminPlayerId(params.adminUid, params.extraAdminIds)) {
+    throw new Error('Only authorized Admins can remove referrals.');
+  }
+
+  const referrerUid = params.referrerUid.trim();
+  const referredUid = params.referredUid.trim();
+  if (!referrerUid || !referredUid) {
+    throw new Error('Invalid referrer or referred player ID.');
+  }
+
+  const referrerRef = doc(db, 'players', referrerUid);
+  const referrerLbRef = doc(db, 'leaderboard', referrerUid);
+  const referredRef = doc(db, 'players', referredUid);
+  const referralDocRef = doc(db, 'players', referrerUid, 'referrals', referredUid);
+
+  try {
+    return await runTransaction(db, async (tx) => {
+      const [referrerSnap, referrerLbSnap, referredSnap, referralDocSnap] = await Promise.all([
+        tx.get(referrerRef),
+        tx.get(referrerLbRef),
+        tx.get(referredRef),
+        tx.get(referralDocRef),
+      ]);
+
+      let referrerProfile: UserFarmProfile | undefined;
+      let referredProfile: UserFarmProfile | undefined;
+
+      const wasPending = referralDocSnap.exists() && referralDocSnap.data().status === 'pending';
+
+      if (referralDocSnap.exists()) {
+        tx.delete(referralDocRef);
+      }
+
+      if (referrerSnap.exists()) {
+        const curReferrer = parseProfileDoc(referrerSnap.data(), referrerUid);
+        const decrement = wasPending ? 0 : 1;
+        const nextCount = Math.max(0, Math.floor(curReferrer.referralCount) - decrement);
+        referrerProfile = {
+          ...curReferrer,
+          referralCount: nextCount,
+        };
+        if (nextCount !== curReferrer.referralCount) {
+          tx.update(referrerRef, {
+            referralCount: nextCount,
+            updatedAt: serverTimestamp(),
+          });
+          if (referrerLbSnap.exists()) {
+            tx.update(referrerLbRef, {
+              inviterCount: nextCount,
+              updatedAt: serverTimestamp(),
+            });
+          }
+        }
+      }
+
+      if (referredSnap.exists()) {
+        const curReferred = parseProfileDoc(referredSnap.data(), referredUid);
+        if (curReferred.referredBy === referrerUid) {
+          referredProfile = {
+            ...curReferred,
+            referredBy: '',
+            referralActivated: false,
+          };
+          tx.update(referredRef, {
+            referredBy: '',
+            referralActivated: false,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+
+      return { referrerProfile, referredProfile };
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `players/${referrerUid}/referrals/${referredUid}`);
   }
 }
 

@@ -2,6 +2,8 @@ import type {
   AdConfig,
   AdGateActionType,
   AdNetworkId,
+  AdminRoleEntry,
+  AdminsConfig,
   BannedUserRecord,
   ChannelsConfig,
   ChickenBreedId,
@@ -2784,7 +2786,7 @@ export function normalizePlayerBanId(rawId: unknown): string | null {
 
 export function canBanPlayerId(
   rawId: unknown,
-  extraAdminIds: string[] = [],
+  extraAdminIds: readonly string[] = [],
 ): { ok: true; canonicalId: string } | { ok: false; error: string } {
   const canonicalId = normalizePlayerBanId(rawId);
   if (!canonicalId) {
@@ -2796,7 +2798,9 @@ export function canBanPlayerId(
   if (isAdminPlayerId(canonicalId, extraAdminIds)) {
     return {
       ok: false,
-      error: `Cannot block or ban Owner Admin ID ${PRIMARY_ADMIN_TELEGRAM_ID}.`,
+      error: isAdminPlayerId(canonicalId)
+        ? `Cannot block or ban Owner Admin ID ${PRIMARY_ADMIN_TELEGRAM_ID}.`
+        : 'Cannot block or ban an authorized Admin ID. Remove Admin role first.',
     };
   }
   return { ok: true, canonicalId };
@@ -2820,4 +2824,191 @@ export function matchesBannedUserRecord(
   if (tgPlayer && tgBan && tgPlayer === tgBan) return true;
 
   return false;
+}
+
+export const MAX_EXTRA_ADMINS = 30;
+
+export const DEFAULT_ADMINS_CONFIG: AdminsConfig = {
+  adminIds: [],
+  admins: [],
+  updatedAtMs: 0,
+};
+
+export function getEffectiveAdminIds(adminsConfig?: AdminsConfig | null): string[] {
+  if (!adminsConfig) return [];
+  const seen = new Set<string>();
+  const addId = (raw: unknown) => {
+    const trimmed = String(raw || '').trim();
+    if (!trimmed) return;
+    seen.add(trimmed);
+    const norm = normalizePlayerBanId(trimmed);
+    if (norm) seen.add(norm);
+    const tg = extractTelegramNumericUserId(trimmed);
+    if (tg) seen.add(tg);
+  };
+  for (const id of adminsConfig.adminIds ?? []) {
+    addId(id);
+  }
+  for (const entry of adminsConfig.admins ?? []) {
+    addId(entry?.uid);
+  }
+  return Array.from(seen);
+}
+
+export function matchesAdminRecord(
+  playerId: unknown,
+  adminIdOrEntry: string | Pick<AdminRoleEntry, 'uid'> | null | undefined,
+): boolean {
+  const target =
+    typeof adminIdOrEntry === 'string' ? adminIdOrEntry : adminIdOrEntry?.uid;
+  if (!target) return false;
+  return matchesBannedUserRecord(playerId, { uid: target });
+}
+
+export function canAddAdminPlayerId(
+  rawId: unknown,
+  adminsConfig?: AdminsConfig | null,
+): { ok: true; canonicalId: string } | { ok: false; error: string } {
+  const canonicalId = normalizePlayerBanId(rawId);
+  if (!canonicalId) {
+    return {
+      ok: false,
+      error: 'Enter a valid Player ID (Telegram numeric ID, tg_..., or player_... UID).',
+    };
+  }
+  if (isAdminPlayerId(canonicalId)) {
+    return {
+      ok: false,
+      error: `Owner Admin ID ${PRIMARY_ADMIN_TELEGRAM_ID} already has permanent Admin access.`,
+    };
+  }
+  const existingAdmins = adminsConfig?.admins ?? [];
+  const existingIds = getEffectiveAdminIds(adminsConfig);
+  if (
+    existingAdmins.some((a) => matchesAdminRecord(canonicalId, a)) ||
+    existingIds.some((id) => matchesAdminRecord(canonicalId, id))
+  ) {
+    return {
+      ok: false,
+      error: 'This Player ID already has Admin access.',
+    };
+  }
+  if (existingAdmins.length >= MAX_EXTRA_ADMINS) {
+    return {
+      ok: false,
+      error: `Maximum ${MAX_EXTRA_ADMINS} Co-Admins allowed.`,
+    };
+  }
+  return { ok: true, canonicalId };
+}
+
+export function canRemoveAdminPlayerId(
+  rawId: unknown,
+): { ok: true; canonicalId: string } | { ok: false; error: string } {
+  const canonicalId = normalizePlayerBanId(rawId);
+  if (!canonicalId) {
+    return {
+      ok: false,
+      error: 'Enter a valid Admin ID.',
+    };
+  }
+  if (isAdminPlayerId(canonicalId)) {
+    return {
+      ok: false,
+      error: `Cannot remove permanent Owner Admin ID ${PRIMARY_ADMIN_TELEGRAM_ID}.`,
+    };
+  }
+  return { ok: true, canonicalId };
+}
+
+export function filterPlayersBySearchQuery(
+  players: ReadonlyArray<UserFarmProfile>,
+  rawQuery: string,
+): UserFarmProfile[] {
+  const trimmed = String(rawQuery || '').trim().toLowerCase();
+  if (!trimmed) return [...players];
+  const noAt = trimmed.replace(/^@+/, '');
+
+  return players.filter((p) => {
+    const numericId = (extractTelegramNumericUserId(p.uid) || '').toLowerCase();
+    const uidLow = p.uid.toLowerCase();
+    const nameLow = (p.displayName || '').toLowerCase();
+    const handleLow = (p.handle || '').toLowerCase();
+    const refCodeLow = (p.referralCode || '').toLowerCase();
+    const referredByLow = (p.referredBy || '').toLowerCase();
+
+    return (
+      uidLow.includes(trimmed) ||
+      (numericId && numericId.includes(noAt)) ||
+      nameLow.includes(trimmed) ||
+      handleLow.includes(trimmed) ||
+      (noAt && handleLow.replace(/^@+/, '').includes(noAt)) ||
+      refCodeLow.includes(trimmed) ||
+      referredByLow.includes(trimmed)
+    );
+  });
+}
+
+export function computeAdminCoinAdjustment(
+  currentCoins: number,
+  rawDelta: number,
+):
+  | {
+      ok: true;
+      previousCoins: number;
+      nextCoins: number;
+      actualDelta: number;
+    }
+  | { ok: false; error: string } {
+  const safeCurrent = Math.max(0, Math.floor(Number(currentCoins) || 0));
+  const delta = Math.trunc(Number(rawDelta));
+  if (!Number.isFinite(delta) || delta === 0) {
+    return { ok: false, error: 'Enter a coin amount greater than 0.' };
+  }
+  if (delta > 10_000_000 || delta < -10_000_000) {
+    return { ok: false, error: 'Maximum single adjustment is 10,000,000 coins.' };
+  }
+  const nextCoins = Math.max(0, safeCurrent + delta);
+  const actualDelta = nextCoins - safeCurrent;
+  if (actualDelta === 0 && delta < 0) {
+    return { ok: false, error: 'Player already has 0 coins.' };
+  }
+  return {
+    ok: true,
+    previousCoins: safeCurrent,
+    nextCoins,
+    actualDelta,
+  };
+}
+
+export function computeAdminReferralCountAdjustment(
+  currentCount: number,
+  rawDelta: number,
+):
+  | {
+      ok: true;
+      previousCount: number;
+      nextCount: number;
+      actualDelta: number;
+    }
+  | { ok: false; error: string } {
+  const safeCurrent = Math.max(0, Math.floor(Number(currentCount) || 0));
+  const delta = Math.trunc(Number(rawDelta));
+  if (!Number.isFinite(delta) || delta === 0) {
+    return { ok: false, error: 'Enter a referral count greater than 0.' };
+  }
+  if (delta > 100_000 || delta < -100_000) {
+    return { ok: false, error: 'Maximum single referral adjustment is 100,000.' };
+  }
+  const nextCount = Math.max(0, safeCurrent + delta);
+  const actualDelta = nextCount - safeCurrent;
+  if (actualDelta === 0 && delta < 0) {
+    return { ok: false, error: 'Player already has 0 referrals.' };
+  }
+  return {
+    ok: true,
+    previousCount: safeCurrent,
+    nextCount,
+    actualDelta,
+  };
 }

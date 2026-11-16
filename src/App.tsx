@@ -34,6 +34,7 @@ import {
   createDefaultSeasonConfig,
   createPaidTaskOrder,
   DEFAULT_AD_CONFIG,
+  DEFAULT_ADMINS_CONFIG,
   DEFAULT_CHANNELS_CONFIG,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
@@ -44,6 +45,7 @@ import {
   formatChannelsHandleSummary,
   formatPromoRewardSummary,
   getActiveRequiredChannels,
+  getEffectiveAdminIds,
   isAdminPlayerId,
   recordCompletedGateAd,
   reinvestEggs,
@@ -61,6 +63,11 @@ import {
   saveFarmArtifactLayout,
 } from './game/farmArtifacts';
 import {
+  addAdminInFirestore,
+  adjustPlayerCoinsInFirestore,
+  adjustPlayerReferralCountInFirestore,
+  adminAddReferralRelationInFirestore,
+  adminRemoveReferralRelationInFirestore,
   applyReferralCodeInFirestore,
   banPlayerInFirestore,
   commitPlayerMutation,
@@ -72,17 +79,21 @@ import {
   distributeSeasonPrizesInFirestore,
   ensurePlayerInFirestore,
   fetchCustomTasksFromFirestore,
+  fetchPlayerReferralsFromFirestore,
   getStoredPlayerId,
   incrementPromoCodeUseInFirestore,
   incrementTaskClaimCountInFirestore,
   loadCachedBanRecord,
   loadCachedPlayerProfile,
+  removeAdminInFirestore,
   resolveActivePlayerIdentity,
   reviewWithdrawalInFirestore,
   saveAdConfigInFirestore,
   saveChannelsConfigInFirestore,
   saveSeasonConfigInFirestore,
+  searchUsersInFirestore,
   subscribeToAdConfig,
+  subscribeToAdminsConfig,
   subscribeToAllWithdrawRequests,
   subscribeToBannedUsers,
   subscribeToChannelsConfig,
@@ -99,6 +110,7 @@ import {
 } from './services/farmStore';
 import type {
   AdConfig,
+  AdminsConfig,
   AdNetworkId,
   BannedUserRecord,
   ChannelsConfig,
@@ -230,12 +242,14 @@ export default function App() {
   const [seasonConfig, setSeasonConfig] = useState<SeasonConfig>(() => createDefaultSeasonConfig());
   const [recentPlayers, setRecentPlayers] = useState<UserFarmProfile[]>([]);
   const [bannedUsers, setBannedUsers] = useState<BannedUserRecord[]>([]);
+  const [adminsConfig, setAdminsConfig] = useState<AdminsConfig>(DEFAULT_ADMINS_CONFIG);
   const [banRecord, setBanRecord] = useState<BannedUserRecord | null>(() =>
     loadCachedBanRecord(activePlayerId),
   );
   const [banIdCopied, setBanIdCopied] = useState(false);
 
-  const isBanned = Boolean(banRecord) && !isAdminPlayerId(profile.uid);
+  const extraAdminIds = useMemo(() => getEffectiveAdminIds(adminsConfig), [adminsConfig]);
+  const isBanned = Boolean(banRecord) && !isAdminPlayerId(profile.uid, extraAdminIds);
   const isBannedRef = useRef(isBanned);
   isBannedRef.current = isBanned;
 
@@ -785,6 +799,9 @@ export default function App() {
     const unsubSeason = subscribeToSeasonConfig((cfg) => {
       setSeasonConfig(cfg);
     });
+    const unsubAdmins = subscribeToAdminsConfig((cfg) => {
+      setAdminsConfig(cfg);
+    });
     return () => {
       unsubLb();
       unsubTasks();
@@ -792,6 +809,7 @@ export default function App() {
       unsubChannels();
       unsubPromos();
       unsubSeason();
+      unsubAdmins();
     };
   }, []);
 
@@ -808,7 +826,7 @@ export default function App() {
     const unsubWdReqs = subscribeToAllWithdrawRequests((items) => {
       setAllWithdrawRequests(items);
     });
-    if (!isAdminPlayerId(profile.uid)) {
+    if (!isAdminPlayerId(profile.uid, extraAdminIds)) {
       return () => unsubWdReqs();
     }
     const unsubRecentPlayers = subscribeToRecentPlayers((players) => {
@@ -822,7 +840,7 @@ export default function App() {
       unsubRecentPlayers();
       unsubBannedUsers();
     };
-  }, [profile.uid, subView]);
+  }, [extraAdminIds, profile.uid, subView]);
 
   // Ensure active player exists in Firestore and subscribe live to all subcollections
   useEffect(() => {
@@ -1536,6 +1554,7 @@ export default function App() {
       handle: input.handle,
       reason: input.reason,
       bannedBy: profile.uid,
+      extraAdminIds,
     });
     const label = record.displayName || getPrimaryDepositMemo(record.uid) || record.uid;
     showToast(`Blocked player ${label}!`);
@@ -1545,6 +1564,136 @@ export default function App() {
     await unbanPlayerInFirestore(targetId);
     const label = getPrimaryDepositMemo(targetId) || targetId;
     showToast(`Unblocked player ${label}!`);
+  };
+
+  const handleSearchUsers = async (query: string): Promise<UserFarmProfile[]> => {
+    return searchUsersInFirestore(query, recentPlayers);
+  };
+
+  const handleFetchPlayerReferrals = async (playerUid: string): Promise<ReferralRecord[]> => {
+    return fetchPlayerReferralsFromFirestore(playerUid);
+  };
+
+  const handleAdjustCoins = async (input: {
+    targetUid: string;
+    deltaCoins: number;
+    note?: string;
+  }): Promise<UserFarmProfile> => {
+    const res = await adjustPlayerCoinsInFirestore({
+      adminUid: profile.uid,
+      targetUid: input.targetUid,
+      deltaCoins: input.deltaCoins,
+      note: input.note,
+      extraAdminIds,
+    });
+    setRecentPlayers((prev) =>
+      prev.map((p) => (p.uid === res.profile.uid ? res.profile : p)),
+    );
+    const label = res.profile.displayName || getPrimaryDepositMemo(res.profile.uid);
+    showToast(
+      res.actualDelta >= 0
+        ? `Added +${res.actualDelta.toLocaleString()} coins to ${label}!`
+        : `Removed ${Math.abs(res.actualDelta).toLocaleString()} coins from ${label}!`,
+    );
+    return res.profile;
+  };
+
+  const handleAdjustReferralCount = async (input: {
+    targetUid: string;
+    deltaRefers: number;
+  }): Promise<UserFarmProfile> => {
+    const res = await adjustPlayerReferralCountInFirestore({
+      adminUid: profile.uid,
+      targetUid: input.targetUid,
+      deltaRefers: input.deltaRefers,
+      extraAdminIds,
+    });
+    setRecentPlayers((prev) =>
+      prev.map((p) => (p.uid === res.profile.uid ? res.profile : p)),
+    );
+    const label = res.profile.displayName || getPrimaryDepositMemo(res.profile.uid);
+    showToast(
+      res.actualDelta >= 0
+        ? `Added +${res.actualDelta} refers to ${label}!`
+        : `Removed ${Math.abs(res.actualDelta)} refers from ${label}!`,
+    );
+    return res.profile;
+  };
+
+  const handleAddReferralRelation = async (input: {
+    referrerIdOrCode: string;
+    referredIdOrCode: string;
+    bonusCoins?: number;
+  }) => {
+    const res = await adminAddReferralRelationInFirestore({
+      adminUid: profile.uid,
+      referrerIdOrCode: input.referrerIdOrCode,
+      referredIdOrCode: input.referredIdOrCode,
+      bonusCoins: input.bonusCoins,
+      extraAdminIds,
+    });
+    setRecentPlayers((prev) =>
+      prev.map((p) => {
+        if (p.uid === res.referrerProfile.uid) return res.referrerProfile;
+        if (p.uid === res.referredProfile.uid) return res.referredProfile;
+        return p;
+      }),
+    );
+    showToast(
+      `Linked ${res.referredProfile.displayName} under ${res.referrerProfile.displayName}!`,
+    );
+    return res;
+  };
+
+  const handleRemoveReferralRelation = async (input: {
+    referrerUid: string;
+    referredUid: string;
+  }) => {
+    const res = await adminRemoveReferralRelationInFirestore({
+      adminUid: profile.uid,
+      referrerUid: input.referrerUid,
+      referredUid: input.referredUid,
+      extraAdminIds,
+    });
+    setRecentPlayers((prev) =>
+      prev.map((p) => {
+        if (res.referrerProfile && p.uid === res.referrerProfile.uid) {
+          return res.referrerProfile;
+        }
+        if (res.referredProfile && p.uid === res.referredProfile.uid) {
+          return res.referredProfile;
+        }
+        return p;
+      }),
+    );
+    showToast('Removed referral link & updated counts!');
+    return res;
+  };
+
+  const handleAddAdmin = async (input: {
+    targetId: string;
+    displayName?: string;
+    handle?: string;
+  }) => {
+    const nextConfig = await addAdminInFirestore({
+      actorUid: profile.uid,
+      targetId: input.targetId,
+      displayName: input.displayName,
+      handle: input.handle,
+    });
+    setAdminsConfig(nextConfig);
+    const label = getPrimaryDepositMemo(input.targetId) || input.targetId;
+    showToast(`Added Co-Admin ${label}!`);
+  };
+
+  const handleRemoveAdmin = async (targetId: string) => {
+    const nextConfig = await removeAdminInFirestore({
+      actorUid: profile.uid,
+      targetId,
+    });
+    setAdminsConfig(nextConfig);
+    const label = getPrimaryDepositMemo(targetId) || targetId;
+    showToast(`Removed Co-Admin ${label}!`);
   };
 
   const handleClaimDaily = () => {
@@ -1881,6 +2030,7 @@ export default function App() {
           key={profile.uid}
           profile={profile}
           isTelegramDetected={detectedIdentity.isTelegramDetected}
+          extraAdminIds={extraAdminIds}
           onBack={() => setSubView('none')}
           onBuyChickens={() => {
             setSubView('none');
@@ -1906,6 +2056,7 @@ export default function App() {
           leaderboardEntries={cloudLeaderboard}
           recentPlayers={recentPlayers}
           bannedUsers={bannedUsers}
+          adminsConfig={adminsConfig}
           onTabTap={() => playTabTapSound(soundsEnabled)}
           onBack={() => setSubView('none')}
           onReviewWithdrawal={handleReviewWithdrawal}
@@ -1921,6 +2072,14 @@ export default function App() {
           onDistributeSeasonPrizes={handleDistributeSeasonPrizes}
           onBanPlayer={handleBanPlayer}
           onUnbanPlayer={handleUnbanPlayer}
+          onSearchUsers={handleSearchUsers}
+          onFetchPlayerReferrals={handleFetchPlayerReferrals}
+          onAdjustCoins={handleAdjustCoins}
+          onAdjustReferralCount={handleAdjustReferralCount}
+          onAddReferralRelation={handleAddReferralRelation}
+          onRemoveReferralRelation={handleRemoveReferralRelation}
+          onAddAdmin={handleAddAdmin}
+          onRemoveAdmin={handleRemoveAdmin}
         />
       );
     }

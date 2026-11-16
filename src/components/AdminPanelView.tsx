@@ -8,7 +8,9 @@ import {
   CheckCircle2,
   ClipboardCheck,
   Clock,
+  Coins,
   Copy,
+  Crown,
   Dices,
   ExternalLink,
   Flame,
@@ -18,6 +20,7 @@ import {
   Link2,
   ListPlus,
   Megaphone,
+  Minus,
   PauseCircle,
   PlayCircle,
   Plus,
@@ -27,25 +30,32 @@ import {
   Share2,
   ShieldAlert,
   ShieldCheck,
+  ShieldMinus,
+  ShieldPlus,
   Sparkles,
   Ticket,
   Trash2,
   Trophy,
+  Unlink,
   UserCheck,
+  UserPlus,
   Users,
   UserX,
   Wallet,
+  X,
   XCircle,
 } from 'lucide-react';
 import type {
   AdConfig,
   AdProviderType,
+  AdminsConfig,
   BannedUserRecord,
   ChannelsConfig,
   ChickenBreedId,
   DynamicPromoCode,
   LeaderboardEntry,
   PromoRewardType,
+  ReferralRecord,
   RequiredTelegramChannel,
   SeasonConfig,
   TaskDefinition,
@@ -54,15 +64,20 @@ import type {
 } from '../types/farm';
 import {
   calculateTotalChickens,
+  canAddAdminPlayerId,
   canBanPlayerId,
   CHICKEN_PACKS,
   extractTelegramNumericUserId,
+  filterPlayersBySearchQuery,
   formatAdConfigTemplate,
   formatPromoRewardSummary,
   generateGiftCodeString,
+  getEffectiveAdminIds,
   getWithdrawalStatusMeta,
   isAdminPlayerId,
+  matchesAdminRecord,
   matchesBannedUserRecord,
+  normalizePlayerBanId,
   normalizeTelegramChannelEntry,
   parseAdConfigTemplate,
   PRIMARY_ADMIN_TELEGRAM_ID,
@@ -80,6 +95,7 @@ interface AdminPanelViewProps {
   leaderboardEntries: LeaderboardEntry[];
   recentPlayers: UserFarmProfile[];
   bannedUsers: BannedUserRecord[];
+  adminsConfig: AdminsConfig;
   onBack: () => void;
   onTabTap?: () => void;
   onReviewWithdrawal: (
@@ -122,6 +138,39 @@ interface AdminPanelViewProps {
     reason?: string;
   }) => Promise<void>;
   onUnbanPlayer: (targetId: string) => Promise<void>;
+  onSearchUsers: (query: string) => Promise<UserFarmProfile[]>;
+  onFetchPlayerReferrals: (playerUid: string) => Promise<ReferralRecord[]>;
+  onAdjustCoins: (input: {
+    targetUid: string;
+    deltaCoins: number;
+    note?: string;
+  }) => Promise<UserFarmProfile>;
+  onAdjustReferralCount: (input: {
+    targetUid: string;
+    deltaRefers: number;
+  }) => Promise<UserFarmProfile>;
+  onAddReferralRelation: (input: {
+    referrerIdOrCode: string;
+    referredIdOrCode: string;
+    bonusCoins?: number;
+  }) => Promise<{
+    referrerProfile: UserFarmProfile;
+    referredProfile: UserFarmProfile;
+    referralRecord: ReferralRecord;
+  }>;
+  onRemoveReferralRelation: (input: {
+    referrerUid: string;
+    referredUid: string;
+  }) => Promise<{
+    referrerProfile?: UserFarmProfile;
+    referredProfile?: UserFarmProfile;
+  }>;
+  onAddAdmin: (input: {
+    targetId: string;
+    displayName?: string;
+    handle?: string;
+  }) => Promise<void>;
+  onRemoveAdmin: (targetId: string) => Promise<void>;
 }
 
 const AD_PROVIDER_CARDS: Array<{
@@ -209,6 +258,7 @@ export function AdminPanelView({
   leaderboardEntries,
   recentPlayers,
   bannedUsers,
+  adminsConfig,
   onBack,
   onTabTap,
   onReviewWithdrawal,
@@ -224,11 +274,23 @@ export function AdminPanelView({
   onDistributeSeasonPrizes,
   onBanPlayer,
   onUnbanPlayer,
+  onSearchUsers,
+  onFetchPlayerReferrals,
+  onAdjustCoins,
+  onAdjustReferralCount,
+  onAddReferralRelation,
+  onRemoveReferralRelation,
+  onAddAdmin,
+  onRemoveAdmin,
 }: AdminPanelViewProps) {
-  const isAuthorizedAdmin = isAdminPlayerId(playerId);
+  const extraAdminIds = useMemo(
+    () => getEffectiveAdminIds(adminsConfig),
+    [adminsConfig],
+  );
+  const isAuthorizedAdmin = isAdminPlayerId(playerId, extraAdminIds);
 
   const [tab, setTab] = useState<
-    'withdrawals' | 'users' | 'channels' | 'promos' | 'tasks' | 'ads' | 'ad_ids' | 'season'
+    'withdrawals' | 'users' | 'admins' | 'channels' | 'promos' | 'tasks' | 'ads' | 'ad_ids' | 'season'
   >('withdrawals');
   const [wdFilter, setWdFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
   const [wdSearch, setWdSearch] = useState('');
@@ -236,13 +298,50 @@ export function AdminPanelView({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
-  // User Management state
+  // User Management & Inspector state
   const [userSearch, setUserSearch] = useState('');
   const [userFilter, setUserFilter] = useState<'recent' | 'active' | 'banned'>('recent');
+  const [searchingUsers, setSearchingUsers] = useState(false);
+  const [cloudSearchResults, setCloudSearchResults] = useState<UserFarmProfile[] | null>(null);
+  const [selectedPlayer, setSelectedPlayer] = useState<UserFarmProfile | null>(null);
+  const [selectedPlayerReferrals, setSelectedPlayerReferrals] = useState<ReferralRecord[]>([]);
+  const [loadingSelectedRefs, setLoadingSelectedRefs] = useState(false);
+  const [coinAmountInput, setCoinAmountInput] = useState('1000');
+  const [coinNoteInput, setCoinNoteInput] = useState('');
+  const [referCountInput, setReferCountInput] = useState('1');
+  const [linkFriendIdInput, setLinkFriendIdInput] = useState('');
+  const [linkBonusCoinsInput, setLinkBonusCoinsInput] = useState('150');
+  const [userActionBusy, setUserActionBusy] = useState<string | null>(null);
+  const [userActionFeedback, setUserActionFeedback] = useState<{
+    type: 'ok' | 'error';
+    text: string;
+  } | null>(null);
+
+  // Quick Standalone Referral Linker state
+  const [quickReferrerInput, setQuickReferrerInput] = useState('');
+  const [quickReferredInput, setQuickReferredInput] = useState('');
+  const [quickReferBonusInput, setQuickReferBonusInput] = useState('150');
+  const [quickReferBusy, setQuickReferBusy] = useState(false);
+  const [quickReferFeedback, setQuickReferFeedback] = useState<{
+    type: 'ok' | 'error';
+    text: string;
+  } | null>(null);
+
+  // Ban User state
   const [banTargetIdInput, setBanTargetIdInput] = useState('');
   const [banReasonInput, setBanReasonInput] = useState('');
   const [banFormError, setBanFormError] = useState<string | null>(null);
   const [banningId, setBanningId] = useState<string | null>(null);
+
+  // Admin Roles state
+  const [adminIdInput, setAdminIdInput] = useState('');
+  const [adminNameInput, setAdminNameInput] = useState('');
+  const [adminFormBusy, setAdminFormBusy] = useState(false);
+  const [removingAdminId, setRemovingAdminId] = useState<string | null>(null);
+  const [adminFormFeedback, setAdminFormFeedback] = useState<{
+    type: 'ok' | 'error';
+    text: string;
+  } | null>(null);
 
   // Check Channels management draft state
   const [channelsEnabledDraft, setChannelsEnabledDraft] = useState<boolean>(channelsConfig.enabled);
@@ -623,6 +722,22 @@ export function AdminPanelView({
     }
   };
 
+  const mergedPlayersDirectory = useMemo(() => {
+    const byUid = new Map<string, UserFarmProfile>();
+    for (const p of recentPlayers) {
+      byUid.set(p.uid, p);
+    }
+    for (const p of cloudSearchResults ?? []) {
+      byUid.set(p.uid, p);
+    }
+    if (selectedPlayer) {
+      byUid.set(selectedPlayer.uid, selectedPlayer);
+    }
+    return Array.from(byUid.values()).sort(
+      (a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0),
+    );
+  }, [cloudSearchResults, recentPlayers, selectedPlayer]);
+
   const sortedRecentPlayers = useMemo(
     () =>
       [...recentPlayers].sort(
@@ -631,25 +746,28 @@ export function AdminPanelView({
     [recentPlayers],
   );
 
+  // Keep selectedPlayer fresh when recentPlayers updates live
+  useEffect(() => {
+    if (!selectedPlayer) return;
+    const updated = recentPlayers.find((p) => p.uid === selectedPlayer.uid);
+    if (updated) {
+      setSelectedPlayer(updated);
+    }
+  }, [recentPlayers, selectedPlayer]);
+
   const findBanForPlayer = (uid: string): BannedUserRecord | undefined =>
     bannedUsers.find((b) => matchesBannedUserRecord(uid, b));
 
   const visibleRecentPlayers = useMemo(() => {
-    const q = userSearch.trim().toLowerCase();
-    return sortedRecentPlayers.filter((p) => {
+    const source = cloudSearchResults !== null ? mergedPlayersDirectory : sortedRecentPlayers;
+    const filteredBySearch = filterPlayersBySearchQuery(source, userSearch);
+    return filteredBySearch.filter((p) => {
       const ban = findBanForPlayer(p.uid);
       if (userFilter === 'active' && ban) return false;
       if (userFilter === 'banned' && !ban) return false;
-      if (!q) return true;
-      const numericId = extractTelegramNumericUserId(p.uid) || '';
-      return (
-        p.uid.toLowerCase().includes(q) ||
-        numericId.toLowerCase().includes(q) ||
-        p.displayName.toLowerCase().includes(q) ||
-        p.handle.toLowerCase().includes(q)
-      );
+      return true;
     });
-  }, [bannedUsers, sortedRecentPlayers, userFilter, userSearch]);
+  }, [bannedUsers, cloudSearchResults, mergedPlayersDirectory, sortedRecentPlayers, userFilter, userSearch]);
 
   const visibleBannedRecords = useMemo(() => {
     const q = userSearch.trim().toLowerCase();
@@ -666,16 +784,326 @@ export function AdminPanelView({
     });
   }, [bannedUsers, userSearch]);
 
+  const syncUpdatedPlayerIntoState = (updated: UserFarmProfile | undefined) => {
+    if (!updated) return;
+    setSelectedPlayer((prev) => (prev && prev.uid === updated.uid ? updated : prev));
+    setCloudSearchResults((prev) =>
+      prev ? prev.map((p) => (p.uid === updated.uid ? updated : p)) : prev,
+    );
+  };
+
+  const handleSelectPlayer = async (player: UserFarmProfile) => {
+    onTabTap?.();
+    setSelectedPlayer(player);
+    setUserActionFeedback(null);
+    setLoadingSelectedRefs(true);
+    try {
+      const refs = await onFetchPlayerReferrals(player.uid);
+      setSelectedPlayerReferrals(refs);
+    } catch {
+      setSelectedPlayerReferrals([]);
+    } finally {
+      setLoadingSelectedRefs(false);
+    }
+  };
+
+  const handleSearchUsersSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    const queryText = userSearch.trim();
+    if (!queryText) {
+      setCloudSearchResults(null);
+      return;
+    }
+    setSearchingUsers(true);
+    setUserActionFeedback(null);
+    try {
+      onTabTap?.();
+      const results = await onSearchUsers(queryText);
+      setCloudSearchResults(results);
+      if (results.length === 1) {
+        await handleSelectPlayer(results[0]);
+      } else if (results.length === 0) {
+        setUserActionFeedback({
+          type: 'error',
+          text: `No user found matching "${queryText}".`,
+        });
+      }
+    } catch (err) {
+      setUserActionFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to search users.',
+      });
+    } finally {
+      setSearchingUsers(false);
+    }
+  };
+
+  const handleAdjustCoinsClick = async (direction: 1 | -1) => {
+    if (!selectedPlayer) return;
+    const raw = Math.trunc(Number(coinAmountInput));
+    if (!Number.isFinite(raw) || raw <= 0) {
+      setUserActionFeedback({ type: 'error', text: 'Enter a coin amount greater than 0.' });
+      return;
+    }
+    setUserActionBusy(direction > 0 ? 'add_coins' : 'remove_coins');
+    setUserActionFeedback(null);
+    try {
+      onTabTap?.();
+      const updated = await onAdjustCoins({
+        targetUid: selectedPlayer.uid,
+        deltaCoins: direction * raw,
+        note: coinNoteInput.trim() || undefined,
+      });
+      syncUpdatedPlayerIntoState(updated);
+      setSelectedPlayer(updated);
+      setCoinNoteInput('');
+      setUserActionFeedback({
+        type: 'ok',
+        text:
+          direction > 0
+            ? `Added +${raw.toLocaleString()} coins! New balance: ${Math.floor(updated.coins).toLocaleString()} coins.`
+            : `Removed coins! New balance: ${Math.floor(updated.coins).toLocaleString()} coins.`,
+      });
+    } catch (err) {
+      setUserActionFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to update coins.',
+      });
+    } finally {
+      setUserActionBusy(null);
+    }
+  };
+
+  const handleAdjustReferCountClick = async (direction: 1 | -1) => {
+    if (!selectedPlayer) return;
+    const raw = Math.trunc(Number(referCountInput));
+    if (!Number.isFinite(raw) || raw <= 0) {
+      setUserActionFeedback({ type: 'error', text: 'Enter a referral count greater than 0.' });
+      return;
+    }
+    setUserActionBusy(direction > 0 ? 'add_refers' : 'remove_refers');
+    setUserActionFeedback(null);
+    try {
+      onTabTap?.();
+      const updated = await onAdjustReferralCount({
+        targetUid: selectedPlayer.uid,
+        deltaRefers: direction * raw,
+      });
+      syncUpdatedPlayerIntoState(updated);
+      setSelectedPlayer(updated);
+      setUserActionFeedback({
+        type: 'ok',
+        text:
+          direction > 0
+            ? `Added +${raw} referral(s)! Total refers: ${updated.referralCount}.`
+            : `Removed referral(s)! Total refers: ${updated.referralCount}.`,
+      });
+    } catch (err) {
+      setUserActionFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to update referrals.',
+      });
+    } finally {
+      setUserActionBusy(null);
+    }
+  };
+
+  const handleLinkFriendUnderSelected = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedPlayer || !linkFriendIdInput.trim()) return;
+    setUserActionBusy('link_friend');
+    setUserActionFeedback(null);
+    try {
+      onTabTap?.();
+      const bonus = Math.max(0, Math.trunc(Number(linkBonusCoinsInput) || 0));
+      const res = await onAddReferralRelation({
+        referrerIdOrCode: selectedPlayer.uid,
+        referredIdOrCode: linkFriendIdInput.trim(),
+        bonusCoins: bonus,
+      });
+      syncUpdatedPlayerIntoState(res.referrerProfile);
+      syncUpdatedPlayerIntoState(res.referredProfile);
+      setSelectedPlayer(res.referrerProfile);
+      setSelectedPlayerReferrals((prev) => [
+        res.referralRecord,
+        ...prev.filter((r) => r.referredUid !== res.referralRecord.referredUid),
+      ]);
+      setLinkFriendIdInput('');
+      setUserActionFeedback({
+        type: 'ok',
+        text: `Linked ${res.referredProfile.displayName} as active referral (+${bonus} coins)!`,
+      });
+    } catch (err) {
+      setUserActionFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to link referral.',
+      });
+    } finally {
+      setUserActionBusy(null);
+    }
+  };
+
+  const handleRemoveReferralRow = async (referrerUid: string, referredUid: string) => {
+    setUserActionBusy(`rm_ref_${referredUid}`);
+    setUserActionFeedback(null);
+    try {
+      onTabTap?.();
+      const res = await onRemoveReferralRelation({ referrerUid, referredUid });
+      syncUpdatedPlayerIntoState(res.referrerProfile);
+      syncUpdatedPlayerIntoState(res.referredProfile);
+      if (selectedPlayer?.uid === referrerUid && res.referrerProfile) {
+        setSelectedPlayer(res.referrerProfile);
+      } else if (selectedPlayer?.uid === referredUid && res.referredProfile) {
+        setSelectedPlayer(res.referredProfile);
+      }
+      setSelectedPlayerReferrals((prev) => prev.filter((r) => r.referredUid !== referredUid));
+      setUserActionFeedback({
+        type: 'ok',
+        text: 'Referral removed cleanly.',
+      });
+    } catch (err) {
+      setUserActionFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to remove referral.',
+      });
+    } finally {
+      setUserActionBusy(null);
+    }
+  };
+
+  const handleQuickReferSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!quickReferrerInput.trim() || !quickReferredInput.trim()) return;
+    setQuickReferBusy(true);
+    setQuickReferFeedback(null);
+    try {
+      onTabTap?.();
+      const bonus = Math.max(0, Math.trunc(Number(quickReferBonusInput) || 0));
+      const res = await onAddReferralRelation({
+        referrerIdOrCode: quickReferrerInput.trim(),
+        referredIdOrCode: quickReferredInput.trim(),
+        bonusCoins: bonus,
+      });
+      syncUpdatedPlayerIntoState(res.referrerProfile);
+      syncUpdatedPlayerIntoState(res.referredProfile);
+      if (selectedPlayer?.uid === res.referrerProfile.uid) {
+        setSelectedPlayer(res.referrerProfile);
+        setSelectedPlayerReferrals((prev) => [
+          res.referralRecord,
+          ...prev.filter((r) => r.referredUid !== res.referralRecord.referredUid),
+        ]);
+      }
+      setQuickReferrerInput('');
+      setQuickReferredInput('');
+      setQuickReferFeedback({
+        type: 'ok',
+        text: `Linked ${res.referredProfile.displayName} → Referrer ${res.referrerProfile.displayName} (+${bonus} coins).`,
+      });
+    } catch (err) {
+      setQuickReferFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to link referral.',
+      });
+    } finally {
+      setQuickReferBusy(false);
+    }
+  };
+
+  const handleAddAdminSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAdminFormFeedback(null);
+    const check = canAddAdminPlayerId(adminIdInput, adminsConfig);
+    if (!check.ok) {
+      setAdminFormFeedback({ type: 'error', text: check.error });
+      return;
+    }
+    setAdminFormBusy(true);
+    try {
+      onTabTap?.();
+      await onAddAdmin({
+        targetId: check.canonicalId,
+        displayName: adminNameInput.trim() || undefined,
+      });
+      setAdminIdInput('');
+      setAdminNameInput('');
+      setAdminFormFeedback({
+        type: 'ok',
+        text: `Admin access granted to ${check.canonicalId}!`,
+      });
+    } catch (err) {
+      setAdminFormFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to add Admin.',
+      });
+    } finally {
+      setAdminFormBusy(false);
+    }
+  };
+
+  const handleToggleAdminForPlayer = async (player: UserFarmProfile) => {
+    if (isAdminPlayerId(player.uid)) return;
+    const isCoAdmin = isAdminPlayerId(player.uid, extraAdminIds);
+    setUserActionBusy('toggle_admin');
+    setUserActionFeedback(null);
+    try {
+      onTabTap?.();
+      if (isCoAdmin) {
+        await onRemoveAdmin(player.uid);
+        setUserActionFeedback({
+          type: 'ok',
+          text: `Removed Admin role from ${player.displayName}.`,
+        });
+      } else {
+        await onAddAdmin({
+          targetId: player.uid,
+          displayName: player.displayName,
+          handle: player.handle,
+        });
+        setUserActionFeedback({
+          type: 'ok',
+          text: `Granted Admin access to ${player.displayName}!`,
+        });
+      }
+    } catch (err) {
+      setUserActionFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to update Admin role.',
+      });
+    } finally {
+      setUserActionBusy(null);
+    }
+  };
+
+  const handleRemoveAdminRow = async (targetId: string) => {
+    setAdminFormFeedback(null);
+    setRemovingAdminId(targetId);
+    try {
+      onTabTap?.();
+      await onRemoveAdmin(targetId);
+      setAdminFormFeedback({
+        type: 'ok',
+        text: `Removed Admin access for ${extractTelegramNumericUserId(targetId) || targetId}.`,
+      });
+    } catch (err) {
+      setAdminFormFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to remove Admin.',
+      });
+    } finally {
+      setRemovingAdminId(null);
+    }
+  };
+
   const handleManualBanSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBanFormError(null);
-    const check = canBanPlayerId(banTargetIdInput);
+    const check = canBanPlayerId(banTargetIdInput, extraAdminIds);
     if (!check.ok) {
       setBanFormError(check.error);
       return;
     }
 
-    const matchedProfile = sortedRecentPlayers.find(
+    const matchedProfile = mergedPlayersDirectory.find(
       (p) =>
         p.uid === check.canonicalId ||
         matchesBannedUserRecord(p.uid, { uid: check.canonicalId }),
@@ -700,7 +1128,7 @@ export function AdminPanelView({
 
   const handleBanPlayerRow = async (player: UserFarmProfile) => {
     setBanFormError(null);
-    const check = canBanPlayerId(player.uid);
+    const check = canBanPlayerId(player.uid, extraAdminIds);
     if (!check.ok) {
       setBanFormError(check.error);
       return;
@@ -828,15 +1256,17 @@ export function AdminPanelView({
             <ArrowLeft className="w-4 h-4" />
           </button>
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2">
               <h1 className="text-lg font-extrabold tracking-tight truncate">Admin Console</h1>
               <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-500/20 border border-emerald-400/30 px-2 py-0.5 text-[10px] font-extrabold text-emerald-200 shrink-0">
                 <ShieldCheck className="w-3 h-3" />
-                <span>ID {PRIMARY_ADMIN_TELEGRAM_ID}</span>
+                <span>
+                  ID {isAdminPlayerId(playerId) ? PRIMARY_ADMIN_TELEGRAM_ID : extractTelegramNumericUserId(playerId) || playerId}
+                </span>
               </span>
             </div>
             <p className="text-[11px] text-stone-300 truncate">
-              Payouts, User Management, Check Channels, Gift Codes, Tasks &amp; Ads
+              Users, Coins, Refers, Admins, Payouts, Channels, Gift Codes &amp; Ads
             </p>
           </div>
         </div>
@@ -888,19 +1318,19 @@ export function AdminPanelView({
           type="button"
           onClick={() => {
             onTabTap?.();
-            setTab('promos');
+            setTab('admins');
           }}
           className="clay-card clay-hover-lift !rounded-2xl p-3.5 text-left cursor-pointer"
         >
           <div className="flex items-center justify-between text-[11px] font-bold text-stone-500 dark:text-stone-400">
-            <span>Active Gift Codes</span>
-            <Gift className="w-3.5 h-3.5 text-rose-500 dark:text-rose-400" />
+            <span>Admins</span>
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
           </div>
           <div className="mt-1 text-xl font-extrabold text-stone-900 dark:text-stone-100 font-mono-num">
-            {activePromoCount}
+            {1 + adminsConfig.admins.length}
           </div>
           <div className="mt-0.5 text-[11px] text-stone-500 dark:text-stone-400 font-mono-num">
-            of {promoCodes.length} generated
+            {adminsConfig.admins.length} co-admin{adminsConfig.admins.length === 1 ? '' : 's'}
           </div>
         </button>
 
@@ -929,14 +1359,15 @@ export function AdminPanelView({
       <div
         role="tablist"
         aria-label="Admin console sections"
-        className="clay-inset !rounded-2xl grid grid-cols-2 sm:grid-cols-4 gap-1 p-1.5"
+        className="clay-inset !rounded-2xl grid grid-cols-3 gap-1 p-1.5"
       >
         {(
           [
             { id: 'withdrawals', label: 'Payouts', icon: Wallet, count: pendingRequests.length },
-            { id: 'users', label: 'User Management', icon: Users, count: bannedUsers.length },
+            { id: 'users', label: 'User Search', icon: Users, count: bannedUsers.length },
+            { id: 'admins', label: 'Admins', icon: ShieldCheck, count: 1 + adminsConfig.admins.length },
             { id: 'channels', label: 'Channels', icon: Radio, count: activeChannelsCount },
-            { id: 'promos', label: 'Gift Codes', icon: Gift, count: 0 },
+            { id: 'promos', label: 'Gift Codes', icon: Gift, count: activePromoCount },
             { id: 'tasks', label: 'Tasks', icon: ListPlus, count: 0 },
             { id: 'ads', label: 'Ads', icon: Megaphone, count: 0 },
             { id: 'ad_ids', label: 'Block IDs', icon: KeyRound, count: savedAdIdsCount },
@@ -970,7 +1401,7 @@ export function AdminPanelView({
                       ? 'bg-amber-950/20 text-amber-950'
                       : item.id === 'channels'
                         ? 'bg-sky-500 text-white'
-                        : item.id === 'ad_ids'
+                        : item.id === 'ad_ids' || item.id === 'admins'
                           ? 'bg-emerald-600 text-white'
                           : 'bg-rose-500 text-white'
                   }`}
@@ -984,10 +1415,521 @@ export function AdminPanelView({
       </div>
 
       {/* ========================================================================
-          USER MANAGEMENT TAB
+          USER SEARCH, COINS, REFERS & MODERATION TAB
          ======================================================================== */}
       {tab === 'users' && (
         <div key="admin-tab-users" className="animate-clay-enter space-y-4">
+          {/* Live Cloud User Search Bar */}
+          <form onSubmit={(e) => void handleSearchUsersSubmit(e)} className="clay-card p-4 space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+                  <Search className="w-4 h-4 text-amber-500" />
+                  <span>User Search &amp; Controls</span>
+                </h2>
+                <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
+                  Search any user by Telegram ID, UID, Name, @handle or CL-Code — then Add/Remove Coins, Refers, or Admin.
+                </p>
+              </div>
+              {cloudSearchResults !== null && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onTabTap?.();
+                    setUserSearch('');
+                    setCloudSearchResults(null);
+                    setUserActionFeedback(null);
+                  }}
+                  className="clay-btn clay-btn-neutral px-2.5 py-1 rounded-xl text-[11px] font-extrabold shrink-0"
+                >
+                  Reset Search
+                </button>
+              )}
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2">
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 text-stone-400 dark:text-stone-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={userSearch}
+                  onChange={(e) => setUserSearch(e.target.value)}
+                  placeholder="Enter ID (e.g. 7508911853), player_..., @handle, name, or CL-..."
+                  aria-label="Search user in Firestore"
+                  className="clay-inset w-full min-h-[42px] pl-9 pr-3 text-xs font-semibold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={searchingUsers}
+                className="clay-btn clay-btn-amber min-h-[42px] px-4 rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 shrink-0 disabled:opacity-50"
+              >
+                <Search className="w-3.5 h-3.5" />
+                <span>{searchingUsers ? 'Searching...' : 'Search User'}</span>
+              </button>
+            </div>
+          </form>
+
+          {/* Selected Player Control Panel */}
+          {selectedPlayer && (() => {
+            const numericId = extractTelegramNumericUserId(selectedPlayer.uid);
+            const ban = findBanForPlayer(selectedPlayer.uid);
+            const isOwnerAdmin = isAdminPlayerId(selectedPlayer.uid);
+            const isCoAdmin = !isOwnerAdmin && isAdminPlayerId(selectedPlayer.uid, extraAdminIds);
+            const totalHens = calculateTotalChickens(selectedPlayer);
+
+            return (
+              <div className="clay-card overflow-hidden border-2 border-amber-400/50 dark:border-amber-500/40">
+                <div className="bg-stone-900 dark:bg-stone-950 px-4 py-3 text-white flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    {selectedPlayer.photoUrl ? (
+                      <img
+                        src={selectedPlayer.photoUrl}
+                        alt={selectedPlayer.displayName}
+                        className="w-10 h-10 rounded-2xl object-cover shrink-0 border border-white/20"
+                      />
+                    ) : (
+                      <div
+                        className="w-10 h-10 rounded-2xl text-white font-extrabold text-sm flex items-center justify-center shrink-0"
+                        style={{ backgroundColor: selectedPlayer.avatarColor || '#F59E0B' }}
+                      >
+                        {(selectedPlayer.displayName || 'F').slice(0, 1).toUpperCase()}
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-sm font-extrabold truncate">
+                          {selectedPlayer.displayName}
+                        </span>
+                        <span className="text-xs text-stone-300 truncate">
+                          {selectedPlayer.handle}
+                        </span>
+                        {isOwnerAdmin ? (
+                          <span className="px-1.5 py-0.5 rounded-md bg-emerald-500/20 border border-emerald-400/40 text-[10px] font-extrabold text-emerald-200">
+                            Owner Admin
+                          </span>
+                        ) : isCoAdmin ? (
+                          <span className="px-1.5 py-0.5 rounded-md bg-sky-500/20 border border-sky-400/40 text-[10px] font-extrabold text-sky-200">
+                            Co-Admin
+                          </span>
+                        ) : ban ? (
+                          <span className="px-1.5 py-0.5 rounded-md bg-rose-500/20 border border-rose-400/40 text-[10px] font-extrabold text-rose-200">
+                            Blocked
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap text-[11px] font-mono-num text-stone-300 mt-0.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void handleCopy(`sel_id_${selectedPlayer.uid}`, numericId || selectedPlayer.uid)
+                          }
+                          className="inline-flex items-center gap-1 hover:underline cursor-pointer"
+                        >
+                          <span>ID: {numericId || selectedPlayer.uid}</span>
+                          {copiedKey === `sel_id_${selectedPlayer.uid}` ? (
+                            <Check className="w-3 h-3 text-emerald-400" />
+                          ) : (
+                            <Copy className="w-3 h-3 opacity-75" />
+                          )}
+                        </button>
+                        <span>· Code: {selectedPlayer.referralCode}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label="Close user inspector"
+                    onClick={() => setSelectedPlayer(null)}
+                    className="w-8 h-8 rounded-xl bg-white/10 hover:bg-white/20 flex items-center justify-center shrink-0 cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="p-4 space-y-4">
+                  {/* Player KPI Strip */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <div className="clay-inset !rounded-xl p-2.5">
+                      <div className="text-[10px] font-bold text-stone-500 dark:text-stone-400 uppercase">Coins</div>
+                      <div className="text-sm font-extrabold font-mono-num text-amber-700 dark:text-amber-300 flex items-center gap-1 mt-0.5">
+                        <CoinIcon className="w-3.5 h-3.5" />
+                        <span>{Math.floor(selectedPlayer.coins).toLocaleString()}</span>
+                      </div>
+                    </div>
+                    <div className="clay-inset !rounded-xl p-2.5">
+                      <div className="text-[10px] font-bold text-stone-500 dark:text-stone-400 uppercase">Eggs</div>
+                      <div className="text-sm font-extrabold font-mono-num text-stone-900 dark:text-stone-100 flex items-center gap-1 mt-0.5">
+                        <EggIcon className="w-3.5 h-3.5" />
+                        <span>{Math.floor(selectedPlayer.eggs).toLocaleString()}</span>
+                      </div>
+                    </div>
+                    <div className="clay-inset !rounded-xl p-2.5">
+                      <div className="text-[10px] font-bold text-stone-500 dark:text-stone-400 uppercase">Chickens</div>
+                      <div className="text-sm font-extrabold font-mono-num text-stone-900 dark:text-stone-100 mt-0.5">
+                        {totalHens}
+                      </div>
+                    </div>
+                    <div className="clay-inset !rounded-xl p-2.5">
+                      <div className="text-[10px] font-bold text-stone-500 dark:text-stone-400 uppercase">Refers</div>
+                      <div className="text-sm font-extrabold font-mono-num text-emerald-700 dark:text-emerald-300 mt-0.5">
+                        {selectedPlayer.referralCount}
+                      </div>
+                    </div>
+                  </div>
+
+                  {userActionFeedback && (
+                    <div
+                      role="status"
+                      className={`rounded-xl border px-3 py-2 text-xs font-bold ${
+                        userActionFeedback.type === 'ok'
+                          ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                          : 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-800/70 text-rose-700 dark:text-rose-300'
+                      }`}
+                    >
+                      {userActionFeedback.text}
+                    </div>
+                  )}
+
+                  {/* Add / Remove Coins */}
+                  <div className="clay-inset !rounded-2xl p-3.5 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="text-xs font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-1.5">
+                        <Coins className="w-3.5 h-3.5 text-amber-500" />
+                        <span>Add / Remove Coins</span>
+                      </h3>
+                      <div className="flex items-center gap-1 flex-wrap">
+                        {[500, 1000, 5000, 10000].map((preset) => (
+                          <button
+                            key={preset}
+                            type="button"
+                            onClick={() => setCoinAmountInput(String(preset))}
+                            className={`px-2 py-0.5 rounded-lg text-[10px] font-mono-num font-extrabold cursor-pointer transition-colors ${
+                              coinAmountInput === String(preset)
+                                ? 'bg-amber-500 text-amber-950'
+                                : 'bg-stone-200/80 dark:bg-stone-800 text-stone-700 dark:text-stone-300'
+                            }`}
+                          >
+                            {preset.toLocaleString()}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <input
+                        type="number"
+                        min={1}
+                        max={10000000}
+                        value={coinAmountInput}
+                        onChange={(e) => setCoinAmountInput(e.target.value)}
+                        placeholder="Coin amount"
+                        aria-label="Coin adjustment amount"
+                        className="clay-card !rounded-xl min-h-[40px] px-3 text-xs font-mono-num font-extrabold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                      />
+                      <input
+                        type="text"
+                        maxLength={70}
+                        value={coinNoteInput}
+                        onChange={(e) => setCoinNoteInput(e.target.value)}
+                        placeholder="Optional note (e.g. Event prize)"
+                        aria-label="Coin adjustment note"
+                        className="clay-card !rounded-xl min-h-[40px] px-3 text-xs font-medium text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        disabled={userActionBusy !== null}
+                        onClick={() => void handleAdjustCoinsClick(1)}
+                        className="clay-btn clay-btn-emerald min-h-[40px] rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>
+                          {userActionBusy === 'add_coins' ? 'Adding...' : 'Add Coins'}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={userActionBusy !== null}
+                        onClick={() => void handleAdjustCoinsClick(-1)}
+                        className="clay-btn min-h-[40px] rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
+                      >
+                        <Minus className="w-3.5 h-3.5" />
+                        <span>
+                          {userActionBusy === 'remove_coins' ? 'Removing...' : 'Remove Coins'}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Add / Remove Refers + Specific Referral Linker */}
+                  <div className="clay-inset !rounded-2xl p-3.5 space-y-3">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <h3 className="text-xs font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-1.5">
+                        <Users className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                        <span>Add / Remove Refers</span>
+                      </h3>
+                      {selectedPlayer.referredBy && (
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[11px] font-mono-num text-stone-600 dark:text-stone-300">
+                            Upline: {extractTelegramNumericUserId(selectedPlayer.referredBy) || selectedPlayer.referredBy}
+                          </span>
+                          <button
+                            type="button"
+                            disabled={userActionBusy !== null}
+                            onClick={() =>
+                              void handleRemoveReferralRow(selectedPlayer.referredBy, selectedPlayer.uid)
+                            }
+                            className="px-2 py-0.5 rounded-lg bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 text-[10px] font-extrabold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                          >
+                            <Unlink className="w-3 h-3" />
+                            <span>Remove Upline</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Refer Count Direct Adjuster */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <input
+                        type="number"
+                        min={1}
+                        max={100000}
+                        value={referCountInput}
+                        onChange={(e) => setReferCountInput(e.target.value)}
+                        placeholder="Refer count"
+                        aria-label="Referral count adjustment"
+                        className="clay-card !rounded-xl min-h-[38px] px-3 text-xs font-mono-num font-extrabold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                      />
+                      <button
+                        type="button"
+                        disabled={userActionBusy !== null}
+                        onClick={() => void handleAdjustReferCountClick(1)}
+                        className="clay-btn clay-btn-sky min-h-[38px] rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>{userActionBusy === 'add_refers' ? 'Adding...' : 'Add Refers'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={userActionBusy !== null}
+                        onClick={() => void handleAdjustReferCountClick(-1)}
+                        className="clay-btn min-h-[38px] rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-extrabold inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
+                      >
+                        <Minus className="w-3.5 h-3.5" />
+                        <span>{userActionBusy === 'remove_refers' ? 'Removing...' : 'Remove Refers'}</span>
+                      </button>
+                    </div>
+
+                    {/* Link a specific Friend ID under this User */}
+                    <form
+                      onSubmit={(e) => void handleLinkFriendUnderSelected(e)}
+                      className="pt-2 border-t border-stone-200/70 dark:border-stone-700/60 space-y-2"
+                    >
+                      <div className="text-[11px] font-bold text-stone-600 dark:text-stone-300">
+                        Add &amp; Link a User as Referred by {selectedPlayer.displayName}:
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <input
+                          type="text"
+                          value={linkFriendIdInput}
+                          onChange={(e) => setLinkFriendIdInput(e.target.value)}
+                          placeholder="Friend ID or CL-Code"
+                          aria-label="Friend player ID to refer"
+                          className="clay-card !rounded-xl min-h-[38px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                        />
+                        <input
+                          type="number"
+                          min={0}
+                          max={100000}
+                          value={linkBonusCoinsInput}
+                          onChange={(e) => setLinkBonusCoinsInput(e.target.value)}
+                          placeholder="Bonus coins (150)"
+                          aria-label="Refer bonus coins"
+                          className="clay-card !rounded-xl min-h-[38px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                        />
+                        <button
+                          type="submit"
+                          disabled={!linkFriendIdInput.trim() || userActionBusy !== null}
+                          className="clay-btn clay-btn-emerald min-h-[38px] rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
+                        >
+                          <UserPlus className="w-3.5 h-3.5" />
+                          <span>{userActionBusy === 'link_friend' ? 'Linking...' : 'Link Refer'}</span>
+                        </button>
+                      </div>
+                    </form>
+
+                    {/* Invited Referrals List for Selected User */}
+                    <div className="pt-2 border-t border-stone-200/70 dark:border-stone-700/60 space-y-1.5">
+                      <div className="flex items-center justify-between text-[11px] font-bold text-stone-500 dark:text-stone-400">
+                        <span>Invited Referrals ({selectedPlayerReferrals.length})</span>
+                        {loadingSelectedRefs && <span>Loading...</span>}
+                      </div>
+                      {!loadingSelectedRefs && selectedPlayerReferrals.length === 0 ? (
+                        <div className="text-[11px] text-stone-400 dark:text-stone-500">
+                          No referral records found under this account.
+                        </div>
+                      ) : (
+                        <div className="space-y-1.5 max-h-48 overflow-y-auto pr-0.5">
+                          {selectedPlayerReferrals.map((ref) => (
+                            <div
+                              key={ref.referredUid}
+                              className="clay-card !rounded-xl px-2.5 py-2 flex items-center justify-between gap-2 text-xs"
+                            >
+                              <div className="min-w-0">
+                                <div className="font-extrabold text-stone-900 dark:text-stone-100 truncate">
+                                  {ref.referredName} <span className="font-semibold text-stone-500">{ref.referredHandle}</span>
+                                </div>
+                                <div className="text-[10px] font-mono-num text-stone-500 dark:text-stone-400">
+                                  ID: {extractTelegramNumericUserId(ref.referredUid) || ref.referredUid} · {ref.status} · +{ref.coinsEarned}c
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                disabled={userActionBusy !== null}
+                                onClick={() =>
+                                  void handleRemoveReferralRow(selectedPlayer.uid, ref.referredUid)
+                                }
+                                className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-extrabold inline-flex items-center gap-1 shrink-0 cursor-pointer disabled:opacity-50"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                                <span>Remove</span>
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Quick Admin Role & Ban Footer */}
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    {isOwnerAdmin ? (
+                      <span className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800/70 px-3 py-2 text-xs font-extrabold text-emerald-700 dark:text-emerald-300">
+                        <Crown className="w-3.5 h-3.5" />
+                        <span>Protected Owner Admin</span>
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={userActionBusy !== null}
+                        onClick={() => void handleToggleAdminForPlayer(selectedPlayer)}
+                        className={`clay-btn min-h-[40px] px-3.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 disabled:opacity-50 ${
+                          isCoAdmin ? 'bg-amber-600 hover:bg-amber-700 text-white' : 'clay-btn-sky'
+                        }`}
+                      >
+                        {isCoAdmin ? <ShieldMinus className="w-3.5 h-3.5" /> : <ShieldPlus className="w-3.5 h-3.5" />}
+                        <span>
+                          {userActionBusy === 'toggle_admin'
+                            ? 'Updating...'
+                            : isCoAdmin
+                              ? 'Remove Admin'
+                              : 'Make Admin'}
+                        </span>
+                      </button>
+                    )}
+
+                    {!isOwnerAdmin && !isCoAdmin && (
+                      ban ? (
+                        <button
+                          type="button"
+                          disabled={banningId === ban.uid}
+                          onClick={() => void handleUnbanRow(ban.uid)}
+                          className="clay-btn clay-btn-emerald min-h-[40px] px-3.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 disabled:opacity-50"
+                        >
+                          <UserCheck className="w-3.5 h-3.5" />
+                          <span>{banningId === ban.uid ? 'Unblocking...' : 'Unblock User'}</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={banningId === selectedPlayer.uid}
+                          onClick={() => void handleBanPlayerRow(selectedPlayer)}
+                          className="clay-btn min-h-[40px] px-3.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold inline-flex items-center gap-1.5 disabled:opacity-50"
+                        >
+                          <Ban className="w-3.5 h-3.5" />
+                          <span>{banningId === selectedPlayer.uid ? 'Blocking...' : 'Block / Ban User'}</span>
+                        </button>
+                      )
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Standalone Quick Referral Linker ("Or Refer") */}
+          <form onSubmit={(e) => void handleQuickReferSubmit(e)} className="clay-card p-4 space-y-3">
+            <div>
+              <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+                <Share2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                <span>Quick Link Referral (Refer Any User)</span>
+              </h2>
+              <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
+                Manually assign a Referred Friend to a Referrer by Telegram ID, UID, or CL-Code.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <input
+                type="text"
+                value={quickReferrerInput}
+                onChange={(e) => {
+                  setQuickReferrerInput(e.target.value);
+                  setQuickReferFeedback(null);
+                }}
+                placeholder="Referrer ID / CL-Code"
+                aria-label="Referrer ID or referral code"
+                className="clay-inset min-h-[42px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+              />
+              <input
+                type="text"
+                value={quickReferredInput}
+                onChange={(e) => {
+                  setQuickReferredInput(e.target.value);
+                  setQuickReferFeedback(null);
+                }}
+                placeholder="Referred Friend ID / UID"
+                aria-label="Referred friend ID"
+                className="clay-inset min-h-[42px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+              />
+              <input
+                type="number"
+                min={0}
+                max={100000}
+                value={quickReferBonusInput}
+                onChange={(e) => setQuickReferBonusInput(e.target.value)}
+                placeholder="Bonus coins (150)"
+                aria-label="Quick referral bonus coins"
+                className="clay-inset min-h-[42px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+              />
+            </div>
+
+            {quickReferFeedback && (
+              <div
+                role="status"
+                className={`rounded-xl border px-3 py-2 text-xs font-bold ${
+                  quickReferFeedback.type === 'ok'
+                    ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                    : 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-800/70 text-rose-700 dark:text-rose-300'
+                }`}
+              >
+                {quickReferFeedback.text}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={!quickReferrerInput.trim() || !quickReferredInput.trim() || quickReferBusy}
+              className="clay-btn clay-btn-emerald w-full min-h-[42px] rounded-2xl font-extrabold text-xs inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
+            >
+              <UserPlus className="w-4 h-4" />
+              <span>{quickReferBusy ? 'Linking Referral...' : 'Link & Add Referral'}</span>
+            </button>
+          </form>
+
           {/* Quick Block/Ban by Player ID Form */}
           <form onSubmit={(e) => void handleManualBanSubmit(e)} className="clay-card p-4 space-y-3">
             <div className="flex items-start justify-between gap-2">
@@ -1064,34 +2006,22 @@ export function AdminPanelView({
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <div>
                   <h3 className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
-                    Recent Players ({sortedRecentPlayers.length})
+                    {cloudSearchResults !== null
+                      ? `Search Results (${visibleRecentPlayers.length})`
+                      : `Recent Players (${sortedRecentPlayers.length})`}
                   </h3>
                   <p className="text-[11px] text-stone-500 dark:text-stone-400">
-                    Latest farmers synced in Firestore · Tap Block/Ban to restrict access by ID
+                    Tap Manage to edit Coins, Refers &amp; Admin Role — or Block/Ban directly
                   </p>
-                </div>
-              </div>
-
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div className="relative flex-1">
-                  <Search className="w-4 h-4 text-stone-400 dark:text-stone-500 absolute left-3 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    value={userSearch}
-                    onChange={(e) => setUserSearch(e.target.value)}
-                    placeholder="Search player name, @handle, or ID..."
-                    aria-label="Search recent players"
-                    className="clay-inset w-full min-h-[40px] pl-9 pr-3 text-xs font-semibold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-400"
-                  />
                 </div>
 
                 <div className="clay-inset !rounded-xl flex items-center gap-1 p-1 shrink-0">
                   {(
                     [
-                      { id: 'recent', label: `Recent (${sortedRecentPlayers.length})` },
+                      { id: 'recent', label: `All (${cloudSearchResults !== null ? mergedPlayersDirectory.length : sortedRecentPlayers.length})` },
                       {
                         id: 'active',
-                        label: `Active (${sortedRecentPlayers.filter((p) => !findBanForPlayer(p.uid)).length})`,
+                        label: `Active (${(cloudSearchResults !== null ? mergedPlayersDirectory : sortedRecentPlayers).filter((p) => !findBanForPlayer(p.uid)).length})`,
                       },
                       { id: 'banned', label: `Blocked (${bannedUsers.length})` },
                     ] as const
@@ -1128,7 +2058,7 @@ export function AdminPanelView({
               ) : (
                 <div className="divide-y divide-stone-100 dark:divide-stone-800/80">
                   {visibleBannedRecords.map((ban) => {
-                    const matchedProfile = sortedRecentPlayers.find((p) =>
+                    const matchedProfile = mergedPlayersDirectory.find((p) =>
                       matchesBannedUserRecord(p.uid, ban),
                     );
                     const numericId = extractTelegramNumericUserId(ban.uid);
@@ -1182,15 +2112,26 @@ export function AdminPanelView({
                           </div>
                         </div>
 
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() => void handleUnbanRow(ban.uid)}
-                          className="clay-btn clay-btn-emerald min-h-[38px] px-3.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 shrink-0 disabled:opacity-50"
-                        >
-                          <UserCheck className="w-3.5 h-3.5" />
-                          <span>{isBusy ? 'Unblocking...' : 'Unblock'}</span>
-                        </button>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {matchedProfile && (
+                            <button
+                              type="button"
+                              onClick={() => void handleSelectPlayer(matchedProfile)}
+                              className="clay-btn clay-btn-amber min-h-[38px] px-3 rounded-xl text-xs font-extrabold"
+                            >
+                              Manage
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => void handleUnbanRow(ban.uid)}
+                            className="clay-btn clay-btn-emerald min-h-[38px] px-3.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 disabled:opacity-50"
+                          >
+                            <UserCheck className="w-3.5 h-3.5" />
+                            <span>{isBusy ? 'Unblocking...' : 'Unblock'}</span>
+                          </button>
+                        </div>
                       </div>
                     );
                   })}
@@ -1207,15 +2148,21 @@ export function AdminPanelView({
                 {visibleRecentPlayers.map((player) => {
                   const ban = findBanForPlayer(player.uid);
                   const isOwnerAdmin = isAdminPlayerId(player.uid);
+                  const isCoAdmin = !isOwnerAdmin && isAdminPlayerId(player.uid, extraAdminIds);
                   const numericId = extractTelegramNumericUserId(player.uid);
                   const totalHens = calculateTotalChickens(player);
                   const isBusy = banningId === player.uid;
+                  const isSelected = selectedPlayer?.uid === player.uid;
 
                   return (
                     <div
                       key={player.uid}
                       className={`p-3.5 flex items-center justify-between gap-3 flex-wrap sm:flex-nowrap ${
-                        ban ? 'bg-rose-50/40 dark:bg-rose-950/20' : ''
+                        isSelected
+                          ? 'bg-amber-50/70 dark:bg-amber-950/20'
+                          : ban
+                            ? 'bg-rose-50/40 dark:bg-rose-950/20'
+                            : ''
                       }`}
                     >
                       <div className="flex items-start gap-3 min-w-0 flex-1">
@@ -1246,6 +2193,10 @@ export function AdminPanelView({
                               <span className="px-1.5 py-0.5 rounded-md bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800/70 text-[10px] font-extrabold text-emerald-700 dark:text-emerald-300">
                                 Owner Admin
                               </span>
+                            ) : isCoAdmin ? (
+                              <span className="px-1.5 py-0.5 rounded-md bg-sky-50 dark:bg-sky-950/60 border border-sky-200 dark:border-sky-800/70 text-[10px] font-extrabold text-sky-700 dark:text-sky-300">
+                                Co-Admin
+                              </span>
                             ) : ban ? (
                               <span className="px-1.5 py-0.5 rounded-md bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800/70 text-[10px] font-extrabold text-rose-700 dark:text-rose-300">
                                 Blocked
@@ -1271,13 +2222,9 @@ export function AdminPanelView({
                                 <Copy className="w-3 h-3 opacity-70" />
                               )}
                             </button>
-                            {numericId && <span className="opacity-75">({player.uid})</span>}
                             <span>· {Math.floor(player.coins).toLocaleString()} coins</span>
-                            <span>· {Math.floor(player.eggs).toLocaleString()} eggs</span>
+                            <span>· {player.referralCount} refs</span>
                             <span>· {totalHens} hens</span>
-                            {player.createdAtMs > 0 && (
-                              <span>· Joined {new Date(player.createdAtMs).toLocaleDateString()}</span>
-                            )}
                           </div>
 
                           {ban && (
@@ -1288,18 +2235,29 @@ export function AdminPanelView({
                         </div>
                       </div>
 
-                      <div className="shrink-0">
-                        {isOwnerAdmin ? (
-                          <span className="inline-flex items-center gap-1 rounded-xl bg-stone-100 dark:bg-stone-800 px-3 py-2 text-[11px] font-extrabold text-stone-500 dark:text-stone-400">
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => void handleSelectPlayer(player)}
+                          className={`clay-btn min-h-[38px] px-3 rounded-xl text-xs font-extrabold inline-flex items-center gap-1 ${
+                            isSelected ? 'clay-btn-amber' : 'clay-btn-sky'
+                          }`}
+                        >
+                          <Coins className="w-3.5 h-3.5" />
+                          <span>Manage</span>
+                        </button>
+
+                        {isOwnerAdmin || isCoAdmin ? (
+                          <span className="inline-flex items-center gap-1 rounded-xl bg-stone-100 dark:bg-stone-800 px-2.5 py-2 text-[11px] font-extrabold text-stone-500 dark:text-stone-400">
                             <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                            <span>Protected</span>
+                            <span>Admin</span>
                           </span>
                         ) : ban ? (
                           <button
                             type="button"
                             disabled={isBusy}
                             onClick={() => void handleUnbanRow(ban.uid)}
-                            className="clay-btn clay-btn-emerald min-h-[38px] px-3.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 disabled:opacity-50"
+                            className="clay-btn clay-btn-emerald min-h-[38px] px-3 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 disabled:opacity-50"
                           >
                             <UserCheck className="w-3.5 h-3.5" />
                             <span>{isBusy ? 'Unblocking...' : 'Unblock'}</span>
@@ -1309,10 +2267,10 @@ export function AdminPanelView({
                             type="button"
                             disabled={isBusy}
                             onClick={() => void handleBanPlayerRow(player)}
-                            className="clay-btn min-h-[38px] px-3.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold inline-flex items-center gap-1.5 disabled:opacity-50"
+                            className="clay-btn min-h-[38px] px-3 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold inline-flex items-center gap-1.5 disabled:opacity-50"
                           >
                             <Ban className="w-3.5 h-3.5" />
-                            <span>{isBusy ? 'Blocking...' : 'Block/Ban'}</span>
+                            <span>{isBusy ? 'Blocking...' : 'Block'}</span>
                           </button>
                         )}
                       </div>
@@ -1321,6 +2279,191 @@ export function AdminPanelView({
                 })}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================
+          ADMINS MANAGEMENT TAB (ADD ADMIN / REMOVE ADMIN)
+         ======================================================================== */}
+      {tab === 'admins' && (
+        <div key="admin-tab-admins" className="animate-clay-enter space-y-4">
+          <form onSubmit={(e) => void handleAddAdminSubmit(e)} className="clay-card p-4 space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+                  <ShieldPlus className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                  <span>Add Admin by ID</span>
+                </h2>
+                <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
+                  Grant Admin Console access directly by Telegram numeric ID or player UID without any passcode.
+                </p>
+              </div>
+              <span className="rounded-lg bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800/70 px-2 py-1 text-[10px] font-extrabold font-mono-num text-emerald-700 dark:text-emerald-300 shrink-0">
+                {1 + adminsConfig.admins.length} Admins
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div className="space-y-1">
+                <label htmlFor="admin-add-id" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                  Admin Telegram ID or UID
+                </label>
+                <input
+                  id="admin-add-id"
+                  type="text"
+                  value={adminIdInput}
+                  onChange={(e) => {
+                    setAdminIdInput(e.target.value);
+                    setAdminFormFeedback(null);
+                  }}
+                  placeholder="e.g. 987654321, tg_987654321, or player_..."
+                  className="clay-inset w-full min-h-[42px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label htmlFor="admin-add-name" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                  Admin Label / Name (optional, auto-fills if registered)
+                </label>
+                <input
+                  id="admin-add-name"
+                  type="text"
+                  maxLength={60}
+                  value={adminNameInput}
+                  onChange={(e) => setAdminNameInput(e.target.value)}
+                  placeholder="e.g. Support Moderator"
+                  className="clay-inset w-full min-h-[42px] px-3 text-xs font-medium text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                />
+              </div>
+            </div>
+
+            {adminFormFeedback && (
+              <div
+                role="status"
+                className={`rounded-xl border px-3 py-2 text-xs font-bold ${
+                  adminFormFeedback.type === 'ok'
+                    ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                    : 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-800/70 text-rose-700 dark:text-rose-300'
+                }`}
+              >
+                {adminFormFeedback.text}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={!adminIdInput.trim() || adminFormBusy}
+              className="clay-btn clay-btn-emerald w-full min-h-[42px] rounded-2xl font-extrabold text-xs inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
+            >
+              <ShieldPlus className="w-4 h-4" />
+              <span>{adminFormBusy ? 'Adding Admin...' : 'Add Admin'}</span>
+            </button>
+          </form>
+
+          {/* Authorized Admins List */}
+          <div className="clay-card overflow-hidden">
+            <div className="p-4 border-b border-stone-200/70 dark:border-stone-800">
+              <h3 className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
+                Authorized Admins ({1 + adminsConfig.admins.length})
+              </h3>
+              <p className="text-[11px] text-stone-500 dark:text-stone-400">
+                Owner Admin is permanent; Co-Admins can be added or removed at any time.
+              </p>
+            </div>
+
+            <div className="divide-y divide-stone-100 dark:divide-stone-800/80">
+              {/* Primary Owner Admin */}
+              <div className="p-3.5 flex items-center justify-between gap-3 bg-emerald-50/40 dark:bg-emerald-950/15">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 rounded-2xl bg-emerald-600 text-white font-extrabold text-sm flex items-center justify-center shrink-0">
+                    <Crown className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
+                        Owner Admin
+                      </span>
+                      <span className="px-1.5 py-0.5 rounded-md bg-emerald-100 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800/70 text-[10px] font-extrabold text-emerald-700 dark:text-emerald-300">
+                        Permanent Owner
+                      </span>
+                    </div>
+                    <div className="text-[11px] font-mono-num text-stone-500 dark:text-stone-400 mt-0.5">
+                      ID: {PRIMARY_ADMIN_TELEGRAM_ID} (tg_{PRIMARY_ADMIN_TELEGRAM_ID})
+                    </div>
+                  </div>
+                </div>
+                <span className="inline-flex items-center gap-1 rounded-xl bg-stone-100 dark:bg-stone-800 px-3 py-2 text-[11px] font-extrabold text-stone-500 dark:text-stone-400 shrink-0">
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Protected</span>
+                </span>
+              </div>
+
+              {adminsConfig.admins.length === 0 ? (
+                <div className="p-5 text-center text-xs text-stone-500 dark:text-stone-400">
+                  No additional Co-Admins added yet. Use the form above or Manage any player to add one.
+                </div>
+              ) : (
+                adminsConfig.admins.map((adm) => {
+                  const numericId = extractTelegramNumericUserId(adm.uid);
+                  const isRemoving = removingAdminId === adm.uid;
+                  return (
+                    <div
+                      key={adm.uid}
+                      className="p-3.5 flex items-center justify-between gap-3 flex-wrap sm:flex-nowrap"
+                    >
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                        <div className="w-10 h-10 rounded-2xl bg-sky-100 dark:bg-sky-950/70 border border-sky-200 dark:border-sky-800/70 text-sky-700 dark:text-sky-300 font-extrabold text-sm flex items-center justify-center shrink-0">
+                          <ShieldCheck className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0 flex-1 space-y-0.5">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="text-sm font-extrabold text-stone-900 dark:text-stone-100 truncate">
+                              {adm.displayName || `Admin ${numericId || adm.uid}`}
+                            </span>
+                            {adm.handle && (
+                              <span className="text-xs font-semibold text-stone-500 dark:text-stone-400">
+                                {adm.handle}
+                              </span>
+                            )}
+                            <span className="px-1.5 py-0.5 rounded-md bg-sky-50 dark:bg-sky-950/60 border border-sky-200 dark:border-sky-800/70 text-[10px] font-extrabold text-sky-700 dark:text-sky-300">
+                              Co-Admin
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 flex-wrap text-[11px] font-mono-num text-stone-500 dark:text-stone-400">
+                            <button
+                              type="button"
+                              onClick={() => void handleCopy(`adm_id_${adm.uid}`, numericId || adm.uid)}
+                              className="inline-flex items-center gap-1 rounded-md bg-stone-100 dark:bg-stone-800 px-1.5 py-0.5 font-bold text-stone-700 dark:text-stone-200 hover:underline cursor-pointer"
+                            >
+                              <span>ID: {numericId || adm.uid}</span>
+                              {copiedKey === `adm_id_${adm.uid}` ? (
+                                <Check className="w-3 h-3 text-emerald-600" />
+                              ) : (
+                                <Copy className="w-3 h-3 opacity-70" />
+                              )}
+                            </button>
+                            {adm.addedAtMs > 0 && (
+                              <span>· Added {new Date(adm.addedAtMs).toLocaleDateString()}</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={isRemoving}
+                        onClick={() => void handleRemoveAdminRow(adm.uid)}
+                        className="clay-btn min-h-[38px] px-3.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold inline-flex items-center gap-1.5 shrink-0 disabled:opacity-50"
+                      >
+                        <ShieldMinus className="w-3.5 h-3.5" />
+                        <span>{isRemoving ? 'Removing...' : 'Remove Admin'}</span>
+                      </button>
+                    </div>
+                  );
+                })
+              )}
+            </div>
           </div>
         </div>
       )}

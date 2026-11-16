@@ -18,7 +18,9 @@ import {
   calculateProductionRate,
   calculateReferralBonusEggs,
   calculateReferralEggCommission,
+  canAddAdminPlayerId,
   canBanPlayerId,
+  canRemoveAdminPlayerId,
   claimAchievement,
   claimAdNetworkReward,
   claimDailyStreak,
@@ -27,6 +29,8 @@ import {
   claimReferralMilestone,
   collectEggs,
   completeTask,
+  computeAdminCoinAdjustment,
+  computeAdminReferralCountAdjustment,
   createDefaultProfile,
   createDefaultSeasonConfig,
   createDepositQuote,
@@ -46,6 +50,7 @@ import {
   extractTelegramNumericUserId,
   FEED_BOOSTER_COST_COINS,
   FEED_BOOSTER_DURATION_MS,
+  filterPlayersBySearchQuery,
   filterWithdrawalsByTab,
   formatAdConfigTemplate,
   formatChannelsHandleSummary,
@@ -56,6 +61,7 @@ import {
   getActiveRequiredChannels,
   getAdNetworkClaimCountToday,
   getChickenMilestoneReached,
+  getEffectiveAdminIds,
   getTaskRemainingSlots,
   getTotalAdsWatched,
   getWithdrawalStatusMeta,
@@ -68,6 +74,7 @@ import {
   isFeedBoosterActive,
   isGoldenEggReady,
   isTelegramMemberStatusJoined,
+  matchesAdminRecord,
   matchesBannedUserRecord,
   MAX_DEPOSIT_COINS,
   mergeTaskDefinitions,
@@ -2483,5 +2490,100 @@ test('detectTelegramBotConfig auto-detects bot username & mini app short name ac
     hash: '#tgWebAppStartParam=player_xyz987',
   });
   assert.equal(startAppFromHash.startParam, 'player_xyz987');
+});
+
+test('admin role helpers manage Co-Admins, protect Owner Admin ID, and match IDs across formats', () => {
+  const adminsConfig = {
+    adminIds: ['tg_555000111', '555000111'],
+    admins: [
+      {
+        uid: 'tg_555000111',
+        displayName: 'CoAdmin Alpha',
+        handle: '@coadmin',
+        addedBy: 'tg_7508911853',
+        addedAtMs: 1_700_000_000_000,
+      },
+    ],
+    updatedAtMs: 1_700_000_000_000,
+  };
+
+  const extraIds = getEffectiveAdminIds(adminsConfig);
+  assert.ok(extraIds.includes('tg_555000111'));
+  assert.ok(extraIds.includes('555000111'));
+  assert.equal(isAdminPlayerId('555000111', extraIds), true);
+  assert.equal(isAdminPlayerId('tg_555000111', extraIds), true);
+  assert.equal(isAdminPlayerId('tg_999888777', extraIds), false);
+  assert.equal(matchesAdminRecord('555000111', adminsConfig.admins[0]), true);
+
+  // Co-Admins cannot be banned once in extraAdminIds
+  assert.equal(canBanPlayerId('555000111', extraIds).ok, false);
+
+  // Duplicate or Owner Admin cannot be added as Co-Admin
+  assert.equal(canAddAdminPlayerId('7508911853', adminsConfig).ok, false);
+  assert.equal(canAddAdminPlayerId('555000111', adminsConfig).ok, false);
+  assert.deepEqual(canAddAdminPlayerId('666777888', adminsConfig), {
+    ok: true,
+    canonicalId: 'tg_666777888',
+  });
+
+  // Owner Admin cannot be removed; Co-Admin can be removed
+  assert.equal(canRemoveAdminPlayerId('tg_7508911853').ok, false);
+  assert.deepEqual(canRemoveAdminPlayerId('555000111'), {
+    ok: true,
+    canonicalId: 'tg_555000111',
+  });
+});
+
+test('filterPlayersBySearchQuery, computeAdminCoinAdjustment, and computeAdminReferralCountAdjustment behave accurately', () => {
+  const p1 = createDefaultProfile('tg_123456789', 'Rohan Sharma', '@rohan_s', 1000).profile;
+  const p2 = createDefaultProfile('player_guest_42', 'Priya Verma', '@priya_v', 2000).profile;
+  p2.referredBy = 'tg_123456789';
+
+  assert.equal(filterPlayersBySearchQuery([p1, p2], '').length, 2);
+  assert.deepEqual(
+    filterPlayersBySearchQuery([p1, p2], '123456789').map((p) => p.uid),
+    ['tg_123456789', 'player_guest_42'],
+  );
+  assert.deepEqual(
+    filterPlayersBySearchQuery([p1, p2], '@priya_v').map((p) => p.uid),
+    ['player_guest_42'],
+  );
+  assert.deepEqual(
+    filterPlayersBySearchQuery([p1, p2], p1.referralCode).map((p) => p.uid),
+    ['tg_123456789'],
+  );
+
+  // Coin adjustments clamp cleanly at 0 and validate inputs
+  assert.deepEqual(computeAdminCoinAdjustment(1000, 500), {
+    ok: true,
+    previousCoins: 1000,
+    nextCoins: 1500,
+    actualDelta: 500,
+  });
+  assert.deepEqual(computeAdminCoinAdjustment(300, -1000), {
+    ok: true,
+    previousCoins: 300,
+    nextCoins: 0,
+    actualDelta: -300,
+  });
+  assert.equal(computeAdminCoinAdjustment(0, -100).ok, false);
+  assert.equal(computeAdminCoinAdjustment(500, 0).ok, false);
+  assert.equal(computeAdminCoinAdjustment(500, 20_000_000).ok, false);
+
+  // Referral count adjustments clamp cleanly at 0 and validate inputs
+  assert.deepEqual(computeAdminReferralCountAdjustment(2, 3), {
+    ok: true,
+    previousCount: 2,
+    nextCount: 5,
+    actualDelta: 3,
+  });
+  assert.deepEqual(computeAdminReferralCountAdjustment(2, -10), {
+    ok: true,
+    previousCount: 2,
+    nextCount: 0,
+    actualDelta: -2,
+  });
+  assert.equal(computeAdminReferralCountAdjustment(0, -1).ok, false);
+  assert.equal(computeAdminReferralCountAdjustment(5, 0).ok, false);
 });
 

@@ -67,7 +67,7 @@
       "type": "object",
       "properties": {
         "userId": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "type": { "type": "string", "enum": ["collect", "task", "deposit", "withdraw", "reinvest", "buy_chicken", "upgrade_basket", "promo", "referral", "booster", "golden_egg", "achievement", "season_prize"] },
+        "type": { "type": "string", "enum": ["collect", "task", "deposit", "withdraw", "reinvest", "buy_chicken", "upgrade_basket", "promo", "referral", "booster", "golden_egg", "achievement", "season_prize", "admin_adjustment"] },
         "title": { "type": "string", "minLength": 1, "maxLength": 80 },
         "amount": { "type": "number" },
         "currency": { "type": "string", "enum": ["eggs", "coins"] },
@@ -304,6 +304,18 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "displayName", "handle", "reason", "bannedBy", "bannedAtMs", "createdAt"]
+    },
+    "AdminsConfig": {
+      "title": "AdminsConfig",
+      "description": "Admin-managed registry of extra Co-Admin IDs granted Admin Panel access alongside the Owner Admin ID.",
+      "type": "object",
+      "properties": {
+        "adminIds": { "type": "array" },
+        "admins": { "type": "array" },
+        "updatedAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["adminIds", "admins", "updatedAtMs", "updatedAt"]
     }
   },
   "firestore": {

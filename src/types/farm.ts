@@ -28,7 +28,8 @@ export type TransactionType =
   | 'booster'
   | 'golden_egg'
   | 'achievement'
-  | 'season_prize';
+  | 'season_prize'
+  | 'admin_adjustment';
 
 export interface ChickenPack {
   id: ChickenBreedId;
@@ -309,4 +310,18 @@ export interface BannedUserRecord {
   reason: string;
   bannedBy: string;
   bannedAtMs: number;
+}
+
+export interface AdminRoleEntry {
+  uid: string;
+  displayName: string;
+  handle: string;
+  addedBy: string;
+  addedAtMs: number;
+}
+
+export interface AdminsConfig {
+  adminIds: string[];
+  admins: AdminRoleEntry[];
+  updatedAtMs: number;
 }

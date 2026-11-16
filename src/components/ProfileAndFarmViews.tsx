@@ -50,6 +50,7 @@ import { PWAInstallButton } from './PWAControls';
 interface ProfileViewProps {
   profile: UserFarmProfile;
   isTelegramDetected?: boolean;
+  extraAdminIds?: readonly string[];
   onBack: () => void;
   onBuyChickens: () => void;
   onOpenSettings: () => void;
@@ -60,6 +61,7 @@ interface ProfileViewProps {
 export function ProfileView({
   profile,
   isTelegramDetected = false,
+  extraAdminIds = [],
   onBack,
   onBuyChickens,
   onOpenSettings,
@@ -330,7 +332,7 @@ export function ProfileView({
           <span className="text-xs text-stone-400 dark:text-stone-500">24/7 Farm Guide</span>
         </div>
 
-        {isAdminPlayerId(profile.uid) && (
+        {isAdminPlayerId(profile.uid, extraAdminIds) && (
           <button
             type="button"
             onClick={onOpenAdmin}
@@ -343,7 +345,7 @@ export function ProfileView({
               <span className="text-sm font-bold text-stone-900 dark:text-stone-100">Admin Panel</span>
             </div>
             <span className="text-xs font-extrabold text-emerald-700 dark:text-emerald-400 font-mono-num">
-              ID {PRIMARY_ADMIN_TELEGRAM_ID}
+              ID {isAdminPlayerId(profile.uid) ? PRIMARY_ADMIN_TELEGRAM_ID : displayUserId}
             </span>
           </button>
         )}

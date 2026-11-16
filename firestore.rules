@@ -18,7 +18,12 @@ service cloud.firestore {
     }
 
     function isAdminActorId(id) {
-      return id in ['tg_7508911853', '7508911853'];
+      return id in ['tg_7508911853', '7508911853']
+        || (
+          exists(/databases/$(database)/documents/app_config/admins)
+          && get(/databases/$(database)/documents/app_config/admins).data.adminIds is list
+          && id in get(/databases/$(database)/documents/app_config/admins).data.adminIds
+        );
     }
 
     function isBoundedStringList(arr, maxLen) {
@@ -111,7 +116,7 @@ service cloud.firestore {
         ])
         && isValidId(data.userId)
         && data.userId == playerId
-        && data.type in ['collect', 'task', 'deposit', 'withdraw', 'reinvest', 'buy_chicken', 'upgrade_basket', 'promo', 'referral', 'booster', 'golden_egg', 'achievement', 'season_prize']
+        && data.type in ['collect', 'task', 'deposit', 'withdraw', 'reinvest', 'buy_chicken', 'upgrade_basket', 'promo', 'referral', 'booster', 'golden_egg', 'achievement', 'season_prize', 'admin_adjustment']
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 80
         && data.amount is number
         && data.currency in ['eggs', 'coins']
@@ -341,6 +346,26 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidAdminsConfig(data) {
+      return data.keys().hasAll(['adminIds', 'admins', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['adminIds', 'admins', 'updatedAtMs', 'updatedAt'])
+        && isBoundedStringList(data.adminIds, 30)
+        && data.admins is list
+        && data.admins.size() <= 30
+        && (data.admins.size() == 0 || (
+          data.admins[0] is map
+          && data.admins[0].keys().hasAll(['uid', 'displayName', 'handle', 'addedBy', 'addedAtMs'])
+          && data.admins[0].keys().hasOnly(['uid', 'displayName', 'handle', 'addedBy', 'addedAtMs'])
+          && isValidId(data.admins[0].uid)
+          && data.admins[0].displayName is string && data.admins[0].displayName.size() <= 60
+          && data.admins[0].handle is string && data.admins[0].handle.size() <= 40
+          && isValidId(data.admins[0].addedBy)
+          && data.admins[0].addedAtMs is number && data.admins[0].addedAtMs >= 0
+        ))
+        && data.updatedAtMs is number && data.updatedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
     function isValidReferral(data, playerId, referredUid) {
       return data.keys().hasAll([
           'referrerUid', 'referredUid', 'referredName', 'referredHandle',
@@ -514,7 +539,7 @@ service cloud.firestore {
             // Action: Deposit 5% referral commission
             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'coinsEarned', 'toppedUpUsd'])
           );
-        allow delete: if false;
+        allow delete: if isValidId(playerId) && isValidId(referredUid);
       }
     }
 
@@ -629,6 +654,9 @@ service cloud.firestore {
           && incoming().updatedAt == request.time)
         || (configId == 'channels'
           && isValidChannelsConfig(incoming())
+          && incoming().updatedAt == request.time)
+        || (configId == 'admins'
+          && isValidAdminsConfig(incoming())
           && incoming().updatedAt == request.time)
       );
       allow delete: if false;
