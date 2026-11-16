@@ -155,8 +155,8 @@ export function ChannelCheckCard({
                   <div className="text-xs font-extrabold text-stone-900 dark:text-stone-100 truncate">
                     {ch.handle}
                   </div>
-                  <div className="text-[11px] text-stone-500 dark:text-stone-400 truncate">
-                    {ch.error ? ch.error : ch.title}
+                  <div className="text-[11px] text-stone-500 dark:text-stone-400 break-words">
+                    {ch.error && ch.status !== 'no_telegram_user' ? ch.error : ch.title}
                   </div>
                 </div>
               </div>
@@ -188,11 +188,6 @@ export function ChannelCheckCard({
         })}
       </div>
 
-      {verification && mode === 'guest_browser' && (
-        <div className="rounded-xl bg-sky-50/90 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800/60 px-3 py-2 text-[11px] font-semibold text-sky-800 dark:text-sky-300">
-          Open inside the Telegram Mini App so the bot can verify your live membership in {summaryHandles}.
-        </div>
-      )}
 
       {verification && mode === 'bot_unconfigured' && (
         <div className="rounded-xl bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 px-3 py-2 text-[11px] font-semibold text-amber-800 dark:text-amber-300">
@@ -235,6 +230,7 @@ interface ChannelCheckModalProps {
   requiredChannels?: RequiredTelegramChannel[];
   verification?: ChannelVerificationResult | null;
   checking?: boolean;
+  pendingPromoCode?: string | null;
   onCheckChannels: () => void;
   onClose: () => void;
 }
@@ -243,6 +239,7 @@ export function ChannelCheckModal({
   requiredChannels,
   verification,
   checking = false,
+  pendingPromoCode = null,
   onCheckChannels,
   onClose,
 }: ChannelCheckModalProps) {
@@ -252,7 +249,7 @@ export function ChannelCheckModal({
       : buildFallbackItems(requiredChannels);
   const isStrictTelegram = verification?.verificationMode === 'telegram_bot';
   const allJoined = Boolean(verification?.allJoined);
-  const canDismissFreely = !isStrictTelegram || allJoined;
+  const canDismissFreely = !isStrictTelegram || allJoined || Boolean(pendingPromoCode);
 
   return (
     <div
@@ -269,10 +266,12 @@ export function ChannelCheckModal({
             </div>
             <div>
               <h2 id="channel-gate-title" className="text-base font-extrabold text-stone-900 dark:text-stone-100">
-                Join Official Channels
+                {pendingPromoCode ? 'Join Channels to Unlock Gift' : 'Join Official Channels'}
               </h2>
               <p className="text-xs text-stone-500 dark:text-stone-400">
-                Subscribe to required channels to unlock full rewards &amp; payouts
+                {pendingPromoCode
+                  ? `Join all required channels below, then tap Check Channels to claim ${pendingPromoCode}.`
+                  : 'Subscribe to required channels to unlock full rewards & payouts'}
               </p>
             </div>
           </div>
@@ -307,8 +306,8 @@ export function ChannelCheckModal({
                     <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100 truncate">
                       {ch.handle}
                     </div>
-                    <div className="text-xs text-stone-500 dark:text-stone-400 truncate">
-                      {ch.error ? ch.error : ch.description}
+                    <div className="text-xs text-stone-500 dark:text-stone-400 break-words">
+                      {ch.error && ch.status !== 'no_telegram_user' ? ch.error : ch.description}
                     </div>
                   </div>
                 </div>
@@ -317,7 +316,7 @@ export function ChannelCheckModal({
                   <span className="rounded-lg bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800/70 px-2.5 py-1 text-xs font-extrabold text-emerald-700 dark:text-emerald-300 shrink-0">
                     Joined
                   </span>
-                ) : (
+                ) : ch.url ? (
                   <button
                     type="button"
                     onClick={() => openChannelLink(ch.url)}
@@ -326,11 +325,17 @@ export function ChannelCheckModal({
                     <span>Join</span>
                     <ExternalLink className="w-3.5 h-3.5" />
                   </button>
-                )}
+                ) : null}
               </div>
             );
           })}
         </div>
+
+        {verification?.verificationMode === 'bot_unconfigured' && (
+          <div className="rounded-xl bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 px-3 py-2 text-[11px] font-semibold text-amber-800 dark:text-amber-300">
+            Bot verification requires TELEGRAM_BOT_TOKEN on the server and adding the bot as an Admin in each channel.
+          </div>
+        )}
 
         <div className="space-y-2">
           <button
@@ -365,7 +370,7 @@ export function ChannelCheckModal({
               onClick={onClose}
               className="clay-btn clay-btn-neutral w-full min-h-[40px] rounded-xl text-xs font-bold text-stone-600 dark:text-stone-300"
             >
-              {allJoined ? 'Close' : 'Continue for now'}
+              {allJoined ? 'Close' : pendingPromoCode ? 'Cancel' : 'Continue for now'}
             </button>
           )}
         </div>

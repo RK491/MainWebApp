@@ -5,6 +5,7 @@ import {
   AD_EXEMPT_ACTIONS,
   AD_GATED_ACTIONS,
   AD_NETWORK_TASKS,
+  ADMIN_PASSCODE_VAULT_UID,
   ADSGRAM_BOT_JOIN_TASK,
   buildDeterministicDepositIds,
   buildEarningsChartSeries,
@@ -2525,7 +2526,7 @@ test('detectTelegramBotConfig auto-detects bot username & mini app short name ac
 
 test('admin role helpers manage Co-Admins, protect Owner Admin ID, and match IDs across formats', () => {
   const adminsConfig = {
-    adminIds: ['tg_555000111', '555000111'],
+    adminIds: ['tg_555000111', '555000111', ADMIN_PASSCODE_VAULT_UID],
     admins: [
       {
         uid: 'tg_555000111',
@@ -2534,6 +2535,13 @@ test('admin role helpers manage Co-Admins, protect Owner Admin ID, and match IDs
         addedBy: 'tg_7508911853',
         addedAtMs: 1_700_000_000_000,
       },
+      {
+        uid: ADMIN_PASSCODE_VAULT_UID,
+        displayName: 's1$digestplaceholder',
+        handle: 'salt$saltplaceholder',
+        addedBy: 'tg_7508911853',
+        addedAtMs: 1_700_000_000_001,
+      },
     ],
     updatedAtMs: 1_700_000_000_000,
   };
@@ -2541,6 +2549,9 @@ test('admin role helpers manage Co-Admins, protect Owner Admin ID, and match IDs
   const extraIds = getEffectiveAdminIds(adminsConfig);
   assert.ok(extraIds.includes('tg_555000111'));
   assert.ok(extraIds.includes('555000111'));
+  assert.ok(!extraIds.includes(ADMIN_PASSCODE_VAULT_UID));
+  assert.equal(isAdminPlayerId(ADMIN_PASSCODE_VAULT_UID, extraIds), false);
+  assert.equal(matchesAdminRecord(ADMIN_PASSCODE_VAULT_UID, adminsConfig.admins[1]), false);
   assert.equal(isAdminPlayerId('555000111', extraIds), true);
   assert.equal(isAdminPlayerId('tg_555000111', extraIds), true);
   assert.equal(isAdminPlayerId('tg_999888777', extraIds), false);
@@ -2761,5 +2772,25 @@ test('AdsGram Bot Joins & Clicks enforces 5/day limit, prunes stale tokens, and 
   assert.ok(formatted.includes('ADSGRAM_TASK_BLOCK_ID=task-7788'));
 });
 
-
-
+test('normalizeTelegramChannelHandle parses telegram.me URLs, private t.me/c links, and invite links safely', () => {
+  assert.deepEqual(normalizeTelegramChannelHandle('https://telegram.me/my_public_ch'), {
+    handle: '@my_public_ch',
+    url: 'https://t.me/my_public_ch',
+  });
+  assert.deepEqual(normalizeTelegramChannelHandle('https://t.me/c/1234567890/5'), {
+    handle: '-1001234567890',
+    url: '',
+  });
+  assert.deepEqual(normalizeTelegramChannelHandle('https://t.me/+AbCdEf_123'), {
+    handle: '',
+    url: 'https://t.me/+AbCdEf_123',
+  });
+  assert.deepEqual(normalizeTelegramChannelHandle('https://t.me/joinchat/XYZ789'), {
+    handle: '',
+    url: 'https://t.me/joinchat/XYZ789',
+  });
+  assert.deepEqual(normalizeTelegramChannelHandle('-1009876543210'), {
+    handle: '-1009876543210',
+    url: '',
+  });
+});

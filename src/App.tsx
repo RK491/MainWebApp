@@ -245,6 +245,12 @@ export default function App() {
   const [bannedUsers, setBannedUsers] = useState<BannedUserRecord[]>([]);
   const [adminsConfig, setAdminsConfig] = useState<AdminsConfig>(DEFAULT_ADMINS_CONFIG);
   const [adminUnlocked, setAdminUnlocked] = useState(false);
+  const [adminSessionToken, setAdminSessionToken] = useState<string>('');
+  const [adminPasscodeSource, setAdminPasscodeSource] = useState<
+    'database' | 'server_file' | 'env' | 'default'
+  >('default');
+  const [adminPasscodeUpdatedAtMs, setAdminPasscodeUpdatedAtMs] = useState<number>(0);
+  const [serverBotConfigured, setServerBotConfigured] = useState<boolean | undefined>(undefined);
   const [banRecord, setBanRecord] = useState<BannedUserRecord | null>(() =>
     loadCachedBanRecord(activePlayerId),
   );
@@ -331,20 +337,13 @@ export default function App() {
   });
   const [checkingChannels, setCheckingChannels] = useState(false);
   const [showChannelGateModal, setShowChannelGateModal] = useState(false);
-  const [preSplashChannelPassed, setPreSplashChannelPassed] = useState(false);
-  const autoCheckedChannelsRef = useRef<string | null>(null);
+  const [pendingPromoClaimCode, setPendingPromoClaimCode] = useState<string | null>(null);
+  const pendingPromoClaimCodeRef = useRef<string | null>(null);
 
   const skipWelcome = useMemo(() => {
     if (typeof window === 'undefined') return false;
     return new URLSearchParams(window.location.search).get('autostart') === '1';
   }, []);
-  const needsPreSplashChannelGate =
-    !skipWelcome &&
-    !isBanned &&
-    subView !== 'admin' &&
-    channelsGateEnabled &&
-    !preSplashChannelPassed &&
-    !channelVerification?.allJoined;
 
   const [showSplash, setShowSplash] = useState(() => !skipWelcome);
   const handleSplashComplete = useCallback(() => {
@@ -496,122 +495,6 @@ export default function App() {
       body: JSON.stringify({ initData }),
     });
   }, []);
-
-  const handleCheckChannels = useCallback(
-    async (opts?: { silent?: boolean }): Promise<ChannelVerificationResult | null> => {
-      if (!channelsGateEnabled) {
-        const disabledResult: ChannelVerificationResult = {
-          ok: true,
-          allJoined: true,
-          verificationMode: 'disabled',
-          telegramUserId: null,
-          channels: [],
-          checkedAtMs: Date.now(),
-        };
-        setChannelVerification(disabledResult);
-        setShowChannelGateModal(false);
-        setPreSplashChannelPassed(true);
-        return disabledResult;
-      }
-
-      setCheckingChannels(true);
-      try {
-        const data = await safeFetchJson<ChannelVerificationResult>('/api/telegram/check-channels', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            playerId: latestProfileRef.current.uid,
-            initData: getTelegramInitData(),
-            requiredChannels: activeRequiredChannels,
-          }),
-        });
-        if (!data) {
-          if (!opts?.silent) {
-            showToast('Could not verify channels right now. Please retry.');
-          }
-          return null;
-        }
-        setChannelVerification(data);
-
-        if (data.verificationMode === 'disabled') {
-          setShowChannelGateModal(false);
-          setPreSplashChannelPassed(true);
-          return data;
-        }
-
-        if (data.verificationMode === 'telegram_bot') {
-          if (data.allJoined) {
-            try {
-              localStorage.setItem(
-                `chickenland_channels_verified_v1_${latestProfileRef.current.uid}`,
-                JSON.stringify(data),
-              );
-            } catch {
-              // ignore storage errors
-            }
-            setShowChannelGateModal(false);
-            setPreSplashChannelPassed(true);
-            if (!opts?.silent) {
-              playClaimSound(soundsEnabled);
-              triggerHapticFeedback('success');
-              showToast(`Verified! Joined ${formatChannelsHandleSummary(activeRequiredChannels)}.`);
-            }
-          } else {
-            try {
-              localStorage.removeItem(
-                `chickenland_channels_verified_v1_${latestProfileRef.current.uid}`,
-              );
-            } catch {
-              // ignore storage errors
-            }
-            const missing = data.channels
-              .filter((c) => !c.joined)
-              .map((c) => c.handle)
-              .join(' & ');
-            if (!opts?.silent) {
-              triggerHapticFeedback('warning');
-              showToast(`Join required: ${missing || formatChannelsHandleSummary(activeRequiredChannels)}`);
-            }
-          }
-        } else if (!opts?.silent) {
-          if (data.verificationMode === 'guest_browser') {
-            showToast('Open in Telegram Mini App for live bot channel check.');
-          } else {
-            showToast('Bot verification pending TELEGRAM_BOT_TOKEN on server.');
-          }
-        }
-
-        return data;
-      } catch {
-        if (!opts?.silent) {
-          showToast('Network error while checking Telegram channels.');
-        }
-        return null;
-      } finally {
-        setCheckingChannels(false);
-      }
-    },
-    [activeRequiredChannels, channelsGateEnabled, showToast, soundsEnabled],
-  );
-
-  useEffect(() => {
-    if (!channelsGateEnabled) {
-      setShowChannelGateModal(false);
-      setPreSplashChannelPassed(true);
-      return;
-    }
-    if (skipWelcome) return;
-    if (autoCheckedChannelsRef.current === activePlayerId) return;
-    autoCheckedChannelsRef.current = activePlayerId;
-
-    void handleCheckChannels({ silent: true }).then((result) => {
-      if (result && (result.allJoined || result.verificationMode === 'disabled')) {
-        setPreSplashChannelPassed(true);
-      } else if (result && result.verificationMode === 'telegram_bot' && !result.allJoined) {
-        setShowChannelGateModal(true);
-      }
-    });
-  }, [activePlayerId, channelsGateEnabled, handleCheckChannels, skipWelcome]);
 
   const handleToggleMuteAll = useCallback(() => {
     const next = computeMuteAllToggle(audioSettings);
@@ -774,8 +657,11 @@ export default function App() {
       gramDepositAddress?: string;
       gramJettonMaster?: string;
       payoutChannel?: string;
+      telegramBotConfigured?: boolean;
       telegramBotUsername?: string;
       telegramAppShortName?: string;
+      adminPasscodeSource?: 'database' | 'server_file' | 'env' | 'default';
+      adminPasscodeUpdatedAtMs?: number;
     }>('/api/config').then((cfg) => {
       if (!cfg) return;
       if (cfg.gramDepositAddress) {
@@ -786,6 +672,15 @@ export default function App() {
       }
       if (cfg.payoutChannel) {
         setPayoutChannel(cfg.payoutChannel);
+      }
+      if (typeof cfg.telegramBotConfigured === 'boolean') {
+        setServerBotConfigured(cfg.telegramBotConfigured);
+      }
+      if (cfg.adminPasscodeSource) {
+        setAdminPasscodeSource(cfg.adminPasscodeSource);
+      }
+      if (typeof cfg.adminPasscodeUpdatedAtMs === 'number') {
+        setAdminPasscodeUpdatedAtMs(cfg.adminPasscodeUpdatedAtMs);
       }
       if (cfg.telegramBotUsername || cfg.telegramAppShortName) {
         cacheDetectedTelegramBotConfig(cfg.telegramBotUsername, cfg.telegramAppShortName);
@@ -819,6 +714,16 @@ export default function App() {
       unsubPromos();
       unsubAdmins();
     };
+  }, []);
+
+  // Always require Admin Passcode again on every fresh webapp open/resume
+  useEffect(() => {
+    const resetAdminLock = () => {
+      setAdminUnlocked(false);
+      setAdminSessionToken('');
+    };
+    window.addEventListener('pagehide', resetAdminLock);
+    return () => window.removeEventListener('pagehide', resetAdminLock);
   }, []);
 
   useEffect(() => {
@@ -1068,6 +973,162 @@ export default function App() {
     },
     [showToast],
   );
+
+  const executeClaimPromo = useCallback(
+    (code: string, countCompletedAd = false) => {
+      const now = Date.now();
+      const current = latestProfileRef.current;
+      const res = claimPromoCode(current, code, now, promoCodes);
+      if ('error' in res) {
+        showToast(res.error);
+        return;
+      }
+      const nextProfile = countCompletedAd ? recordCompletedGateAd(res.profile) : res.profile;
+      playClaimSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      triggerRewardConfetti();
+      void persistMutation({
+        nextProfile,
+        transaction: res.transaction,
+      });
+      if (res.dynamicPromoCode) {
+        void incrementPromoCodeUseInFirestore(res.dynamicPromoCode).catch(() => {});
+      }
+      showToast(`Gift claimed: ${res.rewardSummary} (${res.label})!`);
+    },
+    [persistMutation, promoCodes, showToast, soundsEnabled],
+  );
+
+  const handleCheckChannels = useCallback(
+    async (opts?: { silent?: boolean }): Promise<ChannelVerificationResult | null> => {
+      if (!channelsGateEnabled) {
+        const disabledResult: ChannelVerificationResult = {
+          ok: true,
+          allJoined: true,
+          verificationMode: 'disabled',
+          telegramUserId: null,
+          channels: [],
+          checkedAtMs: Date.now(),
+        };
+        setChannelVerification(disabledResult);
+        setShowChannelGateModal(false);
+        const pendingCode = pendingPromoClaimCodeRef.current;
+        if (pendingCode) {
+          pendingPromoClaimCodeRef.current = null;
+          setPendingPromoClaimCode(null);
+          executeClaimPromo(pendingCode, false);
+        }
+        return disabledResult;
+      }
+
+      setCheckingChannels(true);
+      try {
+        const data = await safeFetchJson<ChannelVerificationResult>('/api/telegram/check-channels', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            playerId: latestProfileRef.current.uid,
+            initData: getTelegramInitData(),
+            requiredChannels: activeRequiredChannels,
+          }),
+        });
+        if (!data) {
+          if (!opts?.silent) {
+            showToast('Could not verify channels right now. Please retry.');
+          }
+          return null;
+        }
+        setChannelVerification(data);
+
+        if (data.verificationMode === 'disabled') {
+          setShowChannelGateModal(false);
+          const pendingCode = pendingPromoClaimCodeRef.current;
+          if (pendingCode) {
+            pendingPromoClaimCodeRef.current = null;
+            setPendingPromoClaimCode(null);
+            executeClaimPromo(pendingCode, false);
+          }
+          return data;
+        }
+
+        if (data.verificationMode === 'telegram_bot') {
+          if (data.allJoined) {
+            try {
+              localStorage.setItem(
+                `chickenland_channels_verified_v1_${latestProfileRef.current.uid}`,
+                JSON.stringify(data),
+              );
+            } catch {
+              // ignore storage errors
+            }
+            setShowChannelGateModal(false);
+            const pendingCode = pendingPromoClaimCodeRef.current;
+            if (pendingCode) {
+              pendingPromoClaimCodeRef.current = null;
+              setPendingPromoClaimCode(null);
+              executeClaimPromo(pendingCode, false);
+            } else if (!opts?.silent) {
+              playClaimSound(soundsEnabled);
+              triggerHapticFeedback('success');
+              showToast(`Verified! Joined ${formatChannelsHandleSummary(activeRequiredChannels)}.`);
+            }
+          } else {
+            try {
+              localStorage.removeItem(
+                `chickenland_channels_verified_v1_${latestProfileRef.current.uid}`,
+              );
+            } catch {
+              // ignore storage errors
+            }
+            const apiErrorCh = data.channels.find(
+              (c) => !c.joined && (c.status === 'api_error' || c.status === 'network_error') && c.error,
+            );
+            const missing = data.channels
+              .filter((c) => !c.joined)
+              .map((c) => c.handle)
+              .join(' & ');
+            if (!opts?.silent) {
+              triggerHapticFeedback('warning');
+              if (apiErrorCh) {
+                showToast(`${apiErrorCh.handle}: ${apiErrorCh.error}`);
+              } else {
+                showToast(`Join required: ${missing || formatChannelsHandleSummary(activeRequiredChannels)}`);
+              }
+            }
+          }
+        } else if (!opts?.silent) {
+          if (data.verificationMode === 'guest_browser') {
+            triggerHapticFeedback('warning');
+            showToast('Join all required channels above to verify membership.');
+          } else {
+            showToast('Bot verification pending TELEGRAM_BOT_TOKEN on server.');
+          }
+        }
+
+        return data;
+      } catch {
+        if (!opts?.silent) {
+          showToast('Network error while checking Telegram channels.');
+        }
+        return null;
+      } finally {
+        setCheckingChannels(false);
+      }
+    },
+    [activeRequiredChannels, channelsGateEnabled, executeClaimPromo, showToast, soundsEnabled],
+  );
+
+  useEffect(() => {
+    if (!channelsGateEnabled) {
+      setShowChannelGateModal(false);
+      const pendingCode = pendingPromoClaimCodeRef.current;
+      if (pendingCode) {
+        pendingPromoClaimCodeRef.current = null;
+        setPendingPromoClaimCode(null);
+        executeClaimPromo(pendingCode, false);
+      }
+    }
+  }, [channelsGateEnabled, executeClaimPromo]);
 
   const pendingEggs = useMemo(
     () => calculatePendingEggs(profile, nowMs),
@@ -1471,23 +1532,41 @@ export default function App() {
     }
   };
 
-  const handleSaveAdConfig = async (cfg: Omit<AdConfig, 'updatedAtMs'>) => {
+  const scheduleAppReload = useCallback(() => {
+    window.setTimeout(() => {
+      window.location.reload();
+    }, 900);
+  }, []);
+
+  const handleSaveAdConfig = async (cfg: Omit<AdConfig, 'updatedAtMs'>): Promise<boolean> => {
     try {
       const saved = await saveAdConfigInFirestore(cfg);
       setAdConfig(saved);
-      showToast('Ad settings saved!');
+      playClaimSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      showToast('Ad settings saved to database! Reloading...');
+      scheduleAppReload();
+      return true;
     } catch {
-      showToast('Failed to save ad settings.');
+      showToast('Failed to save ad settings to database.');
+      return false;
     }
   };
 
-  const handleSaveChannelsConfig = async (cfg: Omit<ChannelsConfig, 'updatedAtMs'>) => {
+  const handleSaveChannelsConfig = async (
+    cfg: Omit<ChannelsConfig, 'updatedAtMs'>,
+  ): Promise<boolean> => {
     try {
       const saved = await saveChannelsConfigInFirestore(cfg);
       setChannelsConfig(saved);
-      showToast('Channel check settings saved!');
+      playClaimSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      showToast('Channel settings saved to database! Reloading...');
+      scheduleAppReload();
+      return true;
     } catch {
-      showToast('Failed to save channel settings.');
+      showToast('Failed to save channel settings to database.');
+      return false;
     }
   };
 
@@ -1545,16 +1624,32 @@ export default function App() {
       });
       const payload = (await response.json().catch(() => ({}))) as {
         ok?: boolean;
+        token?: string;
+        passcodeSource?: 'database' | 'server_file' | 'env' | 'default';
+        passcodeUpdatedAtMs?: number;
         error?: string;
       };
+      if (payload.passcodeSource) {
+        setAdminPasscodeSource(payload.passcodeSource);
+      }
+      if (typeof payload.passcodeUpdatedAtMs === 'number') {
+        setAdminPasscodeUpdatedAtMs(payload.passcodeUpdatedAtMs);
+      }
       if (response.ok && payload.ok) {
+        if (payload.token) {
+          setAdminSessionToken(payload.token);
+        }
         setAdminUnlocked(true);
         showToast('Admin Console unlocked!');
         return { ok: true };
       }
       return {
         ok: false,
-        error: payload.error || 'Incorrect Admin Passcode. Please try again.',
+        error:
+          payload.error ||
+          (response.status >= 500
+            ? 'Server error while verifying Admin Passcode.'
+            : 'Incorrect Admin Passcode. Please try again.'),
       };
     } catch {
       return {
@@ -1564,8 +1659,105 @@ export default function App() {
     }
   };
 
+  const handleChangeAdminPasscode = async (input: {
+    currentPasscode: string;
+    newPasscode: string;
+  }): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const response = await fetch('/api/admin/change-passcode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerId: profile.uid,
+          initData: getTelegramInitData(),
+          token: adminSessionToken,
+          currentPasscode: input.currentPasscode,
+          newPasscode: input.newPasscode,
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        ok?: boolean;
+        token?: string;
+        passcodeSource?: 'database' | 'server_file' | 'env' | 'default';
+        passcodeUpdatedAtMs?: number;
+        error?: string;
+      };
+      if (response.ok && payload.ok) {
+        if (payload.token) {
+          setAdminSessionToken(payload.token);
+        }
+        if (payload.passcodeSource) {
+          setAdminPasscodeSource(payload.passcodeSource);
+        }
+        if (typeof payload.passcodeUpdatedAtMs === 'number') {
+          setAdminPasscodeUpdatedAtMs(payload.passcodeUpdatedAtMs);
+        }
+        playClaimSound(soundsEnabled);
+        triggerHapticFeedback('success');
+        showToast('Admin Passcode saved to database! Reloading...');
+        scheduleAppReload();
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        error: payload.error || 'Failed to update Admin Passcode.',
+      };
+    } catch {
+      return {
+        ok: false,
+        error: 'Network error while updating Admin Passcode.',
+      };
+    }
+  };
+
+  const handleTestChannelsDiagnostic = async (
+    channelsOverride?: typeof activeRequiredChannels,
+  ) => {
+    try {
+      const response = await fetch('/api/telegram/test-channels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerId: profile.uid,
+          initData: getTelegramInitData(),
+          token: adminSessionToken,
+          requiredChannels: channelsOverride,
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        ok?: boolean;
+        botConfigured?: boolean;
+        botUsername?: string | null;
+        botError?: string;
+        error?: string;
+        channels?: Array<{
+          id: string;
+          handle: string;
+          botIsAdmin: boolean;
+          botStatus: string;
+          userJoined?: boolean | null;
+          userStatus?: string | null;
+          error?: string;
+        }>;
+      };
+      if (typeof payload.botConfigured === 'boolean') {
+        setServerBotConfigured(payload.botConfigured);
+      }
+      return {
+        ok: Boolean(response.ok && payload.ok),
+        ...payload,
+      };
+    } catch {
+      return {
+        ok: false,
+        error: 'Unable to reach channel verification server.',
+      };
+    }
+  };
+
   const handleLockAdmin = () => {
     setAdminUnlocked(false);
+    setAdminSessionToken('');
     showToast('Admin Console locked.');
   };
 
@@ -1740,29 +1932,31 @@ export default function App() {
     showToast(`Daily login claimed: +${res.rewardCoins} coins!`);
   };
 
-  const executeClaimPromo = useCallback(
-    (code: string, countCompletedAd = false) => {
-      const now = Date.now();
-      const current = latestProfileRef.current;
-      const res = claimPromoCode(current, code, now, promoCodes);
-      if ('error' in res) {
-        showToast(res.error);
+  const handleAfterPromoAdCompleted = useCallback(
+    async (cleanCode: string) => {
+      if (!channelsGateEnabled) {
+        executeClaimPromo(cleanCode, true);
         return;
       }
-      const nextProfile = countCompletedAd ? recordCompletedGateAd(res.profile) : res.profile;
-      playClaimSound(soundsEnabled);
-      triggerHapticFeedback('success');
-      triggerRewardConfetti();
-      void persistMutation({
-        nextProfile,
-        transaction: res.transaction,
-      });
-      if (res.dynamicPromoCode) {
-        void incrementPromoCodeUseInFirestore(res.dynamicPromoCode).catch(() => {});
+
+      const withCompletedAd = recordCompletedGateAd(latestProfileRef.current);
+      void persistMutation({ nextProfile: withCompletedAd });
+
+      const verification = await handleCheckChannels({ silent: true });
+      if (
+        verification &&
+        (verification.allJoined || verification.verificationMode === 'disabled')
+      ) {
+        executeClaimPromo(cleanCode, false);
+        return;
       }
-      showToast(`Gift claimed: ${res.rewardSummary} (${res.label})!`);
+
+      pendingPromoClaimCodeRef.current = cleanCode;
+      setPendingPromoClaimCode(cleanCode);
+      setShowChannelGateModal(true);
+      triggerHapticFeedback('warning');
     },
-    [persistMutation, promoCodes, showToast, soundsEnabled],
+    [channelsGateEnabled, executeClaimPromo, handleCheckChannels, persistMutation],
   );
 
   const handleClaimPromo = (code: string) => {
@@ -1783,7 +1977,7 @@ export default function App() {
         const external = await tryRunExternalRewardedAd(adConfig);
         if (external.handled) {
           if (external.rewarded) {
-            executeClaimPromo(cleanCode, true);
+            await handleAfterPromoAdCompleted(cleanCode);
           } else {
             showToast('Complete the ad to claim your gift code.');
           }
@@ -1805,7 +1999,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (isBanned || skipWelcome || needsPreSplashChannelGate || showSplash) return;
+    if (isBanned || skipWelcome || showSplash) return;
     if (subView === 'admin') return;
     if (startupAdTriggeredRef.current) return;
     startupAdTriggeredRef.current = true;
@@ -1832,7 +2026,7 @@ export default function App() {
         setWatchingAdLoading(false);
       }
     })();
-  }, [adConfig, isBanned, needsPreSplashChannelGate, persistMutation, showSplash, skipWelcome, subView]);
+  }, [adConfig, isBanned, persistMutation, showSplash, skipWelcome, subView]);
 
   const handleCompleteTask = (taskId: string) => {
     const now = Date.now();
@@ -2135,7 +2329,12 @@ export default function App() {
         <AdminPanelView
           playerId={profile.uid}
           adminUnlocked={adminUnlocked}
+          adminPasscodeSource={adminPasscodeSource}
+          adminPasscodeUpdatedAtMs={adminPasscodeUpdatedAtMs}
+          serverBotConfigured={serverBotConfigured}
           onVerifyAdminPasscode={handleVerifyAdminPasscode}
+          onChangeAdminPasscode={handleChangeAdminPasscode}
+          onTestChannels={handleTestChannelsDiagnostic}
           onLockAdmin={handleLockAdmin}
           withdrawRequests={allWithdrawRequests}
           customTasks={customTasks}
@@ -2547,7 +2746,13 @@ export default function App() {
   }
 
   return (
-    <div className={`min-h-screen text-stone-900 dark:text-stone-100 transition-colors ${hideBottomNav ? 'pb-6' : 'pb-22'}`}>
+    <div
+      className={`${
+        showFarmOnMobile
+          ? 'min-h-[100dvh] lg:min-h-screen flex flex-col lg:block pb-0 lg:pb-22'
+          : `min-h-screen ${hideBottomNav ? 'pb-6' : 'pb-22'}`
+      } text-stone-900 dark:text-stone-100 transition-colors`}
+    >
       <TopBar
         profile={profile}
         coinsLabel={strings.coins}
@@ -2582,10 +2787,26 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <main className="max-w-6xl mx-auto px-3 sm:px-5 pt-3 sm:pt-5">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+      <main
+        className={
+          showFarmOnMobile
+            ? 'w-full flex-1 flex flex-col lg:block lg:max-w-6xl lg:mx-auto lg:px-5 lg:pt-5'
+            : 'max-w-6xl mx-auto px-3 sm:px-5 pt-3 sm:pt-5'
+        }
+      >
+        <div
+          className={
+            showFarmOnMobile
+              ? 'flex-1 flex flex-col lg:grid lg:grid-cols-12 lg:gap-5 lg:items-start'
+              : 'grid grid-cols-1 lg:grid-cols-12 gap-5 items-start'
+          }
+        >
           {/* Left / Primary Farm Stage */}
-          <div className={`lg:col-span-5 lg:sticky lg:top-32 ${showFarmOnMobile ? 'block' : 'hidden lg:block'}`}>
+          <div
+            className={`lg:col-span-5 lg:sticky lg:top-32 ${
+              showFarmOnMobile ? 'flex-1 flex flex-col w-full lg:block' : 'hidden lg:block'
+            }`}
+          >
             <FarmMeadow
               profile={profile}
               pendingEggs={pendingEggs}
@@ -2645,21 +2866,9 @@ export default function App() {
         />
       )}
 
-      {needsPreSplashChannelGate && (
-        <ChannelCheckModal
-          verification={channelVerification}
-          requiredChannels={activeRequiredChannels}
-          checking={checkingChannels}
-          onCheckChannels={() => void handleCheckChannels()}
-          onClose={() => setPreSplashChannelPassed(true)}
-        />
-      )}
+      {showSplash && <SplashScreen onComplete={handleSplashComplete} />}
 
-      {!needsPreSplashChannelGate && showSplash && (
-        <SplashScreen onComplete={handleSplashComplete} />
-      )}
-
-      {!needsPreSplashChannelGate && !showSplash && !adModalState.open && showSignUpBonusModal && (
+      {!showSplash && !adModalState.open && showSignUpBonusModal && (
         <SignUpBonusModal
           onClaim={() => {
             playClaimSound(soundsEnabled);
@@ -2674,7 +2883,7 @@ export default function App() {
         />
       )}
 
-      {!needsPreSplashChannelGate && !showSplash && !adModalState.open && showWelcomeModal && !showSignUpBonusModal && (
+      {!showSplash && !adModalState.open && showWelcomeModal && !showSignUpBonusModal && (
         <WelcomeBackModal
           pendingEggs={pendingEggs}
           awayLabel={formatAwayDuration(nowMs - profile.lastCollectedAt)}
@@ -2685,8 +2894,7 @@ export default function App() {
         />
       )}
 
-      {!needsPreSplashChannelGate &&
-        !showSplash &&
+      {!showSplash &&
         !adModalState.open &&
         !showSignUpBonusModal &&
         channelsGateEnabled &&
@@ -2695,8 +2903,13 @@ export default function App() {
             verification={channelVerification}
             requiredChannels={activeRequiredChannels}
             checking={checkingChannels}
+            pendingPromoCode={pendingPromoClaimCode}
             onCheckChannels={() => void handleCheckChannels()}
-            onClose={() => setShowChannelGateModal(false)}
+            onClose={() => {
+              pendingPromoClaimCodeRef.current = null;
+              setPendingPromoClaimCode(null);
+              setShowChannelGateModal(false);
+            }}
           />
         )}
 
@@ -2733,7 +2946,7 @@ export default function App() {
               } else if (currentModal.kind === 'collect_eggs') {
                 executeCollectEggs(true);
               } else if (currentModal.kind === 'claim_promo' && currentModal.promoCode) {
-                executeClaimPromo(currentModal.promoCode, true);
+                void handleAfterPromoAdCompleted(currentModal.promoCode);
               } else if (currentModal.kind === 'buy_chicken' && currentModal.chickenBreed) {
                 void executeBuyChickens(
                   currentModal.chickenBreed,

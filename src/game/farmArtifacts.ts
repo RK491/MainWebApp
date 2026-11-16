@@ -79,9 +79,9 @@ export const FARM_ARTIFACTS: FarmArtifactDefinition[] = [
     category: 'structures',
     sprite: barnSprite,
     spots: {
-      left: { x: 20, y: 36, widthPct: 33, zLayer: 'back' },
-      center: { x: 50, y: 33, widthPct: 34, zLayer: 'back' },
-      right: { x: 78, y: 36, widthPct: 33, zLayer: 'back', defaultFlipX: true },
+      left: { x: 20, y: 40, widthPct: 34, zLayer: 'back' },
+      center: { x: 50, y: 38, widthPct: 35, zLayer: 'back' },
+      right: { x: 78, y: 40, widthPct: 34, zLayer: 'back', defaultFlipX: true },
     },
   },
   {
@@ -91,9 +91,9 @@ export const FARM_ARTIFACTS: FarmArtifactDefinition[] = [
     category: 'structures',
     sprite: woodenDeckSprite,
     spots: {
-      left: { x: 26, y: 51, widthPct: 24, zLayer: 'back' },
-      center: { x: 49, y: 50, widthPct: 25, zLayer: 'back' },
-      right: { x: 73, y: 51, widthPct: 24, zLayer: 'back' },
+      left: { x: 26, y: 53, widthPct: 24, zLayer: 'back' },
+      center: { x: 49, y: 52, widthPct: 25, zLayer: 'back' },
+      right: { x: 73, y: 53, widthPct: 24, zLayer: 'back' },
     },
   },
   {
@@ -103,9 +103,9 @@ export const FARM_ARTIFACTS: FarmArtifactDefinition[] = [
     category: 'nature',
     sprite: pondSprite,
     spots: {
-      left: { x: 22, y: 71, widthPct: 28, zLayer: 'front' },
-      center: { x: 52, y: 72, widthPct: 28, zLayer: 'front' },
-      right: { x: 78, y: 70, widthPct: 28, zLayer: 'front' },
+      left: { x: 22, y: 68, widthPct: 28, zLayer: 'front' },
+      center: { x: 52, y: 69, widthPct: 28, zLayer: 'front' },
+      right: { x: 78, y: 68, widthPct: 28, zLayer: 'front' },
     },
   },
   {
@@ -115,9 +115,9 @@ export const FARM_ARTIFACTS: FarmArtifactDefinition[] = [
     category: 'hay',
     sprite: hayBaleLargeSprite,
     spots: {
-      left: { x: 16, y: 49, widthPct: 16, zLayer: 'back' },
-      center: { x: 43, y: 46, widthPct: 15, zLayer: 'back' },
-      right: { x: 84, y: 48, widthPct: 16, zLayer: 'back', defaultFlipX: true },
+      left: { x: 16, y: 50, widthPct: 16, zLayer: 'back' },
+      center: { x: 43, y: 48, widthPct: 15, zLayer: 'back' },
+      right: { x: 84, y: 50, widthPct: 16, zLayer: 'back', defaultFlipX: true },
     },
   },
   {
@@ -127,9 +127,9 @@ export const FARM_ARTIFACTS: FarmArtifactDefinition[] = [
     category: 'hay',
     sprite: hayBaleSmall1Sprite,
     spots: {
-      left: { x: 13, y: 63, widthPct: 13, zLayer: 'front' },
-      center: { x: 58, y: 49, widthPct: 12, zLayer: 'back' },
-      right: { x: 86, y: 60, widthPct: 13, zLayer: 'front', defaultFlipX: true },
+      left: { x: 13, y: 62, widthPct: 13, zLayer: 'front' },
+      center: { x: 58, y: 51, widthPct: 12, zLayer: 'back' },
+      right: { x: 86, y: 61, widthPct: 13, zLayer: 'front', defaultFlipX: true },
     },
   },
   {
@@ -139,9 +139,9 @@ export const FARM_ARTIFACTS: FarmArtifactDefinition[] = [
     category: 'hay',
     sprite: hayBaleSmall2Sprite,
     spots: {
-      left: { x: 22, y: 67, widthPct: 12, zLayer: 'front' },
-      center: { x: 66, y: 50, widthPct: 12, zLayer: 'back' },
-      right: { x: 77, y: 57, widthPct: 12, zLayer: 'back' },
+      left: { x: 22, y: 66, widthPct: 12, zLayer: 'front' },
+      center: { x: 66, y: 52, widthPct: 12, zLayer: 'back' },
+      right: { x: 77, y: 58, widthPct: 12, zLayer: 'back' },
     },
   },
   {
@@ -151,9 +151,9 @@ export const FARM_ARTIFACTS: FarmArtifactDefinition[] = [
     category: 'fences',
     sprite: fenceLongSprite,
     spots: {
-      left: { x: 30, y: 44, widthPct: 44, zLayer: 'back' },
-      center: { x: 52, y: 43, widthPct: 48, zLayer: 'back' },
-      right: { x: 72, y: 44, widthPct: 44, zLayer: 'back' },
+      left: { x: 30, y: 46, widthPct: 44, zLayer: 'back' },
+      center: { x: 52, y: 45, widthPct: 48, zLayer: 'back' },
+      right: { x: 72, y: 46, widthPct: 44, zLayer: 'back' },
     },
   },
   {
@@ -163,9 +163,9 @@ export const FARM_ARTIFACTS: FarmArtifactDefinition[] = [
     category: 'fences',
     sprite: fenceMediumSprite,
     spots: {
-      left: { x: 27, y: 46, widthPct: 36, zLayer: 'back' },
-      center: { x: 52, y: 45, widthPct: 38, zLayer: 'back' },
-      right: { x: 76, y: 45, widthPct: 36, zLayer: 'back' },
+      left: { x: 27, y: 48, widthPct: 36, zLayer: 'back' },
+      center: { x: 52, y: 47, widthPct: 38, zLayer: 'back' },
+      right: { x: 76, y: 47, widthPct: 36, zLayer: 'back' },
     },
   },
   {
@@ -175,9 +175,9 @@ export const FARM_ARTIFACTS: FarmArtifactDefinition[] = [
     category: 'fences',
     sprite: fenceCornerSprite,
     spots: {
-      left: { x: 14, y: 74, widthPct: 19, zLayer: 'front' },
-      center: { x: 48, y: 75, widthPct: 18, zLayer: 'front' },
-      right: { x: 86, y: 74, widthPct: 19, zLayer: 'front', defaultFlipX: true },
+      left: { x: 14, y: 71, widthPct: 19, zLayer: 'front' },
+      center: { x: 48, y: 72, widthPct: 18, zLayer: 'front' },
+      right: { x: 86, y: 71, widthPct: 19, zLayer: 'front', defaultFlipX: true },
     },
   },
   {
@@ -187,8 +187,8 @@ export const FARM_ARTIFACTS: FarmArtifactDefinition[] = [
     category: 'fences',
     sprite: fenceShortSprite,
     spots: {
-      left: { x: 13, y: 56, widthPct: 13, zLayer: 'back' },
-      center: { x: 64, y: 46, widthPct: 13, zLayer: 'back' },
+      left: { x: 13, y: 57, widthPct: 13, zLayer: 'back' },
+      center: { x: 64, y: 48, widthPct: 13, zLayer: 'back' },
       right: { x: 88, y: 63, widthPct: 13, zLayer: 'front', defaultFlipX: true },
     },
   },
@@ -200,9 +200,9 @@ export const FARM_ARTIFACTS: FarmArtifactDefinition[] = [
     sprite: bushWideSprite,
     sway: true,
     spots: {
-      left: { x: 17, y: 41, widthPct: 27, zLayer: 'back' },
-      center: { x: 46, y: 39, widthPct: 28, zLayer: 'back' },
-      right: { x: 80, y: 41, widthPct: 27, zLayer: 'back' },
+      left: { x: 17, y: 43, widthPct: 27, zLayer: 'back' },
+      center: { x: 46, y: 41, widthPct: 28, zLayer: 'back' },
+      right: { x: 80, y: 43, widthPct: 27, zLayer: 'back' },
     },
   },
   {
@@ -213,9 +213,9 @@ export const FARM_ARTIFACTS: FarmArtifactDefinition[] = [
     sprite: bushRoundSprite,
     sway: true,
     spots: {
-      left: { x: 12, y: 43, widthPct: 17, zLayer: 'back' },
-      center: { x: 61, y: 40, widthPct: 17, zLayer: 'back' },
-      right: { x: 87, y: 42, widthPct: 18, zLayer: 'back' },
+      left: { x: 12, y: 44, widthPct: 17, zLayer: 'back' },
+      center: { x: 61, y: 42, widthPct: 17, zLayer: 'back' },
+      right: { x: 87, y: 44, widthPct: 18, zLayer: 'back' },
     },
   },
   {
@@ -226,9 +226,9 @@ export const FARM_ARTIFACTS: FarmArtifactDefinition[] = [
     sprite: wildflowersSprite,
     sway: true,
     spots: {
-      left: { x: 15, y: 76, widthPct: 15, zLayer: 'front' },
-      center: { x: 45, y: 77, widthPct: 15, zLayer: 'front' },
-      right: { x: 65, y: 76, widthPct: 15, zLayer: 'front' },
+      left: { x: 15, y: 73, widthPct: 15, zLayer: 'front' },
+      center: { x: 45, y: 74, widthPct: 15, zLayer: 'front' },
+      right: { x: 65, y: 73, widthPct: 15, zLayer: 'front' },
     },
   },
 ];

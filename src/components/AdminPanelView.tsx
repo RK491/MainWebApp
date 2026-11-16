@@ -12,12 +12,15 @@ import {
   Crown,
   Dices,
   ExternalLink,
+  Eye,
+  EyeOff,
   Flame,
   Gift,
   Infinity as InfinityIcon,
   KeyRound,
   Link2,
   ListPlus,
+  Loader2,
   Lock,
   Megaphone,
   Minus,
@@ -25,6 +28,7 @@ import {
   PlayCircle,
   Plus,
   Radio,
+  RefreshCw,
   Search,
   Send,
   Share2,
@@ -83,10 +87,35 @@ import {
 } from '../game/economy';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
 
+interface ChannelDiagnosticResult {
+  ok: boolean;
+  botConfigured?: boolean;
+  botUsername?: string | null;
+  botError?: string;
+  error?: string;
+  channels?: Array<{
+    id: string;
+    handle: string;
+    botIsAdmin: boolean;
+    botStatus: string;
+    userJoined?: boolean | null;
+    userStatus?: string | null;
+    error?: string;
+  }>;
+}
+
 interface AdminPanelViewProps {
   playerId: string;
   adminUnlocked: boolean;
+  adminPasscodeSource?: 'database' | 'server_file' | 'env' | 'default';
+  adminPasscodeUpdatedAtMs?: number;
+  serverBotConfigured?: boolean;
   onVerifyAdminPasscode: (passcode: string) => Promise<{ ok: boolean; error?: string }>;
+  onChangeAdminPasscode?: (input: {
+    currentPasscode: string;
+    newPasscode: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  onTestChannels?: (channels?: RequiredTelegramChannel[]) => Promise<ChannelDiagnosticResult>;
   onLockAdmin?: () => void;
   withdrawRequests: WithdrawRequestRecord[];
   customTasks: TaskDefinition[];
@@ -114,8 +143,8 @@ interface AdminPanelViewProps {
   }) => Promise<void>;
   onToggleTask: (taskId: string, isActive: boolean) => Promise<void>;
   onDeleteTask: (taskId: string) => Promise<void>;
-  onSaveAdConfig: (config: Omit<AdConfig, 'updatedAtMs'>) => Promise<void>;
-  onSaveChannelsConfig: (config: Omit<ChannelsConfig, 'updatedAtMs'>) => Promise<void>;
+  onSaveAdConfig: (config: Omit<AdConfig, 'updatedAtMs'>) => Promise<boolean | void>;
+  onSaveChannelsConfig: (config: Omit<ChannelsConfig, 'updatedAtMs'>) => Promise<boolean | void>;
   onCreatePromoCode: (input: {
     code: string;
     label: string;
@@ -248,7 +277,12 @@ function formatExpiryLabel(hours: number): string {
 export function AdminPanelView({
   playerId,
   adminUnlocked,
+  adminPasscodeSource = 'default',
+  adminPasscodeUpdatedAtMs = 0,
+  serverBotConfigured,
   onVerifyAdminPasscode,
+  onChangeAdminPasscode,
+  onTestChannels,
   onLockAdmin,
   withdrawRequests,
   customTasks,
@@ -287,8 +321,20 @@ export function AdminPanelView({
   const isAuthorizedAdmin = isAdminPlayerId(playerId, extraAdminIds);
 
   const [passcodeInput, setPasscodeInput] = useState('');
+  const [showPasscodeInput, setShowPasscodeInput] = useState(false);
   const [passcodeError, setPasscodeError] = useState<string | null>(null);
   const [verifyingPasscode, setVerifyingPasscode] = useState(false);
+
+  // Change Admin Passcode state
+  const [currentPasscodeInput, setCurrentPasscodeInput] = useState('');
+  const [newPasscodeInput, setNewPasscodeInput] = useState('');
+  const [confirmPasscodeInput, setConfirmPasscodeInput] = useState('');
+  const [showChangePasscodes, setShowChangePasscodes] = useState(false);
+  const [changingPasscode, setChangingPasscode] = useState(false);
+  const [changePasscodeFeedback, setChangePasscodeFeedback] = useState<{
+    type: 'ok' | 'error';
+    text: string;
+  } | null>(null);
 
   const [tab, setTab] = useState<
     'withdrawals' | 'users' | 'admins' | 'channels' | 'promos' | 'tasks' | 'ads' | 'ad_ids'
@@ -358,6 +404,8 @@ export function AdminPanelView({
   const [newChannelUrl, setNewChannelUrl] = useState('');
   const [channelFormError, setChannelFormError] = useState<string | null>(null);
   const [savingChannels, setSavingChannels] = useState(false);
+  const [testingChannels, setTestingChannels] = useState(false);
+  const [channelDiagnostic, setChannelDiagnostic] = useState<ChannelDiagnosticResult | null>(null);
 
   useEffect(() => {
     setChannelsEnabledDraft(channelsConfig.enabled);
@@ -553,8 +601,10 @@ export function AdminPanelView({
     e.preventDefault();
     setSavingAds(true);
     try {
-      await onSaveAdConfig(adDraft);
-      setTemplateStatus('Saved live to Firestore for all players!');
+      const ok = await onSaveAdConfig(adDraft);
+      if (ok !== false) {
+        setTemplateStatus('Saved live to database! Reloading app...');
+      }
     } finally {
       setSavingAds(false);
     }
@@ -654,7 +704,14 @@ export function AdminPanelView({
       channelsDraft.length,
     );
     if (!normalized) {
-      setChannelFormError('Enter a valid @username, https://t.me/ link, or numeric channel ID.');
+      const looksLikeInvite = /^(?:https?:\/\/)?(?:t\.me|telegram\.me)\/(\+|joinchat\/)/i.test(
+        newChannelHandle.trim(),
+      );
+      setChannelFormError(
+        looksLikeInvite
+          ? 'Private invite link detected! Put the numeric -100... Channel ID in the first box and paste the invite link into Optional Join URL.'
+          : 'Enter a valid @username, https://t.me/ link, or numeric -100... channel ID.',
+      );
       return;
     }
     if (
@@ -700,6 +757,19 @@ export function AdminPanelView({
       });
     } finally {
       setSavingChannels(false);
+    }
+  };
+
+  const handleTestChannelsClick = async () => {
+    if (!onTestChannels) return;
+    setTestingChannels(true);
+    try {
+      onTabTap?.();
+      const activeList = channelsDraft.filter((ch) => ch.enabled !== false && Boolean(ch.handle));
+      const res = await onTestChannels(activeList);
+      setChannelDiagnostic(res);
+    } finally {
+      setTestingChannels(false);
     }
   };
 
@@ -1075,6 +1145,57 @@ export function AdminPanelView({
     }
   };
 
+  const handleChangePasscodeSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onChangeAdminPasscode) return;
+    setChangePasscodeFeedback(null);
+    const currentClean = currentPasscodeInput.trim();
+    const nextClean = newPasscodeInput.trim();
+    const confirmClean = confirmPasscodeInput.trim();
+    if (!currentClean) {
+      setChangePasscodeFeedback({ type: 'error', text: 'Enter your current Admin Passcode.' });
+      return;
+    }
+    if (nextClean.length < 4 || nextClean.length > 64) {
+      setChangePasscodeFeedback({
+        type: 'error',
+        text: 'New passcode must be between 4 and 64 characters.',
+      });
+      return;
+    }
+    if (nextClean !== confirmClean) {
+      setChangePasscodeFeedback({
+        type: 'error',
+        text: 'New passcode and confirm passcode do not match.',
+      });
+      return;
+    }
+    setChangingPasscode(true);
+    try {
+      onTabTap?.();
+      const res = await onChangeAdminPasscode({
+        currentPasscode: currentClean,
+        newPasscode: nextClean,
+      });
+      if (res.ok) {
+        setCurrentPasscodeInput('');
+        setNewPasscodeInput('');
+        setConfirmPasscodeInput('');
+        setChangePasscodeFeedback({
+          type: 'ok',
+          text: 'Admin Passcode saved to database! Reloading web app...',
+        });
+      } else {
+        setChangePasscodeFeedback({
+          type: 'error',
+          text: res.error || 'Failed to update Admin Passcode.',
+        });
+      }
+    } finally {
+      setChangingPasscode(false);
+    }
+  };
+
   const handleManualBanSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBanFormError(null);
@@ -1273,23 +1394,46 @@ export function AdminPanelView({
           </div>
 
           <div className="p-5 space-y-4">
+            <div className="clay-inset !rounded-xl px-3.5 py-2 flex items-center justify-between gap-2 text-[11px]">
+              <span className="font-bold text-stone-500 dark:text-stone-400">Passcode Verification</span>
+              <span className="font-extrabold text-stone-800 dark:text-stone-200">
+                {adminPasscodeSource === 'database'
+                  ? 'Live Database (Firestore)'
+                  : adminPasscodeSource === 'server_file'
+                    ? 'Server Security Vault'
+                    : adminPasscodeSource === 'env'
+                      ? 'Environment Passcode'
+                      : 'Default Server Passcode'}
+              </span>
+            </div>
+
             <div className="space-y-1.5">
               <label htmlFor="admin-passcode-input" className="text-xs font-extrabold text-stone-700 dark:text-stone-300">
                 Admin Passcode
               </label>
-              <input
-                id="admin-passcode-input"
-                type="password"
-                autoComplete="current-password"
-                autoFocus
-                value={passcodeInput}
-                onChange={(e) => {
-                  setPasscodeInput(e.target.value);
-                  setPasscodeError(null);
-                }}
-                placeholder="Enter admin passcode..."
-                className="clay-inset w-full min-h-[46px] px-3.5 text-sm font-mono-num font-extrabold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-400"
-              />
+              <div className="relative">
+                <input
+                  id="admin-passcode-input"
+                  type={showPasscodeInput ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  autoFocus
+                  value={passcodeInput}
+                  onChange={(e) => {
+                    setPasscodeInput(e.target.value);
+                    setPasscodeError(null);
+                  }}
+                  placeholder="Enter admin passcode..."
+                  className="clay-inset w-full min-h-[46px] pl-3.5 pr-11 text-sm font-mono-num font-extrabold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPasscodeInput((v) => !v)}
+                  aria-label={showPasscodeInput ? 'Hide passcode' : 'Show passcode'}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 rounded-lg flex items-center justify-center text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-100"
+                >
+                  {showPasscodeInput ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
             </div>
 
             {passcodeError && (
@@ -2404,6 +2548,123 @@ export function AdminPanelView({
          ======================================================================== */}
       {tab === 'admins' && (
         <div key="admin-tab-admins" className="animate-clay-enter space-y-4">
+          {onChangeAdminPasscode && (
+            <form onSubmit={(e) => void handleChangePasscodeSubmit(e)} className="clay-card p-4 space-y-3">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+                    <KeyRound className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                    <span>Change Admin Passcode</span>
+                  </h2>
+                  <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
+                    Save a custom Admin Passcode in the backend/database so you don&apos;t need to edit code or env files.
+                  </p>
+                </div>
+                <span className="rounded-lg bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-800/70 px-2 py-1 text-[10px] font-extrabold text-amber-700 dark:text-amber-300 shrink-0">
+                  {adminPasscodeSource === 'database'
+                    ? 'DB Saved'
+                    : adminPasscodeSource === 'server_file'
+                      ? 'Server Saved'
+                      : adminPasscodeSource === 'env'
+                        ? 'Env Var'
+                        : 'Default'}
+                </span>
+              </div>
+
+              {adminPasscodeUpdatedAtMs > 0 && (
+                <div className="text-[11px] font-semibold text-stone-500 dark:text-stone-400">
+                  Last changed: {new Date(adminPasscodeUpdatedAtMs).toLocaleString()}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                <div className="space-y-1">
+                  <label htmlFor="admin-current-pass" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                    Current Passcode
+                  </label>
+                  <input
+                    id="admin-current-pass"
+                    type={showChangePasscodes ? 'text' : 'password'}
+                    value={currentPasscodeInput}
+                    onChange={(e) => {
+                      setCurrentPasscodeInput(e.target.value);
+                      setChangePasscodeFeedback(null);
+                    }}
+                    placeholder="Current passcode"
+                    className="clay-inset w-full min-h-[42px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label htmlFor="admin-new-pass" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                    New Passcode (min 4 chars)
+                  </label>
+                  <input
+                    id="admin-new-pass"
+                    type={showChangePasscodes ? 'text' : 'password'}
+                    value={newPasscodeInput}
+                    onChange={(e) => {
+                      setNewPasscodeInput(e.target.value);
+                      setChangePasscodeFeedback(null);
+                    }}
+                    placeholder="Enter new passcode"
+                    className="clay-inset w-full min-h-[42px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label htmlFor="admin-confirm-pass" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                    Confirm New Passcode
+                  </label>
+                  <input
+                    id="admin-confirm-pass"
+                    type={showChangePasscodes ? 'text' : 'password'}
+                    value={confirmPasscodeInput}
+                    onChange={(e) => {
+                      setConfirmPasscodeInput(e.target.value);
+                      setChangePasscodeFeedback(null);
+                    }}
+                    placeholder="Re-enter new passcode"
+                    className="clay-inset w-full min-h-[42px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowChangePasscodes((v) => !v)}
+                  className="text-xs font-bold text-stone-600 dark:text-stone-300 inline-flex items-center gap-1.5 hover:underline cursor-pointer"
+                >
+                  {showChangePasscodes ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  <span>{showChangePasscodes ? 'Hide passcodes' : 'Show passcodes'}</span>
+                </button>
+              </div>
+
+              {changePasscodeFeedback && (
+                <div
+                  role="status"
+                  className={`rounded-xl border px-3 py-2 text-xs font-bold ${
+                    changePasscodeFeedback.type === 'ok'
+                      ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                      : 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-800/70 text-rose-700 dark:text-rose-300'
+                  }`}
+                >
+                  {changePasscodeFeedback.text}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={changingPasscode || !currentPasscodeInput.trim() || !newPasscodeInput.trim()}
+                className="clay-btn clay-btn-amber w-full min-h-[42px] rounded-2xl font-extrabold text-xs inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
+              >
+                <KeyRound className="w-4 h-4" />
+                <span>{changingPasscode ? 'Updating Passcode...' : 'Update Admin Passcode'}</span>
+              </button>
+            </form>
+          )}
+
           <form onSubmit={(e) => void handleAddAdminSubmit(e)} className="clay-card p-4 space-y-3">
             <div className="flex items-start justify-between gap-2">
               <div>
@@ -2621,10 +2882,70 @@ export function AdminPanelView({
               </button>
             </div>
 
-            <div className="clay-card-warm !rounded-2xl px-3.5 py-2.5 text-xs font-semibold text-amber-900 dark:text-amber-200">
-              Make sure your Telegram Bot (<span className="font-mono-num">TELEGRAM_BOT_TOKEN</span>) is added as an{' '}
-              <span className="font-extrabold">Admin</span> in each required channel below so live{' '}
-              <span className="font-mono-num">getChatMember</span> verification succeeds.
+            <div className="clay-card-warm !rounded-2xl px-3.5 py-2.5 space-y-2 text-xs font-semibold text-amber-900 dark:text-amber-200">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span>
+                  Server Bot Status:{' '}
+                  <span className="font-extrabold">
+                    {serverBotConfigured === true
+                      ? 'TELEGRAM_BOT_TOKEN Connected'
+                      : serverBotConfigured === false
+                        ? 'TELEGRAM_BOT_TOKEN Missing on Server'
+                        : 'Checking...'}
+                  </span>
+                </span>
+                {onTestChannels && (
+                  <button
+                    type="button"
+                    disabled={testingChannels}
+                    onClick={() => void handleTestChannelsClick()}
+                    className="clay-btn clay-btn-sky min-h-[32px] px-3 rounded-xl text-[11px] font-extrabold inline-flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    {testingChannels ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    )}
+                    <span>{testingChannels ? 'Testing...' : 'Test Bot & Channels'}</span>
+                  </button>
+                )}
+              </div>
+              <p className="text-[11px] opacity-90">
+                Make sure <span className="font-mono-num">TELEGRAM_BOT_TOKEN</span> is set in server environment variables AND your bot is added as an <span className="font-extrabold">Admin</span> in every active channel below. For private channels, enter the <span className="font-mono-num">-100...</span> Channel ID and paste the <span className="font-mono-num">t.me/+...</span> invite link in Optional Join URL.
+              </p>
+
+              {channelDiagnostic && (
+                <div className="clay-inset !rounded-xl p-2.5 space-y-1.5 text-[11px]">
+                  {channelDiagnostic.botError && (
+                    <div className="font-bold text-rose-700 dark:text-rose-300">
+                      {channelDiagnostic.botError}
+                    </div>
+                  )}
+                  {channelDiagnostic.botUsername && (
+                    <div className="font-extrabold text-emerald-700 dark:text-emerald-300">
+                      Connected Bot: @{channelDiagnostic.botUsername}
+                    </div>
+                  )}
+                  {(channelDiagnostic.channels ?? []).map((diag) => (
+                    <div key={diag.id} className="flex items-center justify-between gap-2 flex-wrap border-t border-stone-200/60 dark:border-stone-700/60 pt-1.5 first:border-t-0 first:pt-0">
+                      <span className="font-mono-num font-bold text-stone-900 dark:text-stone-100">
+                        {diag.handle}
+                      </span>
+                      <span
+                        className={`font-extrabold ${
+                          diag.botIsAdmin
+                            ? 'text-emerald-700 dark:text-emerald-300'
+                            : 'text-rose-700 dark:text-rose-300'
+                        }`}
+                      >
+                        {diag.botIsAdmin
+                          ? `Bot is ${diag.botStatus}${diag.userJoined === true ? ' · You Joined' : diag.userJoined === false ? ' · Not Joined' : ''}`
+                          : diag.error || `Status: ${diag.botStatus}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Add Channel Form */}

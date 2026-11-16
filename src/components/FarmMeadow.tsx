@@ -21,7 +21,7 @@ import {
   type FarmArtifactLayout,
 } from '../game/farmArtifacts';
 import { ChickenSprite, EggIcon } from './GameIcons';
-import farmMeadowBg from '../assets/images/clay_farm_meadow_1794678824788.jpg';
+import farmMeadowBg from '../assets/images/realistic_farm_meadow_1794853103805.jpg';
 
 interface FarmMeadowProps {
   profile: UserFarmProfile;
@@ -63,22 +63,22 @@ interface FlyingEggParticle {
 }
 
 const SPAWN_SPOTS = [
-  { x: 46, y: 56 },
-  { x: 35, y: 63 },
-  { x: 54, y: 68 },
-  { x: 64, y: 54 },
-  { x: 42, y: 48 },
-  { x: 68, y: 67 },
-  { x: 30, y: 55 },
-  { x: 50, y: 62 },
-  { x: 40, y: 71 },
-  { x: 60, y: 47 },
-  { x: 25, y: 60 },
-  { x: 58, y: 72 },
-  { x: 72, y: 59 },
-  { x: 36, y: 47 },
-  { x: 48, y: 73 },
-  { x: 55, y: 52 },
+  { x: 46, y: 58 },
+  { x: 34, y: 65 },
+  { x: 55, y: 70 },
+  { x: 66, y: 56 },
+  { x: 41, y: 50 },
+  { x: 70, y: 68 },
+  { x: 28, y: 57 },
+  { x: 50, y: 64 },
+  { x: 38, y: 73 },
+  { x: 60, y: 49 },
+  { x: 23, y: 63 },
+  { x: 60, y: 74 },
+  { x: 75, y: 61 },
+  { x: 33, y: 49 },
+  { x: 47, y: 75 },
+  { x: 56, y: 54 },
 ];
 
 function getStoredMilestone(uid: string): number {
@@ -342,8 +342,8 @@ export function FarmMeadow({
       return {
         id: `${breed}-${idx}`,
         breed,
-        x: Math.max(14, Math.min(84, spot.x + dx)),
-        y: Math.max(42, Math.min(76, spot.y + dy)),
+        x: Math.max(14, Math.min(86, spot.x + dx)),
+        y: Math.max(46, Math.min(77, spot.y + dy)),
         facingLeft: phase >= 2,
         delayMs: (idx % 5) * 200,
       };
@@ -355,26 +355,26 @@ export function FarmMeadow({
   return (
     <section
       aria-label="Interactive Chicken Farm Meadow"
-      className="animate-clay-enter clay-card relative w-full overflow-hidden !rounded-[2rem] bg-gradient-to-b from-sky-200 via-lime-300 to-emerald-600 aspect-[3/4] max-h-[620px] min-h-[430px]"
+      className="animate-clay-enter relative w-full flex-1 lg:flex-none overflow-hidden rounded-none lg:rounded-[2rem] lg:clay-card bg-gradient-to-b from-sky-300 via-emerald-700 to-stone-900 min-h-[540px] h-full lg:h-auto lg:aspect-[9/14] lg:min-h-[600px] lg:max-h-[760px]"
     >
       {!bgFailed && (
         <img
           src={farmMeadowBg}
-          alt="Claymorphism Alpha Gram farm meadow with sculpted red barn, pasture hills, hay bales, and pond"
+          alt="Realistic sunlit country poultry farm meadow with rolling green hills, bright summer sky, grass pasture, and packed-earth courtyard"
           referrerPolicy="no-referrer"
           onError={() => setBgFailed(true)}
-          className="absolute inset-0 w-full h-full object-cover object-center scale-[1.06] select-none pointer-events-none"
+          className="absolute inset-0 w-full h-full object-cover object-center select-none pointer-events-none"
         />
       )}
 
-      {/* Soft sunlit morning rays & ambient golden pollen motes */}
+      {/* Natural golden morning sunlight & subtle floating pollen motes */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden" aria-hidden="true">
         <div
-          className="animate-sunbeam absolute -top-16 -left-10 w-64 h-[135%] bg-gradient-to-b from-amber-100/45 via-amber-50/15 to-transparent blur-xl"
+          className="animate-sunbeam absolute -top-20 -left-16 w-72 h-[125%] bg-gradient-to-b from-amber-100/30 via-yellow-50/10 to-transparent blur-2xl"
         />
         <div
           style={{ animationDelay: '2.4s' }}
-          className="animate-sunbeam absolute -top-20 left-1/3 w-48 h-[135%] bg-gradient-to-b from-white/35 via-amber-100/10 to-transparent blur-xl"
+          className="animate-sunbeam absolute -top-24 left-1/3 w-52 h-[125%] bg-gradient-to-b from-white/25 via-amber-100/8 to-transparent blur-2xl"
         />
         {POLLEN_MOTES.map((mote, idx) => (
           <span
@@ -382,8 +382,8 @@ export function FarmMeadow({
             style={{ left: mote.left, top: mote.top, animationDelay: mote.delay }}
             className={`animate-pollen-drift absolute ${mote.size} rounded-full ${
               boosterActive
-                ? 'bg-emerald-200/90 shadow-[0_0_10px_rgba(52,211,153,0.9)]'
-                : 'bg-amber-200/80 shadow-[0_0_8px_rgba(253,230,138,0.8)]'
+                ? 'bg-emerald-200/85 shadow-[0_0_10px_rgba(52,211,153,0.9)]'
+                : 'bg-amber-100/75 shadow-[0_0_8px_rgba(254,243,199,0.75)]'
             }`}
           />
         ))}
@@ -393,23 +393,24 @@ export function FarmMeadow({
       {boosterActive && (
         <div
           aria-hidden="true"
-          className="animate-booster-aura pointer-events-none absolute inset-0 z-[15] rounded-[2rem] ring-4 ring-inset ring-emerald-400/55 shadow-[inset_0_0_32px_rgba(16,185,129,0.28)]"
+          className="animate-booster-aura pointer-events-none absolute inset-0 z-[15] lg:rounded-[2rem] ring-4 ring-inset ring-emerald-400/55 shadow-[inset_0_0_32px_rgba(16,185,129,0.28)]"
         />
       )}
 
-      {/* Subtle bottom scrim so dock controls maintain high readability */}
-      <div className="absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-black/50 via-black/15 to-transparent pointer-events-none" />
+      {/* Top sky & bottom earth scrims for natural outdoor readability */}
+      <div className="absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-sky-950/35 via-sky-950/10 to-transparent pointer-events-none" />
+      <div className="absolute inset-x-0 bottom-0 h-44 bg-gradient-to-t from-stone-950/70 via-stone-950/25 to-transparent pointer-events-none" />
 
       {/* Top Meadow HUD: 2x Booster Status + Golden Egg Ready Sparkle + Props Studio */}
       {!activeMilestone && (
         <div className="absolute top-3 inset-x-3 z-20 flex items-center justify-between gap-2 pointer-events-none">
           {totalChickens <= 0 ? (
-            <div className="clay-card pointer-events-auto !rounded-2xl px-3 py-1.5 text-[11px] font-extrabold text-stone-700 dark:text-stone-200 inline-flex items-center gap-1.5 shadow-md">
+            <div className="clay-card pointer-events-auto !rounded-2xl min-h-[44px] px-3 py-2 text-[11px] font-extrabold text-stone-700 dark:text-stone-200 inline-flex items-center gap-1.5 shadow-md">
               <EggIcon className="w-3.5 h-3.5 opacity-60 shrink-0" />
               <span>Mining Inactive · 0 Hens</span>
             </div>
           ) : boosterActive ? (
-            <div className="clay-btn-emerald pointer-events-auto px-3 py-1.5 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-md">
+            <div className="clay-btn-emerald pointer-events-auto min-h-[44px] px-3 py-2 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-md">
               <Zap className="w-3.5 h-3.5 fill-current shrink-0" />
               <span className="font-mono-num">2× Feed · {formatCountdownMs(boostRemainingMs)}</span>
             </div>
@@ -418,7 +419,7 @@ export function FarmMeadow({
               type="button"
               onClick={onActivateBooster}
               aria-label={`Activate 2x Laying Feed booster for ${FEED_BOOSTER_COST_COINS} coins`}
-              className="clay-btn clay-card pointer-events-auto !rounded-2xl px-3 py-1.5 text-[11px] font-extrabold text-stone-800 dark:text-stone-100 inline-flex items-center gap-1.5 shadow-md"
+              className="clay-btn clay-card pointer-events-auto !rounded-2xl min-h-[44px] px-3 py-2 text-[11px] font-extrabold text-stone-800 dark:text-stone-100 inline-flex items-center gap-1.5 shadow-md"
             >
               <Zap className="w-3.5 h-3.5 text-amber-500 fill-amber-400 shrink-0" />
               <span>2× Feed ({FEED_BOOSTER_COST_COINS})</span>
@@ -429,7 +430,7 @@ export function FarmMeadow({
 
           <div className="flex items-center gap-1.5">
             {totalChickens > 0 && goldenReady && onGoldenEggDrop && (
-              <div className="animate-clay-badge clay-btn-amber pointer-events-none px-2.5 py-1.5 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1 shadow-md">
+              <div className="animate-clay-badge clay-btn-amber pointer-events-none min-h-[44px] px-2.5 py-2 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1 shadow-md">
                 <Sparkles className="w-3.5 h-3.5 shrink-0" />
                 <span className="hidden sm:inline">Tap Hen for Gold Egg!</span>
                 <span className="sm:hidden">Gold Egg!</span>
@@ -440,7 +441,7 @@ export function FarmMeadow({
                 type="button"
                 onClick={onOpenArtifactsDrawer}
                 aria-label="Customize farm artifacts and meadow props"
-                className="clay-btn clay-card pointer-events-auto !rounded-2xl px-2.5 py-1.5 text-[11px] font-extrabold text-stone-800 dark:text-stone-100 inline-flex items-center gap-1.5 shadow-md"
+                className="clay-btn clay-card pointer-events-auto !rounded-2xl min-h-[44px] px-3 py-2 text-[11px] font-extrabold text-stone-800 dark:text-stone-100 inline-flex items-center gap-1.5 shadow-md"
               >
                 <Trees className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
                 <span>Props</span>
@@ -483,9 +484,9 @@ export function FarmMeadow({
             type="button"
             aria-label="Dismiss milestone notification"
             onClick={() => setActiveMilestone(null)}
-            className="clay-btn clay-btn-neutral w-7 h-7 rounded-xl flex items-center justify-center shrink-0"
+            className="clay-btn clay-btn-neutral w-11 h-11 rounded-xl flex items-center justify-center shrink-0"
           >
-            <X className="w-3.5 h-3.5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
       )}
@@ -564,6 +565,7 @@ export function FarmMeadow({
         {roamingHens.map((hen, idx) => {
           const isPopping = poppedHen?.id === hen.id;
           const isGoldenTarget = goldenReady && Boolean(onGoldenEggDrop) && idx === 0;
+          const depthScale = Number((0.86 + ((hen.y - 46) / 31) * 0.28).toFixed(3));
           return (
             <button
               key={hen.id}
@@ -600,9 +602,11 @@ export function FarmMeadow({
               style={{
                 left: `${hen.x}%`,
                 top: `${hen.y}%`,
-                transition: 'left 2.6s ease-in-out, top 2.6s ease-in-out',
+                zIndex: Math.round(hen.y),
+                transform: `translate(-50%, -50%) scale(${depthScale})`,
+                transition: 'left 2.6s ease-in-out, top 2.6s ease-in-out, transform 2.6s ease-in-out',
               }}
-              className="group absolute -translate-x-1/2 -translate-y-1/2 p-1 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 rounded-full pointer-events-auto"
+              className="group absolute p-1 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 rounded-full pointer-events-auto"
             >
               {isGoldenTarget && (
                 <>
@@ -650,7 +654,7 @@ export function FarmMeadow({
               <div className="relative transition-transform duration-200 ease-out group-hover:scale-110 group-hover:-translate-y-1 group-active:scale-95">
                 <span
                   aria-hidden="true"
-                  className="pointer-events-none absolute -bottom-0.5 left-1/2 -translate-x-1/2 w-10 h-2.5 rounded-full bg-black/30 blur-[2px]"
+                  className="pointer-events-none absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-3 rounded-full bg-stone-950/40 blur-[3px]"
                 />
                 <div
                   key={isPopping ? `pop-${poppedHen.seq}` : 'idle'}
@@ -662,7 +666,7 @@ export function FarmMeadow({
                   >
                     <ChickenSprite
                       breed={hen.breed}
-                      className="w-14 h-14 sm:w-16 sm:h-16 drop-shadow-[0_6px_8px_rgba(15,23,42,0.36)] group-hover:drop-shadow-[0_9px_14px_rgba(15,23,42,0.44)] transition-all duration-200"
+                      className="w-16 h-16 sm:w-[4.4rem] sm:h-[4.4rem] drop-shadow-[0_6px_10px_rgba(12,18,10,0.42)] group-hover:drop-shadow-[0_10px_15px_rgba(12,18,10,0.52)] transition-all duration-200"
                       facingLeft={hen.facingLeft}
                     />
                   </div>
@@ -715,8 +719,8 @@ export function FarmMeadow({
           })}
       </div>
 
-      {/* Bottom Clay HUD Dock */}
-      <div className="absolute inset-x-3 bottom-3 z-20 flex items-end gap-2.5">
+      {/* Bottom HUD Dock (floats above fixed mobile BottomNav) */}
+      <div className="absolute inset-x-3 bottom-[4.85rem] lg:bottom-3 z-20 flex items-end gap-2.5">
         <button
           type="button"
           onClick={onOpenYourFarm}

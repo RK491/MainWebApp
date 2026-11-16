@@ -2552,7 +2552,32 @@ export function normalizeTelegramChannelHandle(rawHandleOrUrl: string): {
   if (!trimmed) {
     return { handle: '', url: '' };
   }
-  const urlMatch = trimmed.match(/^(?:https?:\/\/)?t\.me\/([a-zA-Z0-9_]{3,64})/i);
+
+  // Handle private channel message link: https://t.me/c/1234567890/5 -> -1001234567890
+  const privateMsgMatch = trimmed.match(
+    /^(?:https?:\/\/)?(?:t\.me|telegram\.me)\/c\/(\d{5,20})(?:\/\d+)?/i,
+  );
+  if (privateMsgMatch) {
+    return {
+      handle: `-100${privateMsgMatch[1]}`,
+      url: '',
+    };
+  }
+
+  // Detect private invite links (t.me/+... or t.me/joinchat/...) — cannot be used directly as @chat_id
+  const inviteMatch = trimmed.match(
+    /^(?:https?:\/\/)?(?:t\.me|telegram\.me)\/(\+[a-zA-Z0-9_-]+|joinchat\/[a-zA-Z0-9_-]+)/i,
+  );
+  if (inviteMatch) {
+    return {
+      handle: '',
+      url: `https://t.me/${inviteMatch[1]}`,
+    };
+  }
+
+  const urlMatch = trimmed.match(
+    /^(?:https?:\/\/)?(?:t\.me|telegram\.me)\/([a-zA-Z0-9_]{3,64})/i,
+  );
   if (urlMatch) {
     const slug = urlMatch[1];
     return {
@@ -2928,6 +2953,7 @@ export function matchesBannedUserRecord(
 }
 
 export const MAX_EXTRA_ADMINS = 30;
+export const ADMIN_PASSCODE_VAULT_UID = 'admin_passcode_vault';
 
 export const DEFAULT_ADMINS_CONFIG: AdminsConfig = {
   adminIds: [],
@@ -2940,10 +2966,10 @@ export function getEffectiveAdminIds(adminsConfig?: AdminsConfig | null): string
   const seen = new Set<string>();
   const addId = (raw: unknown) => {
     const trimmed = String(raw || '').trim();
-    if (!trimmed) return;
+    if (!trimmed || trimmed === ADMIN_PASSCODE_VAULT_UID) return;
     seen.add(trimmed);
     const norm = normalizePlayerBanId(trimmed);
-    if (norm) seen.add(norm);
+    if (norm && norm !== ADMIN_PASSCODE_VAULT_UID) seen.add(norm);
     const tg = extractTelegramNumericUserId(trimmed);
     if (tg) seen.add(tg);
   };
@@ -2962,7 +2988,7 @@ export function matchesAdminRecord(
 ): boolean {
   const target =
     typeof adminIdOrEntry === 'string' ? adminIdOrEntry : adminIdOrEntry?.uid;
-  if (!target) return false;
+  if (!target || target === ADMIN_PASSCODE_VAULT_UID) return false;
   return matchesBannedUserRecord(playerId, { uid: target });
 }
 

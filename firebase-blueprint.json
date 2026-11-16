@@ -318,6 +318,18 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["adminIds", "admins", "updatedAtMs", "updatedAt"]
+    },
+    "AdminSecurityConfig": {
+      "title": "AdminSecurityConfig",
+      "description": "Salted scrypt hash of the custom Admin Console passcode updated from the Admin Panel.",
+      "type": "object",
+      "properties": {
+        "passcodeHash": { "type": "string", "minLength": 16, "maxLength": 200 },
+        "updatedBy": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "updatedAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["passcodeHash", "updatedBy", "updatedAtMs", "updatedAt"]
     }
   },
   "firestore": {
@@ -363,7 +375,7 @@
     },
     "/app_config/{configId}": {
       "schema": { "$ref": "#/entities/AdsConfig" },
-      "description": "Global app configuration for ads, seasonal leaderboard, and required Telegram channels."
+      "description": "Global app configuration for ads, seasonal leaderboard, required Telegram channels, admins, and admin security hash."
     },
     "/banned_users/{playerId}": {
       "schema": { "$ref": "#/entities/BannedUser" },

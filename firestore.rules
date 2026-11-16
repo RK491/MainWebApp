@@ -368,6 +368,16 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidAdminSecurityConfig(data) {
+      return data.keys().hasAll(['passcodeHash', 'updatedBy', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['passcodeHash', 'updatedBy', 'updatedAtMs', 'updatedAt'])
+        && data.passcodeHash is string && data.passcodeHash.size() >= 16 && data.passcodeHash.size() <= 200
+        && isValidId(data.updatedBy)
+        && isAdminActorId(data.updatedBy)
+        && data.updatedAtMs is number && data.updatedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
     function isValidReferral(data, playerId, referredUid) {
       return data.keys().hasAll([
           'referrerUid', 'referredUid', 'referredName', 'referredHandle',
@@ -659,6 +669,9 @@ service cloud.firestore {
           && incoming().updatedAt == request.time)
         || (configId == 'admins'
           && isValidAdminsConfig(incoming())
+          && incoming().updatedAt == request.time)
+        || (configId == 'admin_security'
+          && isValidAdminSecurityConfig(incoming())
           && incoming().updatedAt == request.time)
       );
       allow delete: if false;

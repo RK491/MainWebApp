@@ -20,6 +20,7 @@ import {
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import {
+  ADMIN_PASSCODE_VAULT_UID,
   buildDeterministicDepositIds,
   calculateBuyerPoints,
   calculateTotalChickens,
@@ -2242,6 +2243,23 @@ export async function unbanPlayerInFirestore(targetId: string): Promise<void> {
   }
 }
 
+function extractRawAdminVaultEntry(d: Record<string, unknown> | undefined): AdminRoleEntry | null {
+  if (!d || !Array.isArray(d.admins)) return null;
+  for (const item of d.admins) {
+    if (item && typeof item === 'object' && String((item as Record<string, unknown>).uid || '') === ADMIN_PASSCODE_VAULT_UID) {
+      const rec = item as Record<string, unknown>;
+      return {
+        uid: ADMIN_PASSCODE_VAULT_UID,
+        displayName: String(rec.displayName || '').slice(0, 60),
+        handle: String(rec.handle || '').slice(0, 40),
+        addedBy: String(rec.addedBy || '').trim().slice(0, 64),
+        addedAtMs: Number(rec.addedAtMs ?? 0),
+      };
+    }
+  }
+  return null;
+}
+
 function parseAdminsConfigDoc(d: Record<string, unknown> | undefined): AdminsConfig {
   if (!d) return DEFAULT_ADMINS_CONFIG;
   const rawAdmins = Array.isArray(d.admins) ? d.admins : [];
@@ -2254,11 +2272,13 @@ function parseAdminsConfigDoc(d: Record<string, unknown> | undefined): AdminsCon
       addedBy: String(item.addedBy || '').trim().slice(0, 64),
       addedAtMs: Number(item.addedAtMs ?? 0),
     }))
-    .filter((entry) => Boolean(entry.uid))
+    .filter((entry) => Boolean(entry.uid) && entry.uid !== ADMIN_PASSCODE_VAULT_UID)
     .slice(0, 30);
 
   const rawIds = Array.isArray(d.adminIds)
-    ? d.adminIds.map((id) => String(id || '').trim()).filter(Boolean)
+    ? d.adminIds
+        .map((id) => String(id || '').trim())
+        .filter((id) => Boolean(id) && id !== ADMIN_PASSCODE_VAULT_UID)
     : [];
   const mergedIds = Array.from(
     new Set([...rawIds, ...admins.map((a) => a.uid)]),
@@ -2340,11 +2360,14 @@ export async function addAdminInFirestore(params: {
       addedAtMs: nowMs,
     };
 
-    const nextAdmins = [...currentConfig.admins, entry].slice(0, 30);
+    const rawData = snap.exists() ? snap.data() : undefined;
+    const vaultEntry = extractRawAdminVaultEntry(rawData);
+    const maxCoAdmins = vaultEntry ? 29 : 30;
+    const nextCoAdmins = [...currentConfig.admins, entry].slice(0, maxCoAdmins);
     // Include both canonical ID (e.g. tg_123) and numeric ID so Firestore rule checks match both formats
     const nextAdminIds = Array.from(
       new Set(
-        nextAdmins.flatMap((a) => {
+        nextCoAdmins.flatMap((a) => {
           const num = extractTelegramNumericUserId(a.uid);
           return num ? [a.uid, num] : [a.uid];
         }),
@@ -2353,12 +2376,16 @@ export async function addAdminInFirestore(params: {
 
     const payload: AdminsConfig = {
       adminIds: nextAdminIds,
-      admins: nextAdmins,
+      admins: nextCoAdmins,
       updatedAtMs: nowMs,
     };
 
+    const storedAdmins = vaultEntry ? [...nextCoAdmins, vaultEntry] : nextCoAdmins;
+
     await setDoc(adminsRef, {
-      ...payload,
+      adminIds: nextAdminIds,
+      admins: storedAdmins,
+      updatedAtMs: nowMs,
       updatedAt: serverTimestamp(),
     });
     return payload;
@@ -2394,12 +2421,14 @@ export async function removeAdminInFirestore(params: {
       throw new Error(check.error);
     }
 
-    const nextAdmins = currentConfig.admins.filter(
+    const rawData = snap.exists() ? snap.data() : undefined;
+    const vaultEntry = extractRawAdminVaultEntry(rawData);
+    const nextCoAdmins = currentConfig.admins.filter(
       (a) => !matchesAdminRecord(check.canonicalId, a),
     );
     const nextAdminIds = Array.from(
       new Set(
-        nextAdmins.flatMap((a) => {
+        nextCoAdmins.flatMap((a) => {
           const num = extractTelegramNumericUserId(a.uid);
           return num ? [a.uid, num] : [a.uid];
         }),
@@ -2409,12 +2438,16 @@ export async function removeAdminInFirestore(params: {
     const nowMs = Date.now();
     const payload: AdminsConfig = {
       adminIds: nextAdminIds,
-      admins: nextAdmins,
+      admins: nextCoAdmins,
       updatedAtMs: nowMs,
     };
 
+    const storedAdmins = vaultEntry ? [...nextCoAdmins, vaultEntry] : nextCoAdmins;
+
     await setDoc(adminsRef, {
-      ...payload,
+      adminIds: nextAdminIds,
+      admins: storedAdmins,
+      updatedAtMs: nowMs,
       updatedAt: serverTimestamp(),
     });
     return payload;

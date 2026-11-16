@@ -10,6 +10,7 @@ import {
   collection,
   doc,
   getDoc,
+  getDocFromServer,
   getDocs,
   getFirestore,
   limit,
@@ -17,9 +18,14 @@ import {
   query,
   runTransaction,
   serverTimestamp,
+  setDoc,
+  type DocumentData,
+  type DocumentReference,
+  type DocumentSnapshot,
   type Firestore,
 } from 'firebase/firestore';
 import {
+  ADMIN_PASSCODE_VAULT_UID,
   buildReferralBotNotificationMessage,
   DEFAULT_CHANNELS_CONFIG,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
@@ -31,6 +37,7 @@ import {
   MAX_DEPOSIT_COINS,
   MIN_DEPOSIT_COINS,
   normalizeTelegramChannelEntry,
+  normalizeTelegramChannelHandle,
   PRIMARY_ADMIN_TELEGRAM_ID,
   PROMO_CODES,
   REFERRER_SIGNUP_BONUS_COINS,
@@ -101,7 +108,10 @@ const GRAM_JETTON_MASTER =
 const TELEGRAM_PAYOUT_CHANNEL = normalizeTelegramChannel(
   process.env.TELEGRAM_PAYOUT_CHANNEL || '@AG_PAYOUTS',
 );
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '')
+  .trim()
+  .replace(/^['"]|['"]$/g, '')
+  .replace(/^bot(?=\d+:)/i, '');
 const TELEGRAM_BOT_USERNAME_ENV = normalizeTelegramBotUsername(
   process.env.TELEGRAM_BOT_USERNAME || process.env.VITE_TELEGRAM_BOT_USERNAME || '',
 );
@@ -118,24 +128,393 @@ const ADMIN_TELEGRAM_IDS = (process.env.ADMIN_TELEGRAM_IDS || '')
   .filter(Boolean);
 
 // ============================================================================
-// ADMIN PASSCODE CONFIGURATION
-// Option A (Recommended): Set ADMIN_PASSCODE=your_secret in your `.env` file
-// Option B: Change DEFAULT_ADMIN_PASSCODE right here in `server.ts`
+// ADMIN PASSCODE CONFIGURATION & PERSISTENT STORAGE
+// Passcode checks:
+// 1. Custom passcode hash saved in Firestore (`app_config/admin_security`) or `.data/admin_security.json`
+// 2. Fallback to `process.env.ADMIN_PASSCODE` or `DEFAULT_ADMIN_PASSCODE` ('750891')
 // ============================================================================
 export const DEFAULT_ADMIN_PASSCODE = '750891';
-const ADMIN_PASSCODE = (process.env.ADMIN_PASSCODE || DEFAULT_ADMIN_PASSCODE).trim();
+const ENV_ADMIN_PASSCODE = (process.env.ADMIN_PASSCODE || '').trim();
+const FALLBACK_ADMIN_PASSCODE = ENV_ADMIN_PASSCODE || DEFAULT_ADMIN_PASSCODE;
+const ADMIN_SECURITY_FILE = path.resolve(__dirname, '.data', 'admin_security.json');
 
-function verifyAdminPasscode(provided: string): boolean {
+interface StoredAdminSecurityRecord {
+  passcodeHash: string;
+  updatedBy: string;
+  updatedAtMs: number;
+  source: 'database' | 'server_file';
+}
+
+let cachedCustomAdminSecurity: StoredAdminSecurityRecord | null | undefined = undefined;
+let localFilePersistFailed = false;
+let dbSeedAttempted = false;
+
+function hashAdminPasscode(rawPasscode: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(rawPasscode.trim(), salt, 32).toString('hex');
+  return `scrypt$${salt}$${derived}`;
+}
+
+function hashCompactAdminPasscode(rawPasscode: string): {
+  saltB64: string;
+  hashB64: string;
+  combined: string;
+} {
+  const saltB64 = crypto.randomBytes(16).toString('base64url');
+  const hashB64 = crypto.scryptSync(rawPasscode.trim(), saltB64, 32).toString('base64url');
+  return {
+    saltB64,
+    hashB64,
+    combined: `s1$${saltB64}$${hashB64}`,
+  };
+}
+
+function verifyScryptPasscode(provided: string, storedHash: string): boolean {
+  const parts = storedHash.split('$');
+  if (parts.length !== 3) return false;
+  const [scheme, salt, expectedEncoded] = parts;
+  if (!salt || !expectedEncoded) return false;
+  try {
+    const derived = crypto.scryptSync(provided.trim(), salt, 32);
+    if (scheme === 'scrypt') {
+      const expected = Buffer.from(expectedEncoded, 'hex');
+      return derived.length === expected.length && crypto.timingSafeEqual(derived, expected);
+    }
+    if (scheme === 's1') {
+      const expected = Buffer.from(expectedEncoded, 'base64url');
+      return derived.length === expected.length && crypto.timingSafeEqual(derived, expected);
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function extractPasscodeRecordFromAdminsDoc(
+  d: Record<string, unknown> | undefined,
+): StoredAdminSecurityRecord | null {
+  if (!d || !Array.isArray(d.admins)) return null;
+  for (const item of d.admins) {
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Record<string, unknown>;
+    if (String(rec.uid || '') !== ADMIN_PASSCODE_VAULT_UID) continue;
+    const dn = String(rec.displayName || '').trim();
+    const h = String(rec.handle || '').trim();
+    if (dn.startsWith('s1$') && h.startsWith('salt$')) {
+      const hashB64 = dn.slice(3);
+      const saltB64 = h.slice(5);
+      if (hashB64.length >= 20 && saltB64.length >= 12) {
+        return {
+          passcodeHash: `s1$${saltB64}$${hashB64}`,
+          updatedBy: String(rec.addedBy || PRIMARY_ADMIN_TELEGRAM_ID),
+          updatedAtMs: Number(rec.addedAtMs || d.updatedAtMs || 0),
+          source: 'database',
+        };
+      }
+    }
+  }
+  return null;
+}
+
+function readLocalAdminSecurityFile(): StoredAdminSecurityRecord | null {
+  try {
+    if (!fs.existsSync(ADMIN_SECURITY_FILE)) return null;
+    const raw = fs.readFileSync(ADMIN_SECURITY_FILE, 'utf8');
+    const parsed = JSON.parse(raw) as Partial<StoredAdminSecurityRecord>;
+    if (
+      typeof parsed.passcodeHash === 'string' &&
+      (parsed.passcodeHash.startsWith('scrypt$') || parsed.passcodeHash.startsWith('s1$'))
+    ) {
+      return {
+        passcodeHash: parsed.passcodeHash,
+        updatedBy: String(parsed.updatedBy || PRIMARY_ADMIN_TELEGRAM_ID),
+        updatedAtMs: Number(parsed.updatedAtMs || 0),
+        source: 'server_file',
+      };
+    }
+  } catch {
+    // Ignore local file errors
+  }
+  return null;
+}
+
+function writeLocalAdminSecurityFile(record: Omit<StoredAdminSecurityRecord, 'source'>): boolean {
+  try {
+    const dir = path.dirname(ADMIN_SECURITY_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(
+      ADMIN_SECURITY_FILE,
+      JSON.stringify(
+        {
+          passcodeHash: record.passcodeHash,
+          updatedBy: record.updatedBy,
+          updatedAtMs: record.updatedAtMs,
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+    return true;
+  } catch {
+    // Ignore filesystem errors on read-only containers
+    return false;
+  }
+}
+
+async function getFreshDoc(ref: DocumentReference<DocumentData>): Promise<DocumentSnapshot<DocumentData>> {
+  try {
+    return await getDocFromServer(ref);
+  } catch {
+    return getDoc(ref);
+  }
+}
+
+async function writePasscodeToFirestore(params: {
+  compactSaltB64: string;
+  compactHashB64: string;
+  scryptHexHash: string;
+  canonicalActor: string;
+  nowMs: number;
+}): Promise<boolean> {
+  if (!serverDb) return false;
+  let savedToAdmins = false;
+  let savedToSecurity = false;
+
+  try {
+    const adminsRef = doc(serverDb, 'app_config', 'admins');
+    const snap = await getFreshDoc(adminsRef);
+    const existingData = snap.exists() ? (snap.data() as Record<string, unknown>) : {};
+    const rawAdmins = Array.isArray(existingData.admins) ? existingData.admins : [];
+    const realAdmins = rawAdmins
+      .filter(
+        (item): item is Record<string, unknown> =>
+          Boolean(
+            item &&
+              typeof item === 'object' &&
+              String((item as Record<string, unknown>).uid || '') !== ADMIN_PASSCODE_VAULT_UID,
+          ),
+      )
+      .slice(0, 29);
+
+    const existingAdminIds = Array.isArray(existingData.adminIds)
+      ? existingData.adminIds
+          .map((id) => String(id || '').trim())
+          .filter((id) => Boolean(id) && id !== ADMIN_PASSCODE_VAULT_UID)
+          .slice(0, 30)
+      : [];
+
+    const vaultEntry = {
+      uid: ADMIN_PASSCODE_VAULT_UID,
+      displayName: `s1$${params.compactHashB64}`.slice(0, 60),
+      handle: `salt$${params.compactSaltB64}`.slice(0, 40),
+      addedBy: params.canonicalActor,
+      addedAtMs: params.nowMs,
+    };
+
+    await setDoc(adminsRef, {
+      adminIds: existingAdminIds,
+      admins: [...realAdmins, vaultEntry],
+      updatedAtMs: params.nowMs,
+      updatedAt: serverTimestamp(),
+    });
+    savedToAdmins = true;
+  } catch {
+    savedToAdmins = false;
+  }
+
+  try {
+    await setDoc(doc(serverDb, 'app_config', 'admin_security'), {
+      passcodeHash: params.scryptHexHash,
+      updatedBy: params.canonicalActor,
+      updatedAtMs: params.nowMs,
+      updatedAt: serverTimestamp(),
+    });
+    savedToSecurity = true;
+  } catch {
+    savedToSecurity = false;
+  }
+
+  return savedToAdmins || savedToSecurity;
+}
+
+async function ensureAdminPasscodeSeededInDatabase(): Promise<StoredAdminSecurityRecord | null> {
+  if (!serverDb || dbSeedAttempted) return null;
+  dbSeedAttempted = true;
+  try {
+    const [secSnap, adminsSnap] = await Promise.all([
+      getFreshDoc(doc(serverDb, 'app_config', 'admin_security')).catch(() => null),
+      getFreshDoc(doc(serverDb, 'app_config', 'admins')).catch(() => null),
+    ]);
+    if (secSnap?.exists() && typeof secSnap.data().passcodeHash === 'string') {
+      return null;
+    }
+    if (adminsSnap?.exists() && extractPasscodeRecordFromAdminsDoc(adminsSnap.data())) {
+      return null;
+    }
+    const nowMs = Date.now();
+    const compact = hashCompactAdminPasscode(FALLBACK_ADMIN_PASSCODE);
+    const scryptHex = hashAdminPasscode(FALLBACK_ADMIN_PASSCODE);
+    const ok = await writePasscodeToFirestore({
+      compactSaltB64: compact.saltB64,
+      compactHashB64: compact.hashB64,
+      scryptHexHash: scryptHex,
+      canonicalActor: `tg_${PRIMARY_ADMIN_TELEGRAM_ID}`,
+      nowMs,
+    });
+    if (ok) {
+      const seeded: StoredAdminSecurityRecord = {
+        passcodeHash: compact.combined,
+        updatedBy: `tg_${PRIMARY_ADMIN_TELEGRAM_ID}`,
+        updatedAtMs: nowMs,
+        source: 'database',
+      };
+      cachedCustomAdminSecurity = seeded;
+      return seeded;
+    }
+  } catch {
+    // Non-fatal seed failure
+  }
+  return null;
+}
+
+async function loadActiveAdminSecurity(): Promise<{
+  custom: StoredAdminSecurityRecord | null;
+  source: 'database' | 'server_file' | 'env' | 'default';
+  updatedAtMs: number;
+}> {
+  if (serverDb) {
+    try {
+      const snap = await getFreshDoc(doc(serverDb, 'app_config', 'admin_security'));
+      if (snap.exists()) {
+        const d = snap.data();
+        if (
+          typeof d.passcodeHash === 'string' &&
+          (d.passcodeHash.startsWith('scrypt$') || d.passcodeHash.startsWith('s1$'))
+        ) {
+          const rec: StoredAdminSecurityRecord = {
+            passcodeHash: d.passcodeHash,
+            updatedBy: String(d.updatedBy || PRIMARY_ADMIN_TELEGRAM_ID),
+            updatedAtMs: Number(d.updatedAtMs || 0),
+            source: 'database',
+          };
+          cachedCustomAdminSecurity = rec;
+          return { custom: rec, source: 'database', updatedAtMs: rec.updatedAtMs };
+        }
+      }
+    } catch {
+      // Fall through to app_config/admins vault
+    }
+
+    try {
+      const adminsSnap = await getFreshDoc(doc(serverDb, 'app_config', 'admins'));
+      if (adminsSnap.exists()) {
+        const vaultRec = extractPasscodeRecordFromAdminsDoc(adminsSnap.data());
+        if (vaultRec) {
+          cachedCustomAdminSecurity = vaultRec;
+          return { custom: vaultRec, source: 'database', updatedAtMs: vaultRec.updatedAtMs };
+        }
+      }
+    } catch {
+      // Fall through
+    }
+
+    const seeded = await ensureAdminPasscodeSeededInDatabase();
+    if (seeded) {
+      return { custom: seeded, source: 'database', updatedAtMs: seeded.updatedAtMs };
+    }
+  }
+
+  const localRec = readLocalAdminSecurityFile();
+  if (localRec) {
+    cachedCustomAdminSecurity = localRec;
+    return { custom: localRec, source: 'server_file', updatedAtMs: localRec.updatedAtMs };
+  }
+
+  if (localFilePersistFailed && cachedCustomAdminSecurity) {
+    return {
+      custom: cachedCustomAdminSecurity,
+      source: cachedCustomAdminSecurity.source,
+      updatedAtMs: cachedCustomAdminSecurity.updatedAtMs,
+    };
+  }
+
+  return {
+    custom: null,
+    source: ENV_ADMIN_PASSCODE ? 'env' : 'default',
+    updatedAtMs: 0,
+  };
+}
+
+async function saveNewAdminPasscode(
+  newPasscode: string,
+  updatedBy: string,
+): Promise<{ source: 'database' | 'server_file'; updatedAtMs: number }> {
+  const nowMs = Date.now();
+  const compact = hashCompactAdminPasscode(newPasscode);
+  const scryptHex = hashAdminPasscode(newPasscode);
+  const canonicalActor =
+    String(updatedBy || `tg_${PRIMARY_ADMIN_TELEGRAM_ID}`)
+      .trim()
+      .replace(/[^a-zA-Z0-9_-]/g, '')
+      .slice(0, 64) || `tg_${PRIMARY_ADMIN_TELEGRAM_ID}`;
+
+  const wroteLocal = writeLocalAdminSecurityFile({
+    passcodeHash: compact.combined,
+    updatedBy: canonicalActor,
+    updatedAtMs: nowMs,
+  });
+  localFilePersistFailed = !wroteLocal;
+
+  const savedToFirestore = await writePasscodeToFirestore({
+    compactSaltB64: compact.saltB64,
+    compactHashB64: compact.hashB64,
+    scryptHexHash: scryptHex,
+    canonicalActor,
+    nowMs,
+  });
+
+  const source: 'database' | 'server_file' = savedToFirestore ? 'database' : 'server_file';
+  cachedCustomAdminSecurity = {
+    passcodeHash: compact.combined,
+    updatedBy: canonicalActor,
+    updatedAtMs: nowMs,
+    source,
+  };
+  return { source, updatedAtMs: nowMs };
+}
+
+async function verifyAdminPasscodeAsync(provided: string): Promise<{
+  ok: boolean;
+  source: 'database' | 'server_file' | 'env' | 'default';
+  updatedAtMs: number;
+}> {
   const cleanProvided = provided.trim();
-  if (!cleanProvided || !ADMIN_PASSCODE) return false;
+  const security = await loadActiveAdminSecurity();
+  if (!cleanProvided) {
+    return { ok: false, source: security.source, updatedAtMs: security.updatedAtMs };
+  }
+  if (security.custom) {
+    return {
+      ok: verifyScryptPasscode(cleanProvided, security.custom.passcodeHash),
+      source: security.source,
+      updatedAtMs: security.updatedAtMs,
+    };
+  }
   const a = Buffer.from(cleanProvided, 'utf8');
-  const b = Buffer.from(ADMIN_PASSCODE, 'utf8');
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+  const b = Buffer.from(FALLBACK_ADMIN_PASSCODE, 'utf8');
+  return {
+    ok: a.length === b.length && crypto.timingSafeEqual(a, b),
+    source: security.source,
+    updatedAtMs: security.updatedAtMs,
+  };
 }
 
 const SESSION_SIGNING_SECRET = crypto
   .createHash('sha256')
-  .update(`chickenland_session_v2:${PRIMARY_ADMIN_TELEGRAM_ID}:${TELEGRAM_BOT_TOKEN}:${ADMIN_PASSCODE}`)
+  .update(`chickenland_session_v2:${PRIMARY_ADMIN_TELEGRAM_ID}:${TELEGRAM_BOT_TOKEN}:${FALLBACK_ADMIN_PASSCODE}`)
   .digest('hex');
 
 let cachedBotUsername = TELEGRAM_BOT_USERNAME_ENV || '';
@@ -361,7 +740,7 @@ async function resolveRawDepositAddress(): Promise<string> {
 async function loadChannelsConfigFromFirestore(): Promise<ChannelsConfig> {
   if (!serverDb) return DEFAULT_CHANNELS_CONFIG;
   try {
-    const snap = await getDoc(doc(serverDb, 'app_config', 'channels'));
+    const snap = await getFreshDoc(doc(serverDb, 'app_config', 'channels'));
     if (!snap.exists()) return DEFAULT_CHANNELS_CONFIG;
     const d = snap.data();
     const rawList = Array.isArray(d.channels) ? d.channels : [];
@@ -387,15 +766,61 @@ async function loadChannelsConfigFromFirestore(): Promise<ChannelsConfig> {
 async function loadExtraAdminIdsFromFirestore(): Promise<string[]> {
   if (!serverDb) return [];
   try {
-    const snap = await getDoc(doc(serverDb, 'app_config', 'admins'));
+    const snap = await getFreshDoc(doc(serverDb, 'app_config', 'admins'));
     if (!snap.exists()) return [];
     const d = snap.data();
     return Array.isArray(d.adminIds)
-      ? d.adminIds.map((id) => String(id).trim()).filter(Boolean)
+      ? d.adminIds
+          .map((id) => String(id).trim())
+          .filter((id) => Boolean(id) && id !== ADMIN_PASSCODE_VAULT_UID)
       : [];
   } catch {
     return [];
   }
+}
+
+async function fetchTelegramChatMember(chatId: string, userId: string): Promise<{
+  ok: boolean;
+  description?: string;
+  result?: { status?: string; is_member?: boolean };
+}> {
+  const tryLookup = async (targetChatId: string) => {
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChatMember?chat_id=${encodeURIComponent(
+      targetChatId,
+    )}&user_id=${encodeURIComponent(userId)}`;
+    const tgRes = await fetch(url, { signal: AbortSignal.timeout(7000) });
+    return (await tgRes.json()) as {
+      ok?: boolean;
+      description?: string;
+      result?: { status?: string; is_member?: boolean };
+    };
+  };
+
+  const normalizedHandle = normalizeTelegramChannelHandle(chatId).handle || chatId.trim();
+  const primary = await tryLookup(normalizedHandle);
+  if (primary.ok && primary.result) {
+    return { ok: true, result: primary.result };
+  }
+
+  // Retry with -100 prefix if admin saved positive numeric channel ID without -100
+  if (
+    /^\d{6,16}$/.test(normalizedHandle) &&
+    String(primary.description || '').toLowerCase().includes('chat not found')
+  ) {
+    const retried = await tryLookup(`-100${normalizedHandle}`);
+    if (retried.ok && retried.result) {
+      return { ok: true, result: retried.result };
+    }
+    return {
+      ok: false,
+      description: retried.description || primary.description,
+    };
+  }
+
+  return {
+    ok: false,
+    description: primary.description,
+  };
 }
 
 async function startServer() {
@@ -403,9 +828,10 @@ async function startServer() {
   app.use(express.json());
 
   app.get('/api/config', async (_req, res) => {
-    const [channelsCfg, telegramBotUsername] = await Promise.all([
+    const [channelsCfg, telegramBotUsername, adminSecurity] = await Promise.all([
       loadChannelsConfigFromFirestore(),
       resolveTelegramBotUsername(),
+      loadActiveAdminSecurity(),
     ]);
     const activeChannels = getActiveRequiredChannels(channelsCfg);
     res.json({
@@ -420,6 +846,8 @@ async function startServer() {
       telegramBotUsername,
       telegramAppShortName: TELEGRAM_MINIAPP_SHORT_NAME,
       persistentLedgerEnabled: Boolean(serverDb),
+      adminPasscodeSource: adminSecurity.source,
+      adminPasscodeUpdatedAtMs: adminSecurity.updatedAtMs,
     });
   });
 
@@ -474,7 +902,6 @@ async function startServer() {
           ...ch,
           joined: false,
           status: 'no_telegram_user',
-          error: 'Open inside Telegram Mini App to verify membership',
         })),
         checkedAtMs: Date.now(),
       });
@@ -501,18 +928,7 @@ async function startServer() {
     const checks = await Promise.all(
       targetChannels.map(async (ch) => {
         try {
-          const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChatMember?chat_id=${encodeURIComponent(
-            ch.handle,
-          )}&user_id=${encodeURIComponent(numericUserId)}`;
-          const tgRes = await fetch(url, { signal: AbortSignal.timeout(7000) });
-          const tgData = (await tgRes.json()) as {
-            ok?: boolean;
-            description?: string;
-            result?: {
-              status?: string;
-              is_member?: boolean;
-            };
-          };
+          const tgData = await fetchTelegramChatMember(ch.handle, numericUserId!);
 
           if (!tgData.ok || !tgData.result) {
             return {
@@ -550,6 +966,160 @@ async function startServer() {
       channels: checks,
       checkedAtMs: Date.now(),
     });
+  });
+
+  app.post('/api/telegram/test-channels', async (req, res) => {
+    const body = req.body as {
+      playerId?: string;
+      initData?: string;
+      token?: string;
+      requiredChannels?: Array<Partial<RequiredTelegramChannel>>;
+    };
+    const rawPlayerId = String(body.playerId || '').trim();
+    const rawInitData = String(body.initData || '').trim();
+    const authHeader = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+    const candidateToken = String(body.token || authHeader || '').trim();
+
+    const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
+    const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
+
+    let resolvedPlayerId = rawPlayerId;
+    if (candidateToken) {
+      const verified = verifySessionToken(candidateToken);
+      if (verified?.role === 'admin' && typeof verified.playerId === 'string') {
+        resolvedPlayerId = verified.playerId;
+      }
+    }
+    if (rawInitData && TELEGRAM_BOT_TOKEN) {
+      const verifiedInit = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN);
+      if (verifiedInit.valid && verifiedInit.playerId) {
+        resolvedPlayerId = verifiedInit.playerId;
+      }
+    }
+
+    if (!isAdminPlayerId(resolvedPlayerId, effectiveExtraAdmins)) {
+      res.status(403).json({
+        ok: false,
+        error: 'Restricted to authorized Admin IDs.',
+      });
+      return;
+    }
+
+    const channelsCfg = await loadChannelsConfigFromFirestore();
+    const targetChannels = Array.isArray(body.requiredChannels)
+      ? body.requiredChannels
+          .map((ch, idx) => normalizeTelegramChannelEntry(ch, idx))
+          .filter((ch): ch is RequiredTelegramChannel => Boolean(ch && ch.enabled !== false))
+          .slice(0, 10)
+      : getActiveRequiredChannels(channelsCfg);
+
+    if (!TELEGRAM_BOT_TOKEN) {
+      res.json({
+        ok: true,
+        botConfigured: false,
+        botUsername: null,
+        botError: 'TELEGRAM_BOT_TOKEN is not set in server environment variables.',
+        channels: targetChannels.map((ch) => ({
+          id: ch.id,
+          handle: ch.handle,
+          botIsAdmin: false,
+          botStatus: 'bot_unconfigured',
+          error: 'TELEGRAM_BOT_TOKEN not configured on server',
+        })),
+      });
+      return;
+    }
+
+    try {
+      const meRes = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`, {
+        signal: AbortSignal.timeout(6000),
+      });
+      const meData = (await meRes.json()) as {
+        ok?: boolean;
+        description?: string;
+        result?: { id?: number | string; username?: string };
+      };
+      if (!meData.ok || !meData.result?.id) {
+        res.json({
+          ok: true,
+          botConfigured: true,
+          botUsername: null,
+          botError: meData.description || 'Invalid TELEGRAM_BOT_TOKEN (getMe failed)',
+          channels: targetChannels.map((ch) => ({
+            id: ch.id,
+            handle: ch.handle,
+            botIsAdmin: false,
+            botStatus: 'token_invalid',
+            error: meData.description || 'Bot token rejected by Telegram',
+          })),
+        });
+        return;
+      }
+
+      const botId = String(meData.result.id);
+      const botUsername = meData.result.username || '';
+      const adminNumericId = extractTelegramNumericUserId(resolvedPlayerId);
+
+      const results = await Promise.all(
+        targetChannels.map(async (ch) => {
+          try {
+            const botMember = await fetchTelegramChatMember(ch.handle, botId);
+            if (!botMember.ok || !botMember.result) {
+              return {
+                id: ch.id,
+                handle: ch.handle,
+                botIsAdmin: false,
+                botStatus: 'api_error',
+                error: botMember.description || 'Could not inspect bot status in channel',
+              };
+            }
+            const botStatus = String(botMember.result.status || 'left').toLowerCase();
+            const botIsAdmin = botStatus === 'administrator' || botStatus === 'creator';
+            let userJoined: boolean | null = null;
+            let userStatus: string | null = null;
+            if (adminNumericId) {
+              const adminCheck = await fetchTelegramChatMember(ch.handle, adminNumericId);
+              if (adminCheck.ok && adminCheck.result) {
+                userStatus = String(adminCheck.result.status || 'left');
+                userJoined = isTelegramMemberStatusJoined(userStatus, adminCheck.result.is_member);
+              }
+            }
+            return {
+              id: ch.id,
+              handle: ch.handle,
+              botIsAdmin,
+              botStatus,
+              userJoined,
+              userStatus,
+              error: botIsAdmin ? undefined : `Bot status is "${botStatus}" — promote bot to Admin in ${ch.handle}`,
+            };
+          } catch (err) {
+            return {
+              id: ch.id,
+              handle: ch.handle,
+              botIsAdmin: false,
+              botStatus: 'network_error',
+              error: err instanceof Error ? err.message : 'Telegram API timeout',
+            };
+          }
+        }),
+      );
+
+      res.json({
+        ok: true,
+        botConfigured: true,
+        botUsername,
+        channels: results,
+      });
+    } catch (err) {
+      res.json({
+        ok: true,
+        botConfigured: true,
+        botUsername: null,
+        botError: err instanceof Error ? err.message : 'Failed to connect to Telegram API',
+        channels: [],
+      });
+    }
   });
 
   app.post('/api/auth/verify-telegram', (req, res) => {
@@ -633,10 +1203,12 @@ async function startServer() {
       return;
     }
 
-    if (!verifyAdminPasscode(rawPasscode)) {
+    const authResult = await verifyAdminPasscodeAsync(rawPasscode);
+    if (!authResult.ok) {
       res.status(403).json({
         ok: false,
         requiresPasscode: true,
+        passcodeSource: authResult.source,
         error: 'Incorrect Admin Passcode. Please check and try again.',
       });
       return;
@@ -647,7 +1219,93 @@ async function startServer() {
       playerId: resolvedPlayerId,
       method: 'passcode',
     });
-    res.json({ ok: true, method: 'passcode', token });
+    res.json({
+      ok: true,
+      method: 'passcode',
+      token,
+      passcodeSource: authResult.source,
+      passcodeUpdatedAtMs: authResult.updatedAtMs,
+    });
+  });
+
+  app.post('/api/admin/change-passcode', async (req, res) => {
+    const body = req.body as {
+      playerId?: string;
+      initData?: string;
+      token?: string;
+      currentPasscode?: string;
+      newPasscode?: string;
+    };
+    const rawPlayerId = String(body.playerId || '').trim();
+    const rawInitData = String(body.initData || '').trim();
+    const authHeader = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+    const candidateToken = String(body.token || authHeader || '').trim();
+    const currentPasscode = String(body.currentPasscode || '').trim();
+    const newPasscode = String(body.newPasscode || '').trim();
+
+    const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
+    const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
+
+    let resolvedPlayerId = rawPlayerId;
+    if (candidateToken) {
+      const verified = verifySessionToken(candidateToken);
+      if (verified?.role === 'admin' && typeof verified.playerId === 'string') {
+        resolvedPlayerId = verified.playerId;
+      }
+    }
+    if (rawInitData && TELEGRAM_BOT_TOKEN) {
+      const verifiedInit = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN);
+      if (verifiedInit.valid && verifiedInit.playerId) {
+        resolvedPlayerId = verifiedInit.playerId;
+      }
+    }
+
+    if (!isAdminPlayerId(resolvedPlayerId, effectiveExtraAdmins)) {
+      res.status(403).json({
+        ok: false,
+        error: 'Restricted to authorized Admin IDs.',
+      });
+      return;
+    }
+
+    if (!currentPasscode) {
+      res.status(400).json({
+        ok: false,
+        error: 'Enter your current Admin Passcode.',
+      });
+      return;
+    }
+
+    if (newPasscode.length < 4 || newPasscode.length > 64) {
+      res.status(400).json({
+        ok: false,
+        error: 'New passcode must be between 4 and 64 characters.',
+      });
+      return;
+    }
+
+    const verifyCurrent = await verifyAdminPasscodeAsync(currentPasscode);
+    if (!verifyCurrent.ok) {
+      res.status(403).json({
+        ok: false,
+        error: 'Current Admin Passcode is incorrect.',
+      });
+      return;
+    }
+
+    const saved = await saveNewAdminPasscode(newPasscode, resolvedPlayerId);
+    const freshToken = signSessionToken({
+      role: 'admin',
+      playerId: resolvedPlayerId,
+      method: 'passcode',
+    });
+
+    res.json({
+      ok: true,
+      token: freshToken,
+      passcodeSource: saved.source,
+      passcodeUpdatedAtMs: saved.updatedAtMs,
+    });
   });
 
   app.post('/api/referrals/notify', async (req, res) => {
@@ -995,6 +1653,8 @@ async function startServer() {
       });
     }
   });
+
+  void ensureAdminPasscodeSeededInDatabase();
 
   if (process.env.NODE_ENV !== 'production') {
     const httpServer = http.createServer(app);
