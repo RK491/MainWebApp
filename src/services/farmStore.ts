@@ -3,6 +3,8 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocFromCache,
+  getDocFromServer,
   getDocs,
   getDocsFromServer,
   limit,
@@ -27,11 +29,13 @@ import {
   decodePromoLabelMeta,
   decodeTaskSubtitleMeta,
   DEFAULT_AD_CONFIG,
+  DEFAULT_CHANNELS_CONFIG,
   eggsToUsd,
   encodeAchievementsWithAds,
   encodePromoLabelMeta,
   encodeTaskSubtitleMeta,
   formatReferralHandle,
+  normalizeTelegramChannelEntry,
   REFERRED_WELCOME_BONUS_COINS,
   REFERRER_SIGNUP_BONUS_COINS,
   USER_TASK_MAX_REWARD_COINS,
@@ -42,12 +46,14 @@ import {
 } from '../game/economy';
 import type {
   AdConfig,
+  ChannelsConfig,
   ChickenBreedId,
   DepositOrder,
   DynamicPromoCode,
   LeaderboardEntry,
   PromoRewardType,
   ReferralRecord,
+  RequiredTelegramChannel,
   SeasonConfig,
   SeasonWinnerRecord,
   TaskDefinition,
@@ -60,6 +66,7 @@ import { detectBrowserTelegramIdentity, type DetectedUserIdentity } from '../uti
 
 const PLAYER_ID_KEY = 'chickenland_player_id_v1';
 const PLAYER_ID_COOKIE = 'chickenland_uid_v1';
+const PROFILE_CACHE_PREFIX = 'chickenland_profile_cache_v1_';
 
 function readCookiePlayerId(): string {
   try {
@@ -79,7 +86,10 @@ export function createFreshPlayerId(): string {
 
 export function getStoredPlayerId(): string {
   try {
-    const existing = localStorage.getItem(PLAYER_ID_KEY) || readCookiePlayerId();
+    const existing =
+      localStorage.getItem(PLAYER_ID_KEY) ||
+      sessionStorage.getItem(PLAYER_ID_KEY) ||
+      readCookiePlayerId();
     if (existing && /^[a-zA-Z0-9_-]{3,64}$/.test(existing)) {
       setStoredPlayerId(existing);
       return existing;
@@ -99,11 +109,40 @@ export function setStoredPlayerId(playerId: string): void {
     // Ignore storage errors
   }
   try {
+    sessionStorage.setItem(PLAYER_ID_KEY, playerId);
+  } catch {
+    // Ignore storage errors
+  }
+  try {
     if (typeof document !== 'undefined') {
-      document.cookie = `${PLAYER_ID_COOKIE}=${encodeURIComponent(playerId)}; max-age=31536000; path=/; SameSite=Lax`;
+      const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
+      const sameSite = isHttps ? 'SameSite=None; Secure' : 'SameSite=Lax';
+      document.cookie = `${PLAYER_ID_COOKIE}=${encodeURIComponent(playerId)}; max-age=31536000; path=/; ${sameSite}`;
     }
   } catch {
     // Ignore cookie errors
+  }
+}
+
+export function loadCachedPlayerProfile(playerId: string): UserFarmProfile | null {
+  try {
+    if (typeof localStorage === 'undefined' || !playerId) return null;
+    const raw = localStorage.getItem(`${PROFILE_CACHE_PREFIX}${playerId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parseProfileDoc(parsed, playerId);
+  } catch {
+    return null;
+  }
+}
+
+export function saveCachedPlayerProfile(profile: UserFarmProfile): void {
+  try {
+    if (typeof localStorage === 'undefined' || !profile?.uid) return;
+    localStorage.setItem(`${PROFILE_CACHE_PREFIX}${profile.uid}`, JSON.stringify(profile));
+  } catch {
+    // Ignore quota/storage errors
   }
 }
 
@@ -135,48 +174,74 @@ function isFirestorePermissionDenied(error: unknown): boolean {
   return code === 'permission-denied' || msg.includes('missing or insufficient permissions');
 }
 
+function isTransientOfflineFirestoreError(error: unknown): boolean {
+  const rec = error && typeof error === 'object' ? (error as { code?: unknown; message?: unknown }) : null;
+  const code = String(rec?.code || '').toLowerCase();
+  const msg = String(rec?.message || error || '').toLowerCase();
+  return (
+    code === 'unavailable' ||
+    code === 'failed-precondition' ||
+    code === 'deadline-exceeded' ||
+    msg.includes('client is offline') ||
+    msg.includes('failed to get document') ||
+    msg.includes('network') ||
+    msg.includes('unavailable')
+  );
+}
+
+function logSubscriptionError(path: string, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err);
+  console.warn(`[Firestore subscription error] ${path}: ${message}`);
+}
+
+function safeNonNegativeNum(value: unknown, fallback = 0): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return n;
+}
+
 function toFirestoreProfilePayload(profile: UserFarmProfile, isCreate: boolean) {
   const cumulativeAds = Math.max(
     0,
-    Math.floor(Number(profile.totalAdsWatched ?? profile.watchedAdsCount ?? 0)),
+    Math.floor(safeNonNegativeNum(profile.totalAdsWatched ?? profile.watchedAdsCount, 0)),
   );
   const base = {
     uid: profile.uid,
-    displayName: profile.displayName.slice(0, 60) || 'Farmer',
-    handle: profile.handle.slice(0, 40) || '@farmer',
+    displayName: (profile.displayName || '').trim().slice(0, 60) || 'Farmer',
+    handle: (profile.handle || '').trim().slice(0, 40) || '@farmer',
     photoUrl: (profile.photoUrl || '').slice(0, 512),
-    avatarColor: profile.avatarColor.slice(0, 20),
-    level: profile.level,
-    xp: profile.xp,
-    coins: profile.coins,
-    eggs: profile.eggs,
-    totalEggsCollected: profile.totalEggsCollected,
-    totalCashEarnedUsd: profile.totalCashEarnedUsd,
-    totalWithdrawnUsd: profile.totalWithdrawnUsd,
-    basketCapacity: profile.basketCapacity,
-    basketTierHours: profile.basketTierHours,
-    leghornCount: profile.leghornCount,
-    rhodeCount: profile.rhodeCount,
-    orpingtonCount: profile.orpingtonCount,
-    australorpCount: profile.australorpCount,
-    boughtThisWeek: profile.boughtThisWeek,
-    dailyStreak: profile.dailyStreak,
-    lastDailyClaimDate: profile.lastDailyClaimDate,
-    completedTaskIds: profile.completedTaskIds.slice(0, 50),
-    claimedPromoCodes: profile.claimedPromoCodes.slice(0, 50),
-    watchedAdsCount: profile.watchedAdsCount,
-    referralCode: profile.referralCode.slice(0, 32),
-    referredBy: profile.referredBy.slice(0, 64),
+    avatarColor: (profile.avatarColor || '#EF4444').slice(0, 20),
+    level: Math.max(1, Math.min(999, Math.floor(safeNonNegativeNum(profile.level, 1)))),
+    xp: safeNonNegativeNum(profile.xp, 0),
+    coins: safeNonNegativeNum(profile.coins, 0),
+    eggs: safeNonNegativeNum(profile.eggs, 0),
+    totalEggsCollected: safeNonNegativeNum(profile.totalEggsCollected, 0),
+    totalCashEarnedUsd: safeNonNegativeNum(profile.totalCashEarnedUsd, 0),
+    totalWithdrawnUsd: safeNonNegativeNum(profile.totalWithdrawnUsd, 0),
+    basketCapacity: Math.max(300, safeNonNegativeNum(profile.basketCapacity, 300)),
+    basketTierHours: Math.max(8, Math.min(72, safeNonNegativeNum(profile.basketTierHours, 8))),
+    leghornCount: Math.floor(safeNonNegativeNum(profile.leghornCount, 0)),
+    rhodeCount: Math.floor(safeNonNegativeNum(profile.rhodeCount, 0)),
+    orpingtonCount: Math.floor(safeNonNegativeNum(profile.orpingtonCount, 0)),
+    australorpCount: Math.floor(safeNonNegativeNum(profile.australorpCount, 0)),
+    boughtThisWeek: Math.floor(safeNonNegativeNum(profile.boughtThisWeek, 0)),
+    dailyStreak: Math.max(0, Math.min(7, Math.floor(safeNonNegativeNum(profile.dailyStreak, 0)))),
+    lastDailyClaimDate: String(profile.lastDailyClaimDate || '').slice(0, 20),
+    completedTaskIds: (profile.completedTaskIds ?? []).slice(0, 50),
+    claimedPromoCodes: (profile.claimedPromoCodes ?? []).slice(0, 50),
+    watchedAdsCount: Math.max(0, Math.min(10, Math.floor(safeNonNegativeNum(profile.watchedAdsCount, 0)))),
+    referralCode: (profile.referralCode || `CL-${profile.uid.slice(-6).toUpperCase()}`).slice(0, 32),
+    referredBy: (profile.referredBy || '').slice(0, 64),
     referralActivated: Boolean(profile.referralActivated),
-    referralCount: profile.referralCount,
-    referralCoinsEarned: profile.referralCoinsEarned,
-    firstDepositBonusUsed: profile.firstDepositBonusUsed,
-    language: profile.language,
-    lastCollectedAt: profile.lastCollectedAt,
-    createdAtMs: profile.createdAtMs,
-    feedBoostUntilMs: Math.max(0, Number(profile.feedBoostUntilMs ?? 0)),
-    lastGoldenEggAtMs: Math.max(0, Number(profile.lastGoldenEggAtMs ?? 0)),
-    goldenEggsFound: Math.max(0, Math.floor(Number(profile.goldenEggsFound ?? 0))),
+    referralCount: Math.floor(safeNonNegativeNum(profile.referralCount, 0)),
+    referralCoinsEarned: safeNonNegativeNum(profile.referralCoinsEarned, 0),
+    firstDepositBonusUsed: Boolean(profile.firstDepositBonusUsed),
+    language: (profile.language || 'en').slice(0, 16),
+    lastCollectedAt: safeNonNegativeNum(profile.lastCollectedAt, Date.now()),
+    createdAtMs: safeNonNegativeNum(profile.createdAtMs, Date.now()),
+    feedBoostUntilMs: Math.max(0, safeNonNegativeNum(profile.feedBoostUntilMs, 0)),
+    lastGoldenEggAtMs: Math.max(0, safeNonNegativeNum(profile.lastGoldenEggAtMs, 0)),
+    goldenEggsFound: Math.max(0, Math.floor(safeNonNegativeNum(profile.goldenEggsFound, 0))),
     claimedAchievementIds: encodeAchievementsWithAds(
       profile.claimedAchievementIds ?? [],
       cumulativeAds,
@@ -197,16 +262,16 @@ function toFirestoreProfilePayload(profile: UserFarmProfile, isCreate: boolean) 
 function toLeaderboardPayload(profile: UserFarmProfile) {
   return {
     uid: profile.uid,
-    displayName: profile.displayName.slice(0, 60) || 'Farmer',
-    handle: profile.handle.slice(0, 40) || '@farmer',
+    displayName: (profile.displayName || '').trim().slice(0, 60) || 'Farmer',
+    handle: (profile.handle || '').trim().slice(0, 40) || '@farmer',
     photoUrl: (profile.photoUrl || '').slice(0, 512),
-    avatarColor: profile.avatarColor.slice(0, 20),
-    referralCode: profile.referralCode.slice(0, 32),
-    buyerPoints: calculateBuyerPoints(profile),
-    inviterCount: profile.referralCount,
-    eggs: profile.eggs,
-    totalEggsCollected: profile.totalEggsCollected,
-    chickensCount: calculateTotalChickens(profile),
+    avatarColor: (profile.avatarColor || '#EF4444').slice(0, 20),
+    referralCode: (profile.referralCode || `CL-${profile.uid.slice(-6).toUpperCase()}`).slice(0, 32),
+    buyerPoints: Math.max(0, calculateBuyerPoints(profile)),
+    inviterCount: Math.max(0, Math.floor(safeNonNegativeNum(profile.referralCount, 0))),
+    eggs: Math.max(0, safeNonNegativeNum(profile.eggs, 0)),
+    totalEggsCollected: Math.max(0, safeNonNegativeNum(profile.totalEggsCollected, 0)),
+    chickensCount: Math.max(0, calculateTotalChickens(profile)),
     updatedAt: serverTimestamp(),
   };
 }
@@ -265,12 +330,35 @@ function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFa
 export async function ensurePlayerInFirestore(
   playerId: string,
   detected?: { displayName?: string; handle?: string; photoUrl?: string; isTelegramDetected?: boolean },
-): Promise<{ profile: UserFarmProfile; isNewPlayer: boolean }> {
+): Promise<{ profile: UserFarmProfile; isNewPlayer: boolean; fromCache?: boolean }> {
   const playerRef = doc(db, 'players', playerId);
   try {
-    const snap = await getDoc(playerRef);
+    let snap;
+    try {
+      snap = await getDocFromServer(playerRef);
+    } catch (serverErr) {
+      if (isTransientOfflineFirestoreError(serverErr)) {
+        try {
+          const cachedSnap = await getDocFromCache(playerRef);
+          if (cachedSnap.exists()) {
+            const cachedProfile = parseProfileDoc(cachedSnap.data(), playerId);
+            saveCachedPlayerProfile(cachedProfile);
+            return { profile: cachedProfile, isNewPlayer: false, fromCache: true };
+          }
+        } catch {
+          // Cache miss
+        }
+        const localFallback = loadCachedPlayerProfile(playerId);
+        if (localFallback) {
+          return { profile: localFallback, isNewPlayer: false, fromCache: true };
+        }
+      }
+      throw serverErr;
+    }
+
     if (snap.exists()) {
       const existing = parseProfileDoc(snap.data(), playerId);
+      saveCachedPlayerProfile(existing);
       if (detected?.isTelegramDetected) {
         const nextName = (detected.displayName || existing.displayName).slice(0, 60);
         const nextHandle = (detected.handle || existing.handle).slice(0, 40);
@@ -290,6 +378,7 @@ export async function ensurePlayerInFirestore(
           batch.update(playerRef, toFirestoreProfilePayload(synced, false));
           batch.set(doc(db, 'leaderboard', playerId), toLeaderboardPayload(synced));
           await batch.commit();
+          saveCachedPlayerProfile(synced);
           return { profile: synced, isNewPlayer: false };
         }
       }
@@ -323,6 +412,7 @@ export async function ensurePlayerInFirestore(
     }
 
     await batch.commit();
+    saveCachedPlayerProfile(seed.profile);
     return { profile: seed.profile, isNewPlayer: true };
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `players/${playerId}`);
@@ -428,6 +518,7 @@ export async function commitPlayerMutation(params: {
   activateReferral?: boolean;
 }): Promise<boolean> {
   const uid = params.profile.uid;
+  saveCachedPlayerProfile(params.profile);
 
   if (params.activateReferral && params.profile.referredBy) {
     const refUid = params.profile.referredBy;
@@ -705,9 +796,17 @@ export async function commitPlayerMutation(params: {
     }
   }
 
+  const playerRef = doc(db, 'players', uid);
+  const existingSnap = await getDoc(playerRef).catch(() => null);
+  const playerDocExists = Boolean(existingSnap?.exists());
+
   const batch = writeBatch(db);
 
-  batch.update(doc(db, 'players', uid), toFirestoreProfilePayload(params.profile, false));
+  if (playerDocExists) {
+    batch.update(playerRef, toFirestoreProfilePayload(params.profile, false));
+  } else {
+    batch.set(playerRef, toFirestoreProfilePayload(params.profile, true));
+  }
   batch.set(doc(db, 'leaderboard', uid), toLeaderboardPayload(params.profile));
 
   if (params.transaction) {
@@ -791,10 +890,12 @@ export function subscribeToPlayer(
     doc(db, 'players', playerId),
     (snap) => {
       if (snap.exists()) {
-        callbacks.onProfile(parseProfileDoc(snap.data(), playerId));
+        const parsed = parseProfileDoc(snap.data(), playerId);
+        saveCachedPlayerProfile(parsed);
+        callbacks.onProfile(parsed);
       }
     },
-    (err) => handleFirestoreError(err, OperationType.GET, `players/${playerId}`),
+    (err) => logSubscriptionError(`players/${playerId}`, err),
   );
 
   const txQuery = query(
@@ -822,7 +923,7 @@ export function subscribeToPlayer(
         }),
       );
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, `players/${playerId}/transactions`),
+    (err) => logSubscriptionError(`players/${playerId}/transactions`, err),
   );
 
   const refTxQuery = query(
@@ -851,7 +952,7 @@ export function subscribeToPlayer(
             }),
           );
         },
-        (err) => handleFirestoreError(err, OperationType.LIST, `players/${playerId}/transactions`),
+        (err) => logSubscriptionError(`players/${playerId}/transactions(referral)`, err),
       )
     : () => {};
 
@@ -882,7 +983,7 @@ export function subscribeToPlayer(
         }),
       );
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, `players/${playerId}/deposits`),
+    (err) => logSubscriptionError(`players/${playerId}/deposits`, err),
   );
 
   const wdQuery = query(
@@ -914,7 +1015,7 @@ export function subscribeToPlayer(
         }),
       );
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, `players/${playerId}/withdrawals`),
+    (err) => logSubscriptionError(`players/${playerId}/withdrawals`, err),
   );
 
   const refQuery = query(
@@ -942,7 +1043,7 @@ export function subscribeToPlayer(
         }),
       );
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, `players/${playerId}/referrals`),
+    (err) => logSubscriptionError(`players/${playerId}/referrals`, err),
   );
 
   return () => {
@@ -985,7 +1086,7 @@ export function subscribeToLeaderboard(
         }),
       );
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, 'leaderboard'),
+    (err) => logSubscriptionError('leaderboard', err),
   );
 }
 
@@ -1023,7 +1124,7 @@ export function subscribeToAllWithdrawRequests(
         }),
       );
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, 'withdraw_requests'),
+    (err) => logSubscriptionError('withdraw_requests', err),
   );
 }
 
@@ -1150,7 +1251,7 @@ export function subscribeToCustomTasks(
     (snap) => {
       onUpdate(snap.docs.map((docSnap) => parseCustomTaskDoc(docSnap.id, docSnap.data())));
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, 'tasks'),
+    (err) => logSubscriptionError('tasks', err),
   );
 }
 
@@ -1421,7 +1522,7 @@ export function subscribeToAdConfig(onUpdate: (config: AdConfig) => void): () =>
         updatedAtMs: Number(d.updatedAtMs ?? 0),
       });
     },
-    (err) => handleFirestoreError(err, OperationType.GET, 'app_config/ads'),
+    (err) => logSubscriptionError('app_config/ads', err),
   );
 }
 
@@ -1524,7 +1625,7 @@ export function subscribeToPromoCodes(
         }),
       );
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, 'promo_codes'),
+    (err) => logSubscriptionError('promo_codes', err),
   );
 }
 
@@ -1650,8 +1751,65 @@ export function subscribeToSeasonConfig(
         updatedAtMs: Number(d.updatedAtMs ?? 0),
       });
     },
-    (err) => handleFirestoreError(err, OperationType.GET, 'app_config/season'),
+    (err) => logSubscriptionError('app_config/season', err),
   );
+}
+
+export function subscribeToChannelsConfig(
+  onUpdate: (config: ChannelsConfig) => void,
+): () => void {
+  return onSnapshot(
+    doc(db, 'app_config', 'channels'),
+    (snap) => {
+      if (!snap.exists()) {
+        onUpdate(DEFAULT_CHANNELS_CONFIG);
+        return;
+      }
+      const d = snap.data();
+      const rawList = Array.isArray(d.channels) ? d.channels : [];
+      const parsedChannels: RequiredTelegramChannel[] = rawList
+        .map((item, idx) =>
+          item && typeof item === 'object'
+            ? normalizeTelegramChannelEntry(item as Partial<RequiredTelegramChannel>, idx)
+            : null,
+        )
+        .filter((item): item is RequiredTelegramChannel => Boolean(item))
+        .slice(0, 10);
+
+      onUpdate({
+        enabled: d.enabled !== false,
+        channels: parsedChannels,
+        updatedAtMs: Number(d.updatedAtMs ?? 0),
+      });
+    },
+    (err) => logSubscriptionError('app_config/channels', err),
+  );
+}
+
+export async function saveChannelsConfigInFirestore(
+  config: Omit<ChannelsConfig, 'updatedAtMs'>,
+): Promise<ChannelsConfig> {
+  const nowMs = Date.now();
+  const normalizedChannels: RequiredTelegramChannel[] = (config.channels ?? [])
+    .map((ch, idx) => normalizeTelegramChannelEntry(ch, idx))
+    .filter((ch): ch is RequiredTelegramChannel => Boolean(ch))
+    .slice(0, 10);
+
+  const payload: ChannelsConfig = {
+    enabled: Boolean(config.enabled),
+    channels: normalizedChannels,
+    updatedAtMs: nowMs,
+  };
+
+  try {
+    await setDoc(doc(db, 'app_config', 'channels'), {
+      ...payload,
+      updatedAt: serverTimestamp(),
+    });
+    return payload;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'app_config/channels');
+  }
 }
 
 export async function saveSeasonConfigInFirestore(

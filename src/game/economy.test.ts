@@ -33,6 +33,7 @@ import {
   decodeAchievementsAndAds,
   decodePromoLabelMeta,
   decodeTaskSubtitleMeta,
+  DEFAULT_CHANNELS_CONFIG,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
   detectTop10RankCelebration,
@@ -45,10 +46,13 @@ import {
   FEED_BOOSTER_COST_COINS,
   FEED_BOOSTER_DURATION_MS,
   filterWithdrawalsByTab,
+  formatAdConfigTemplate,
+  formatChannelsHandleSummary,
   formatPromoRewardSummary,
   formatReferralHandle,
   generateGiftCodeString,
   getAchievementsProgress,
+  getActiveRequiredChannels,
   getAdNetworkClaimCountToday,
   getChickenMilestoneReached,
   getTaskRemainingSlots,
@@ -59,6 +63,7 @@ import {
   GOLDEN_EGG_REWARD_COINS,
   GOLDEN_EGG_REWARD_XP,
   gramToCoins,
+  isAdminPlayerId,
   isFeedBoosterActive,
   isGoldenEggReady,
   isTelegramMemberStatusJoined,
@@ -66,6 +71,10 @@ import {
   mergeTaskDefinitions,
   MIN_DEPOSIT_COINS,
   MIN_WITHDRAW_ADS_WATCHED,
+  normalizeTelegramChannelEntry,
+  normalizeTelegramChannelHandle,
+  parseAdConfigTemplate,
+  PRIMARY_ADMIN_TELEGRAM_ID,
   REFERRAL_MILESTONE_CRATES,
   REFERRER_LIFETIME_EGG_COMMISSION_RATE,
   REFERRER_SIGNUP_BONUS_COINS,
@@ -2186,7 +2195,7 @@ test('REQUIRED_TELEGRAM_CHANNELS lists @AIRDROP_GALAXYS and @AG_PAYOUTS and memb
   assert.equal(isTelegramMemberStatusJoined(''), false);
 });
 
-test('ad-gate policy requires ads for startup, egg collect, gift claim, and ad cards while exempting tasks, withdraw, deposit, and miner buy', () => {
+test('ad-gate policy requires ads for startup, egg collect, gift claim, miner buy, and ad cards while exempting tasks, withdraw, and deposit', () => {
   for (const gated of AD_GATED_ACTIONS) {
     assert.equal(shouldRequireAdForAction(gated), true);
   }
@@ -2197,13 +2206,13 @@ test('ad-gate policy requires ads for startup, egg collect, gift claim, and ad c
   assert.equal(shouldRequireAdForAction('startup'), true);
   assert.equal(shouldRequireAdForAction('collect_eggs'), true);
   assert.equal(shouldRequireAdForAction('claim_promo'), true);
+  assert.equal(shouldRequireAdForAction('buy_chicken'), true);
   assert.equal(shouldRequireAdForAction('ad_network'), true);
   assert.equal(shouldRequireAdForAction('watch_ad'), true);
 
   assert.equal(shouldRequireAdForAction('task'), false);
   assert.equal(shouldRequireAdForAction('withdraw'), false);
   assert.equal(shouldRequireAdForAction('deposit'), false);
-  assert.equal(shouldRequireAdForAction('buy_chicken'), false);
 
   const { profile } = createDefaultProfile('player_adgate1', 'Dev', '@dev', NOW);
   assert.equal(getTotalAdsWatched(profile), 0);
@@ -2232,3 +2241,146 @@ test('ad-gate policy requires ads for startup, egg collect, gift claim, and ad c
   assert.equal(resolveEffectiveAdConfig(baseConfig).adsgramBlockId, '1234');
 });
 
+test('isAdminPlayerId grants direct access to Telegram Admin ID 7508911853 without passcode and rejects non-admins', () => {
+  assert.equal(PRIMARY_ADMIN_TELEGRAM_ID, '7508911853');
+  assert.equal(isAdminPlayerId('7508911853'), true);
+  assert.equal(isAdminPlayerId('tg_7508911853'), true);
+  assert.equal(isAdminPlayerId('tg_123456789'), false);
+  assert.equal(isAdminPlayerId('player_guest_xyz'), false);
+  assert.equal(isAdminPlayerId(''), false);
+  assert.equal(isAdminPlayerId('tg_99887766', ['99887766']), true);
+});
+
+test('dynamic channel check helpers normalize handles, filter disabled channels, and format summaries', () => {
+  assert.deepEqual(normalizeTelegramChannelHandle('https://t.me/alpha_news'), {
+    handle: '@alpha_news',
+    url: 'https://t.me/alpha_news',
+  });
+  assert.deepEqual(normalizeTelegramChannelHandle('ag_payouts'), {
+    handle: '@ag_payouts',
+    url: 'https://t.me/ag_payouts',
+  });
+  assert.deepEqual(normalizeTelegramChannelHandle('-1001987654321'), {
+    handle: '-1001987654321',
+    url: '',
+  });
+
+  const entry = normalizeTelegramChannelEntry({
+    handle: 't.me/community_hub',
+    title: 'Community Hub',
+    description: 'Official announcements',
+  });
+  assert.ok(entry);
+  assert.equal(entry.handle, '@community_hub');
+  assert.equal(entry.url, 'https://t.me/community_hub');
+  assert.equal(entry.enabled, true);
+
+  const disabledGate = getActiveRequiredChannels({
+    enabled: false,
+    channels: DEFAULT_CHANNELS_CONFIG.channels,
+    updatedAtMs: NOW,
+  });
+  assert.equal(disabledGate.length, 0);
+
+  const filtered = getActiveRequiredChannels({
+    enabled: true,
+    channels: [
+      entry,
+      { ...entry, id: 'paused_1', handle: '@paused_ch', enabled: false },
+    ],
+    updatedAtMs: NOW,
+  });
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0].handle, '@community_hub');
+
+  assert.equal(formatChannelsHandleSummary([]), 'Required channels');
+  assert.equal(formatChannelsHandleSummary([{ handle: '@one' }]), '@one');
+  assert.equal(formatChannelsHandleSummary([{ handle: '@one' }, { handle: '@two' }]), '@one & @two');
+  assert.equal(
+    formatChannelsHandleSummary([{ handle: '@one' }, { handle: '@two' }, { handle: '@three' }]),
+    '@one, @two & @three',
+  );
+});
+
+test('resolveTelegramUserIdentity extracts Telegram IDs from tgWebAppData hash and admin_id query param', () => {
+  const webAppData = new URLSearchParams({
+    user: JSON.stringify({ id: 7508911853, first_name: 'Owner', username: 'owner_tg' }),
+    start_param: 'CL-ABC123',
+  }).toString();
+  const fromHash = resolveTelegramUserIdentity({
+    hash: `#tgWebAppData=${encodeURIComponent(webAppData)}&tgWebAppVersion=7.0`,
+  });
+  assert.equal(fromHash.playerId, 'tg_7508911853');
+  assert.equal(fromHash.isTelegramDetected, true);
+  assert.equal(fromHash.startParam, 'CL-ABC123');
+
+  const fromQuery = resolveTelegramUserIdentity({
+    search: '?admin_id=7508911853',
+  });
+  assert.equal(fromQuery.playerId, 'tg_7508911853');
+  assert.equal(fromQuery.isTelegramDetected, true);
+});
+
+test('formatAdConfigTemplate and parseAdConfigTemplate parse KEY=VALUE, VITE_* aliases, JSON, and clamp watchSeconds', () => {
+  const initialDraft = {
+    provider: 'countdown' as const,
+    adsgramBlockId: '',
+    gigapubProjectId: '',
+    monetagZoneId: '',
+    customTitle: 'Sponsored Bonus',
+    customDescription: 'Promo description',
+    customUrl: '',
+    watchSeconds: 5,
+    bannerEnabled: false,
+    bannerTitle: 'Banner Title',
+    bannerSubtitle: 'Banner Subtitle',
+    bannerCtaText: 'Open',
+    bannerUrl: '',
+  };
+
+  const pastedEnv = [
+    '# Ad Network Block IDs',
+    'ACTIVE_PROVIDER=adsgram',
+    'VITE_ADSGRAM_BLOCK_ID="int-9942"',
+    'VITE_GIGAPUB_PROJECT_ID=gp_5512',
+    'MONETAG_ZONE_ID: 8844112',
+    'WATCH_SECONDS=120',
+    'BANNER_ENABLED=true',
+    'BANNER_URL=https://t.me/alpha_news',
+    'INVALID_LINE_WITHOUT_SEPARATOR',
+  ].join('\n');
+
+  const parsedEnv = parseAdConfigTemplate(pastedEnv, initialDraft);
+  assert.equal(parsedEnv.next.provider, 'adsgram');
+  assert.equal(parsedEnv.next.adsgramBlockId, 'int-9942');
+  assert.equal(parsedEnv.next.gigapubProjectId, 'gp_5512');
+  assert.equal(parsedEnv.next.monetagZoneId, '8844112');
+  assert.equal(parsedEnv.next.watchSeconds, 60);
+  assert.equal(parsedEnv.next.bannerEnabled, true);
+  assert.equal(parsedEnv.next.bannerUrl, 'https://t.me/alpha_news');
+  assert.ok(parsedEnv.appliedKeys.includes('ADSGRAM_BLOCK_ID'));
+  assert.ok(parsedEnv.appliedKeys.includes('GIGAPUB_PROJECT_ID'));
+  assert.ok(parsedEnv.appliedKeys.includes('MONETAG_ZONE_ID'));
+
+  const formatted = formatAdConfigTemplate(parsedEnv.next);
+  const roundTripped = parseAdConfigTemplate(formatted, initialDraft);
+  assert.deepEqual(roundTripped.next, parsedEnv.next);
+
+  const jsonParsed = parseAdConfigTemplate(
+    JSON.stringify({
+      provider: 'monetag',
+      monetagZoneId: '777001',
+      watchSeconds: 1,
+      bannerEnabled: 'off',
+    }),
+    parsedEnv.next,
+  );
+  assert.equal(jsonParsed.next.provider, 'monetag');
+  assert.equal(jsonParsed.next.monetagZoneId, '777001');
+  assert.equal(jsonParsed.next.watchSeconds, 3);
+  assert.equal(jsonParsed.next.bannerEnabled, false);
+
+  const emptyParsed = parseAdConfigTemplate('   ', initialDraft);
+  assert.deepEqual(emptyParsed.next, initialDraft);
+  assert.deepEqual(emptyParsed.appliedKeys, []);
+});

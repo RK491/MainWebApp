@@ -8,26 +8,35 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-react';
-import { REQUIRED_TELEGRAM_CHANNELS } from '../game/economy';
-import type { ChannelVerificationItem, ChannelVerificationResult } from '../types/farm';
+import { formatChannelsHandleSummary, REQUIRED_TELEGRAM_CHANNELS } from '../game/economy';
+import type {
+  ChannelVerificationItem,
+  ChannelVerificationResult,
+  RequiredTelegramChannel,
+} from '../types/farm';
 import { notifyTelegramOpenLink } from '../utils/telegram';
 
 interface ChannelCheckCardProps {
+  requiredChannels?: RequiredTelegramChannel[];
   verification?: ChannelVerificationResult | null;
   checking?: boolean;
   onCheckChannels: () => void;
   variant?: 'default' | 'compact';
 }
 
-function buildFallbackItems(): ChannelVerificationItem[] {
-  return REQUIRED_TELEGRAM_CHANNELS.map((ch) => ({
-    ...ch,
-    joined: false,
-    status: 'unchecked',
-  }));
+function buildFallbackItems(requiredChannels?: RequiredTelegramChannel[]): ChannelVerificationItem[] {
+  const source = requiredChannels ?? REQUIRED_TELEGRAM_CHANNELS;
+  return source
+    .filter((ch) => ch.enabled !== false && Boolean(ch.handle))
+    .map((ch) => ({
+      ...ch,
+      joined: false,
+      status: 'unchecked',
+    }));
 }
 
 function openChannelLink(url: string) {
+  if (!url) return;
   const handled = notifyTelegramOpenLink(url);
   if (!handled && typeof window !== 'undefined') {
     window.open(url, '_blank', 'noopener,noreferrer');
@@ -35,6 +44,7 @@ function openChannelLink(url: string) {
 }
 
 export function ChannelCheckCard({
+  requiredChannels,
   verification,
   checking = false,
   onCheckChannels,
@@ -43,8 +53,11 @@ export function ChannelCheckCard({
   const items =
     verification && verification.channels.length > 0
       ? verification.channels
-      : buildFallbackItems();
+      : buildFallbackItems(requiredChannels);
 
+  if (items.length === 0) return null;
+
+  const summaryHandles = formatChannelsHandleSummary(items);
   const mode = verification?.verificationMode;
   const allJoined = Boolean(verification?.allJoined);
   const isStrictTelegram = mode === 'telegram_bot';
@@ -106,7 +119,7 @@ export function ChannelCheckCard({
               Required Channels Check
             </div>
             <div className="text-[11px] font-medium text-stone-500 dark:text-stone-400 truncate">
-              Join @AIRDROP_GALAXYS &amp; @AG_PAYOUTS
+              Join {summaryHandles}
             </div>
           </div>
         </div>
@@ -153,7 +166,7 @@ export function ChannelCheckCard({
                   <span className="text-[11px] font-extrabold text-emerald-700 dark:text-emerald-300 px-2 py-1">
                     Joined
                   </span>
-                ) : (
+                ) : ch.url ? (
                   <a
                     href={ch.url}
                     target="_blank"
@@ -168,7 +181,7 @@ export function ChannelCheckCard({
                     <span>Join</span>
                     <ExternalLink className="w-3 h-3" />
                   </a>
-                )}
+                ) : null}
               </div>
             </div>
           );
@@ -177,13 +190,13 @@ export function ChannelCheckCard({
 
       {verification && mode === 'guest_browser' && (
         <div className="rounded-xl bg-sky-50/90 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800/60 px-3 py-2 text-[11px] font-semibold text-sky-800 dark:text-sky-300">
-          Open inside the Telegram Mini App so the bot can verify your live membership in @AIRDROP_GALAXYS &amp; @AG_PAYOUTS.
+          Open inside the Telegram Mini App so the bot can verify your live membership in {summaryHandles}.
         </div>
       )}
 
       {verification && mode === 'bot_unconfigured' && (
         <div className="rounded-xl bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 px-3 py-2 text-[11px] font-semibold text-amber-800 dark:text-amber-300">
-          Server bot verification requires TELEGRAM_BOT_TOKEN and adding the bot as an Admin in both @AIRDROP_GALAXYS and @AG_PAYOUTS.
+          Server bot verification requires TELEGRAM_BOT_TOKEN and adding the bot as an Admin in {summaryHandles}.
         </div>
       )}
 
@@ -219,6 +232,7 @@ export function ChannelCheckCard({
 }
 
 interface ChannelCheckModalProps {
+  requiredChannels?: RequiredTelegramChannel[];
   verification?: ChannelVerificationResult | null;
   checking?: boolean;
   onCheckChannels: () => void;
@@ -226,6 +240,7 @@ interface ChannelCheckModalProps {
 }
 
 export function ChannelCheckModal({
+  requiredChannels,
   verification,
   checking = false,
   onCheckChannels,
@@ -234,7 +249,7 @@ export function ChannelCheckModal({
   const items =
     verification && verification.channels.length > 0
       ? verification.channels
-      : buildFallbackItems();
+      : buildFallbackItems(requiredChannels);
   const isStrictTelegram = verification?.verificationMode === 'telegram_bot';
   const allJoined = Boolean(verification?.allJoined);
   const canDismissFreely = !isStrictTelegram || allJoined;
@@ -257,7 +272,7 @@ export function ChannelCheckModal({
                 Join Official Channels
               </h2>
               <p className="text-xs text-stone-500 dark:text-stone-400">
-                Subscribe to both channels to unlock full rewards &amp; payouts
+                Subscribe to required channels to unlock full rewards &amp; payouts
               </p>
             </div>
           </div>

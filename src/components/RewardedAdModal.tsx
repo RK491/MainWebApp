@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle2, ExternalLink, Gift, Play, Sparkles, Timer, X } from 'lucide-react';
-import type { AdConfig } from '../types/farm';
+import { CHICKEN_PACKS } from '../game/economy';
+import type { AdConfig, ChickenBreedId } from '../types/farm';
 import clayHenMascot from '../assets/images/clay_hen_mascot_1794678825872.jpg';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
 
@@ -8,6 +9,7 @@ export type ModalAdActionKind =
   | 'startup'
   | 'collect_eggs'
   | 'claim_promo'
+  | 'buy_chicken'
   | 'ad_network'
   | 'watch_ad';
 
@@ -20,6 +22,9 @@ interface RewardedAdModalProps {
   pendingEggs?: number | null;
   promoCode?: string | null;
   promoRewardSummary?: string | null;
+  chickenBreed?: ChickenBreedId | null;
+  chickenQty?: number | null;
+  minerCostCoins?: number | null;
   fallbackNotice?: string | null;
   mandatory?: boolean;
   onComplete: () => void;
@@ -35,6 +40,9 @@ export function RewardedAdModal({
   pendingEggs,
   promoCode,
   promoRewardSummary,
+  chickenBreed,
+  chickenQty,
+  minerCostCoins,
   fallbackNotice,
   mandatory = false,
   onComplete,
@@ -58,6 +66,12 @@ export function RewardedAdModal({
   const sponsorUrl = adConfig.customUrl.trim();
   const hasCoinReward = typeof rewardCoins === 'number' && rewardCoins > 0;
   const safeEggs = Math.max(0, Math.floor(Number(pendingEggs ?? 0)));
+  const safeChickenQty = Math.max(1, Math.floor(Number(chickenQty ?? 1)));
+  const minerPack = chickenBreed
+    ? CHICKEN_PACKS.find((p) => p.id === chickenBreed) ?? null
+    : null;
+  const minerPackName = minerPack?.name || 'Hen Miner';
+  const safeMinerCost = Math.max(0, Math.floor(Number(minerCostCoins ?? 0)));
 
   const handleClaim = () => {
     if (!readyToClaim || claimed) return;
@@ -69,6 +83,7 @@ export function RewardedAdModal({
     if (actionKind === 'startup') return 'App Launch Ad';
     if (actionKind === 'collect_eggs') return 'Egg Harvest Ad';
     if (actionKind === 'claim_promo') return 'Gift Code Ad';
+    if (actionKind === 'buy_chicken') return 'Miner Purchase Ad';
     if (networkLabel) return `${networkLabel} Reward`;
     return `Sponsored Reward (${watchedCount + 1}/10)`;
   })();
@@ -77,6 +92,7 @@ export function RewardedAdModal({
     if (actionKind === 'startup') return adConfig.customTitle || 'Welcome to Alpha Gram';
     if (actionKind === 'collect_eggs') return 'Unlock Egg Harvest';
     if (actionKind === 'claim_promo') return `Unlock Gift ${promoCode || 'Code'}`;
+    if (actionKind === 'buy_chicken') return `Unlock ${safeChickenQty}× ${minerPackName}`;
     if (networkLabel) return `${networkLabel} Daily Ad`;
     return adConfig.customTitle || 'Alpha Gram Sponsor Showcase';
   })();
@@ -93,6 +109,11 @@ export function RewardedAdModal({
         promoRewardSummary ? ` (${promoRewardSummary})` : ''
       }.`;
     }
+    if (actionKind === 'buy_chicken') {
+      return `Complete the ad timer to confirm buying ${safeChickenQty}× ${minerPackName}${
+        safeMinerCost > 0 ? ` for ${safeMinerCost.toLocaleString()} coins` : ''
+      }.`;
+    }
     if (hasCoinReward) {
       return `Watch until the timer ends to earn +${rewardCoins} coins & +1/10 progress toward a free White Leghorn.`;
     }
@@ -106,6 +127,7 @@ export function RewardedAdModal({
     if (actionKind === 'startup') return 'Continue to Alpha Gram';
     if (actionKind === 'collect_eggs') return `Collect +${safeEggs.toLocaleString()} Eggs`;
     if (actionKind === 'claim_promo') return `Claim Gift (${promoCode || 'Reward'})`;
+    if (actionKind === 'buy_chicken') return `Buy ${safeChickenQty}× ${minerPackName}`;
     if (hasCoinReward) return `Claim +${rewardCoins} Coins`;
     return `Claim Ad Step (${Math.min(10, watchedCount + 1)}/10)`;
   })();
@@ -139,7 +161,9 @@ export function RewardedAdModal({
         <div className="clay-card-mint !rounded-2xl p-4 text-center space-y-2.5">
           <div className="flex justify-center">
             <div className="animate-clay-float w-20 h-20 rounded-2xl clay-icon-well p-1 flex items-center justify-center overflow-hidden">
-              {!imgFailed ? (
+              {actionKind === 'buy_chicken' && chickenBreed ? (
+                <ChickenSprite breed={chickenBreed} className="w-14 h-14" />
+              ) : !imgFailed ? (
                 <img
                   src={clayHenMascot}
                   alt="Clay Alpha Gram mascot"
@@ -170,6 +194,20 @@ export function RewardedAdModal({
             <div className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-100/80 dark:bg-emerald-950/60 border border-emerald-300/70 dark:border-emerald-700/50 px-3 py-1 text-xs font-extrabold text-emerald-800 dark:text-emerald-300">
               <Gift className="w-4 h-4" />
               <span>{promoRewardSummary}</span>
+            </div>
+          )}
+
+          {actionKind === 'buy_chicken' && chickenBreed && (
+            <div className="inline-flex items-center gap-2 rounded-xl bg-amber-100/80 dark:bg-amber-950/60 border border-amber-300/70 dark:border-amber-700/50 px-3 py-1 text-xs font-extrabold text-amber-900 dark:text-amber-200">
+              <ChickenSprite breed={chickenBreed} className="w-4 h-4" />
+              <span>
+                +{safeChickenQty} {minerPackName}
+              </span>
+              {safeMinerCost > 0 && (
+                <span className="inline-flex items-center gap-1 font-mono-num text-stone-700 dark:text-stone-200">
+                  · <CoinIcon className="w-3.5 h-3.5" /> {safeMinerCost.toLocaleString()}
+                </span>
+              )}
             </div>
           )}
 

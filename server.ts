@@ -20,15 +20,20 @@ import {
   type Firestore,
 } from 'firebase/firestore';
 import {
+  DEFAULT_CHANNELS_CONFIG,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
   extractTelegramNumericUserId,
+  getActiveRequiredChannels,
+  isAdminPlayerId,
   isTelegramMemberStatusJoined,
   MAX_DEPOSIT_COINS,
   MIN_DEPOSIT_COINS,
+  normalizeTelegramChannelEntry,
+  PRIMARY_ADMIN_TELEGRAM_ID,
   PROMO_CODES,
-  REQUIRED_TELEGRAM_CHANNELS,
 } from './src/game/economy.ts';
+import type { ChannelsConfig, RequiredTelegramChannel } from './src/types/farm.ts';
 import {
   buildAcceptedDepositMemos,
   friendlyTonAddressToRaw,
@@ -47,8 +52,13 @@ const __dirname = path.dirname(__filename);
 
 function initServerFirestore(): Firestore | null {
   try {
-    const configPath = path.resolve(__dirname, 'firebase-applet-config.json');
-    if (!fs.existsSync(configPath)) return null;
+    const candidates = [
+      path.resolve(__dirname, 'firebase-applet-config.json'),
+      path.resolve(__dirname, '..', 'firebase-applet-config.json'),
+      path.resolve(process.cwd(), 'firebase-applet-config.json'),
+    ];
+    const configPath = candidates.find((p) => fs.existsSync(p));
+    if (!configPath) return null;
     const raw = fs.readFileSync(configPath, 'utf8');
     const cfg = JSON.parse(raw) as Record<string, string>;
     const app = initializeApp(cfg, 'chickenland-server');
@@ -85,14 +95,13 @@ const TELEGRAM_PAYOUT_CHANNEL = normalizeTelegramChannel(
 );
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TONCENTER_API_KEY = (process.env.TONCENTER_API_KEY || '').trim();
-const ADMIN_PASSCODE = (process.env.ADMIN_PASSCODE || 'AGADMIN2026').trim();
 const ADMIN_TELEGRAM_IDS = (process.env.ADMIN_TELEGRAM_IDS || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
 const SESSION_SIGNING_SECRET = crypto
   .createHash('sha256')
-  .update(`chickenland_session_v1:${ADMIN_PASSCODE}:${TELEGRAM_BOT_TOKEN}`)
+  .update(`chickenland_session_v2:${PRIMARY_ADMIN_TELEGRAM_ID}:${TELEGRAM_BOT_TOKEN}`)
   .digest('hex');
 
 function signSessionToken(payload: Record<string, unknown>, ttlMs = 12 * 3_600_000): string {
@@ -280,18 +289,47 @@ async function resolveRawDepositAddress(): Promise<string> {
   return '';
 }
 
+async function loadChannelsConfigFromFirestore(): Promise<ChannelsConfig> {
+  if (!serverDb) return DEFAULT_CHANNELS_CONFIG;
+  try {
+    const snap = await getDoc(doc(serverDb, 'app_config', 'channels'));
+    if (!snap.exists()) return DEFAULT_CHANNELS_CONFIG;
+    const d = snap.data();
+    const rawList = Array.isArray(d.channels) ? d.channels : [];
+    const parsedChannels: RequiredTelegramChannel[] = rawList
+      .map((item, idx) =>
+        item && typeof item === 'object'
+          ? normalizeTelegramChannelEntry(item as Partial<RequiredTelegramChannel>, idx)
+          : null,
+      )
+      .filter((item): item is RequiredTelegramChannel => Boolean(item))
+      .slice(0, 10);
+
+    return {
+      enabled: d.enabled !== false,
+      channels: parsedChannels,
+      updatedAtMs: Number(d.updatedAtMs ?? 0),
+    };
+  } catch {
+    return DEFAULT_CHANNELS_CONFIG;
+  }
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json());
 
-  app.get('/api/config', (_req, res) => {
+  app.get('/api/config', async (_req, res) => {
+    const channelsCfg = await loadChannelsConfigFromFirestore();
+    const activeChannels = getActiveRequiredChannels(channelsCfg);
     res.json({
       gramDepositAddress: GRAM_DEPOSIT_ADDRESS,
       gramJettonMaster: GRAM_JETTON_MASTER,
       minDepositCoins: MIN_DEPOSIT_COINS,
       maxDepositCoins: MAX_DEPOSIT_COINS,
       payoutChannel: TELEGRAM_PAYOUT_CHANNEL,
-      requiredChannels: REQUIRED_TELEGRAM_CHANNELS.map((c) => c.handle),
+      channelCheckEnabled: channelsCfg.enabled,
+      requiredChannels: activeChannels.map((c) => c.handle),
       telegramBotConfigured: Boolean(TELEGRAM_BOT_TOKEN),
       persistentLedgerEnabled: Boolean(serverDb),
     });
@@ -301,9 +339,19 @@ async function startServer() {
     const body = req.body as {
       initData?: string;
       playerId?: string;
+      requiredChannels?: Array<Partial<RequiredTelegramChannel>>;
     };
     const rawInitData = String(body.initData || '').trim();
     const rawPlayerId = String(body.playerId || '').trim();
+
+    const channelsCfg = await loadChannelsConfigFromFirestore();
+    let targetChannels = getActiveRequiredChannels(channelsCfg);
+    if (!serverDb && Array.isArray(body.requiredChannels) && channelsCfg.enabled) {
+      targetChannels = body.requiredChannels
+        .map((ch, idx) => normalizeTelegramChannelEntry(ch, idx))
+        .filter((ch): ch is RequiredTelegramChannel => Boolean(ch && ch.enabled !== false))
+        .slice(0, 10);
+    }
 
     let numericUserId: string | null = null;
     if (rawInitData && TELEGRAM_BOT_TOKEN) {
@@ -316,13 +364,25 @@ async function startServer() {
       numericUserId = extractTelegramNumericUserId(rawPlayerId);
     }
 
+    if (!channelsCfg.enabled || targetChannels.length === 0) {
+      res.json({
+        ok: true,
+        allJoined: true,
+        verificationMode: 'disabled',
+        telegramUserId: numericUserId,
+        channels: [],
+        checkedAtMs: Date.now(),
+      });
+      return;
+    }
+
     if (!numericUserId) {
       res.json({
         ok: true,
         allJoined: false,
         verificationMode: 'guest_browser',
         telegramUserId: null,
-        channels: REQUIRED_TELEGRAM_CHANNELS.map((ch) => ({
+        channels: targetChannels.map((ch) => ({
           ...ch,
           joined: false,
           status: 'no_telegram_user',
@@ -339,7 +399,7 @@ async function startServer() {
         allJoined: false,
         verificationMode: 'bot_unconfigured',
         telegramUserId: numericUserId,
-        channels: REQUIRED_TELEGRAM_CHANNELS.map((ch) => ({
+        channels: targetChannels.map((ch) => ({
           ...ch,
           joined: false,
           status: 'bot_unconfigured',
@@ -351,7 +411,7 @@ async function startServer() {
     }
 
     const checks = await Promise.all(
-      REQUIRED_TELEGRAM_CHANNELS.map(async (ch) => {
+      targetChannels.map(async (ch) => {
         try {
           const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChatMember?chat_id=${encodeURIComponent(
             ch.handle,
@@ -438,42 +498,45 @@ async function startServer() {
 
   app.post('/api/admin/auth', (req, res) => {
     const body = req.body as {
-      passcode?: string;
       playerId?: string;
-      checkOnly?: boolean;
+      initData?: string;
       token?: string;
     };
-    const passcode = String(body.passcode || '').trim();
-    const playerId = String(body.playerId || '').trim();
+    const rawPlayerId = String(body.playerId || '').trim();
+    const rawInitData = String(body.initData || '').trim();
     const authHeader = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
     const candidateToken = String(body.token || authHeader || '').trim();
 
     if (candidateToken) {
       const verified = verifySessionToken(candidateToken);
-      if (verified?.role === 'admin') {
+      if (verified?.role === 'admin' && isAdminPlayerId(verified.playerId, ADMIN_TELEGRAM_IDS)) {
         res.json({ ok: true, method: 'token', token: candidateToken });
         return;
       }
     }
 
-    if (playerId && ADMIN_TELEGRAM_IDS.includes(playerId)) {
-      const token = signSessionToken({ role: 'admin', playerId, method: 'telegram_id' });
+    let resolvedPlayerId = rawPlayerId;
+    if (rawInitData && TELEGRAM_BOT_TOKEN) {
+      const verifiedInit = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN);
+      if (verifiedInit.valid && verifiedInit.playerId) {
+        resolvedPlayerId = verifiedInit.playerId;
+      }
+    }
+
+    if (isAdminPlayerId(resolvedPlayerId, ADMIN_TELEGRAM_IDS)) {
+      const token = signSessionToken({
+        role: 'admin',
+        playerId: resolvedPlayerId,
+        method: 'telegram_id',
+      });
       res.json({ ok: true, method: 'telegram_id', token });
       return;
     }
 
-    if (body.checkOnly) {
-      res.json({ ok: false, requirePasscode: true });
-      return;
-    }
-
-    if (passcode && ADMIN_PASSCODE && passcode === ADMIN_PASSCODE) {
-      const token = signSessionToken({ role: 'admin', playerId: playerId || 'owner', method: 'passcode' });
-      res.json({ ok: true, method: 'passcode', token });
-      return;
-    }
-
-    res.status(401).json({ ok: false, error: 'Invalid admin passcode.' });
+    res.status(403).json({
+      ok: false,
+      error: `Restricted to Telegram Admin ID ${PRIMARY_ADMIN_TELEGRAM_ID}.`,
+    });
   });
 
   app.post('/api/economy/validate-promo', async (req, res) => {

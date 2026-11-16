@@ -15,6 +15,7 @@ import {
   ShieldCheck,
   Sparkles,
   Sun,
+  Trees,
   Volume2,
   X,
   Zap,
@@ -28,8 +29,16 @@ import {
   FEED_BOOSTER_COST_COINS,
   getAchievementsProgress,
   getXpForLevel,
+  isAdminPlayerId,
   isFeedBoosterActive,
+  PRIMARY_ADMIN_TELEGRAM_ID,
 } from '../game/economy';
+import {
+  countEnabledFarmArtifacts,
+  FARM_ARTIFACT_PRESETS,
+  FARM_ARTIFACTS,
+  type FarmArtifactLayout,
+} from '../game/farmArtifacts';
 import { getPrimaryDepositMemo } from '../game/tonGram';
 import type { LanguageCode, UserFarmProfile } from '../types/farm';
 import { LANGUAGE_OPTIONS, t } from '../utils/i18n';
@@ -321,19 +330,23 @@ export function ProfileView({
           <span className="text-xs text-stone-400 dark:text-stone-500">24/7 Farm Guide</span>
         </div>
 
-        <button
-          type="button"
-          onClick={onOpenAdmin}
-          className="w-full p-4 flex items-center justify-between text-left hover:bg-white/60 dark:hover:bg-stone-800/60 transition-colors cursor-pointer"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl clay-icon-well flex items-center justify-center">
-              <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+        {isAdminPlayerId(profile.uid) && (
+          <button
+            type="button"
+            onClick={onOpenAdmin}
+            className="w-full p-4 flex items-center justify-between text-left hover:bg-white/60 dark:hover:bg-stone-800/60 transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl clay-icon-well flex items-center justify-center">
+                <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+              </div>
+              <span className="text-sm font-bold text-stone-900 dark:text-stone-100">Admin Panel</span>
             </div>
-            <span className="text-sm font-bold text-stone-900 dark:text-stone-100">Admin Panel</span>
-          </div>
-          <span className="text-xs font-bold text-stone-400 dark:text-stone-500">Owner</span>
-        </button>
+            <span className="text-xs font-extrabold text-emerald-700 dark:text-emerald-400 font-mono-num">
+              ID {PRIMARY_ADMIN_TELEGRAM_ID}
+            </span>
+          </button>
+        )}
       </div>
     </div>
   );
@@ -344,11 +357,13 @@ interface YourFarmViewProps {
   pendingEggs: number;
   notificationsEnabled: boolean;
   notificationPermission: BrowserNotificationPermission;
+  artifactLayout?: FarmArtifactLayout;
   onBack: () => void;
   onUpgradeBasket: () => void;
   onGoPacks: () => void;
   onToggleNotifications: () => void;
   onActivateBooster?: () => void;
+  onOpenArtifactsDrawer?: () => void;
 }
 
 export function YourFarmView({
@@ -356,11 +371,13 @@ export function YourFarmView({
   pendingEggs,
   notificationsEnabled,
   notificationPermission,
+  artifactLayout,
   onBack,
   onUpgradeBasket,
   onGoPacks,
   onToggleNotifications,
   onActivateBooster,
+  onOpenArtifactsDrawer,
 }: YourFarmViewProps) {
   const prefersReducedMotion = useReducedMotion();
   const [liveNowMs, setLiveNowMs] = useState(() => Date.now());
@@ -494,6 +511,73 @@ export function YourFarmView({
           </div>
         </div>
       )}
+
+      {/* Farm Artifacts Showcase */}
+      {artifactLayout && onOpenArtifactsDrawer && (() => {
+        const activeProps = FARM_ARTIFACTS.filter((a) => artifactLayout.items[a.id]?.enabled);
+        const activeCount = countEnabledFarmArtifacts(artifactLayout);
+        const presetMeta = FARM_ARTIFACT_PRESETS.find((p) => p.id === artifactLayout.preset);
+        return (
+          <div className="clay-card p-4 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-11 h-11 rounded-2xl clay-icon-well flex items-center justify-center text-emerald-600 dark:text-emerald-400 shrink-0">
+                  <Trees className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-1.5">
+                    <span>Farm Artifacts</span>
+                    <span className="px-2 py-0.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-extrabold font-mono-num text-emerald-800 dark:text-emerald-300">
+                      {activeCount}/{FARM_ARTIFACTS.length}
+                    </span>
+                  </div>
+                  <div className="text-xs text-stone-500 dark:text-stone-400 truncate">
+                    {presetMeta ? presetMeta.name : 'Custom Meadow'} · Barn, fences, hay, pond &amp; flowers
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={onOpenArtifactsDrawer}
+                className="clay-btn clay-btn-emerald px-3.5 min-h-[40px] rounded-xl text-xs font-extrabold shrink-0"
+              >
+                Customize Props
+              </button>
+            </div>
+
+            {activeProps.length > 0 && (
+              <div className="flex items-center gap-2 overflow-x-auto pb-0.5">
+                {activeProps.slice(0, 6).map((prop) => (
+                  <button
+                    key={prop.id}
+                    type="button"
+                    onClick={onOpenArtifactsDrawer}
+                    title={prop.name}
+                    aria-label={`${prop.name} artifact`}
+                    className="clay-icon-well w-12 h-12 rounded-xl p-1.5 flex items-center justify-center shrink-0 hover:scale-105 transition-transform cursor-pointer"
+                  >
+                    <img
+                      src={prop.sprite}
+                      alt={prop.name}
+                      referrerPolicy="no-referrer"
+                      className="max-w-full max-h-full object-contain"
+                    />
+                  </button>
+                ))}
+                {activeProps.length > 6 && (
+                  <button
+                    type="button"
+                    onClick={onOpenArtifactsDrawer}
+                    className="clay-inset w-12 h-12 rounded-xl flex items-center justify-center text-xs font-extrabold font-mono-num text-stone-600 dark:text-stone-300 shrink-0 cursor-pointer"
+                  >
+                    +{activeProps.length - 6}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Your Chickens Breakdown */}
       <div className="space-y-2">

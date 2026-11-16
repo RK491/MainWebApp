@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Award, Package, Sparkles, X, Zap } from 'lucide-react';
+import { Award, Package, Sparkles, Trees, X, Zap } from 'lucide-react';
 import { motion } from 'motion/react';
 import type { ChickenBreedId, UserFarmProfile } from '../types/farm';
 import {
@@ -13,6 +13,12 @@ import {
   isFeedBoosterActive,
   isGoldenEggReady,
 } from '../game/economy';
+import {
+  countEnabledFarmArtifacts,
+  FARM_ARTIFACTS,
+  type FarmArtifactId,
+  type FarmArtifactLayout,
+} from '../game/farmArtifacts';
 import { ChickenSprite, EggIcon } from './GameIcons';
 import farmMeadowBg from '../assets/images/clay_farm_meadow_1794678824788.jpg';
 
@@ -22,8 +28,11 @@ interface FarmMeadowProps {
   collectLabel: string;
   isVisible?: boolean;
   isProfileSynced?: boolean;
+  artifactLayout: FarmArtifactLayout;
   onCollect: () => void;
   onOpenYourFarm: () => void;
+  onOpenArtifactsDrawer?: () => void;
+  onArtifactTap?: () => void;
   onChickenTap: () => void;
   onGoldenEggDrop?: () => void;
   onActivateBooster?: () => void;
@@ -98,8 +107,11 @@ export function FarmMeadow({
   collectLabel,
   isVisible = true,
   isProfileSynced = true,
+  artifactLayout,
   onCollect,
   onOpenYourFarm,
+  onOpenArtifactsDrawer,
+  onArtifactTap,
   onChickenTap,
   onGoldenEggDrop,
   onActivateBooster,
@@ -110,12 +122,14 @@ export function FarmMeadow({
   const [liveNowMs, setLiveNowMs] = useState(() => Date.now());
   const [chirps, setChirps] = useState<Array<{ seq: number; henId: string; text: string; isGolden: boolean }>>([]);
   const [poppedHen, setPoppedHen] = useState<{ id: string; seq: number } | null>(null);
+  const [poppedArtifact, setPoppedArtifact] = useState<{ id: FarmArtifactId; seq: number; label: string } | null>(null);
   const [activeMilestone, setActiveMilestone] = useState<ChickenMilestoneInfo | null>(null);
 
   const prevUidRef = useRef<string>(profile.uid);
   const prevTotalChickensRef = useRef<number | null>(null);
   const chirpSeqRef = useRef(0);
   const popTimerRef = useRef<number | null>(null);
+  const artifactPopTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -195,8 +209,30 @@ export function FarmMeadow({
     return () => {
       window.clearInterval(id);
       if (popTimerRef.current) window.clearTimeout(popTimerRef.current);
+      if (artifactPopTimerRef.current) window.clearTimeout(artifactPopTimerRef.current);
     };
   }, []);
+
+  const placedArtifacts = useMemo(() => {
+    return FARM_ARTIFACTS.flatMap((def) => {
+      const state = artifactLayout.items[def.id];
+      if (!state?.enabled) return [];
+      const spot = def.spots[state.spot];
+      const flip = state.flipped ? !spot.defaultFlipX : Boolean(spot.defaultFlipX);
+      return [{ def, spot, flip }];
+    });
+  }, [artifactLayout]);
+
+  const activeArtifactCount = countEnabledFarmArtifacts(artifactLayout);
+
+  const handleTapArtifact = (id: FarmArtifactId, label: string) => {
+    onArtifactTap?.();
+    setPoppedArtifact((prev) => ({ id, seq: (prev?.seq ?? 0) + 1, label }));
+    if (artifactPopTimerRef.current) window.clearTimeout(artifactPopTimerRef.current);
+    artifactPopTimerRef.current = window.setTimeout(() => {
+      setPoppedArtifact((cur) => (cur?.id === id ? null : cur));
+    }, 1500);
+  };
 
   const roamingHens: RoamingHen[] = useMemo(() => {
     return baseHens.map((breed, idx) => {
@@ -246,7 +282,7 @@ export function FarmMeadow({
       {/* Subtle bottom scrim so dock controls maintain high readability */}
       <div className="absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-black/50 via-black/15 to-transparent pointer-events-none" />
 
-      {/* Top Meadow HUD: 2x Booster Status + Golden Egg Ready Sparkle (or 0-Hen status) */}
+      {/* Top Meadow HUD: 2x Booster Status + Golden Egg Ready Sparkle + Props Studio */}
       {!activeMilestone && (
         <div className="absolute top-3 inset-x-3 z-20 flex items-center justify-between gap-2 pointer-events-none">
           {totalChickens <= 0 ? (
@@ -273,12 +309,29 @@ export function FarmMeadow({
             <span />
           )}
 
-          {totalChickens > 0 && goldenReady && onGoldenEggDrop && (
-            <div className="animate-clay-badge clay-btn-amber pointer-events-none px-2.5 py-1.5 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1 shadow-md">
-              <Sparkles className="w-3.5 h-3.5 shrink-0" />
-              <span>Tap Hen for Gold Egg!</span>
-            </div>
-          )}
+          <div className="flex items-center gap-1.5">
+            {totalChickens > 0 && goldenReady && onGoldenEggDrop && (
+              <div className="animate-clay-badge clay-btn-amber pointer-events-none px-2.5 py-1.5 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1 shadow-md">
+                <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                <span className="hidden sm:inline">Tap Hen for Gold Egg!</span>
+                <span className="sm:hidden">Gold Egg!</span>
+              </div>
+            )}
+            {onOpenArtifactsDrawer && (
+              <button
+                type="button"
+                onClick={onOpenArtifactsDrawer}
+                aria-label="Customize farm artifacts and meadow props"
+                className="clay-btn clay-card pointer-events-auto !rounded-2xl px-2.5 py-1.5 text-[11px] font-extrabold text-stone-800 dark:text-stone-100 inline-flex items-center gap-1.5 shadow-md"
+              >
+                <Trees className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                <span>Props</span>
+                <span className="font-mono-num text-[10px] px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-800 dark:text-emerald-300">
+                  {activeArtifactCount}
+                </span>
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -319,10 +372,52 @@ export function FarmMeadow({
         </div>
       )}
 
+      {/* Back Pasture Farm Artifacts Layer (behind roaming hens) */}
+      <div className="absolute inset-0 z-[5] pointer-events-none">
+        {placedArtifacts
+          .filter((item) => item.spot.zLayer === 'back')
+          .map(({ def, spot, flip }) => {
+            const isPopping = poppedArtifact?.id === def.id;
+            return (
+              <button
+                key={def.id}
+                type="button"
+                onClick={() => handleTapArtifact(def.id, `${def.name} · ${def.tagline}`)}
+                aria-label={`${def.name}: ${def.tagline}`}
+                style={{
+                  left: `${spot.x}%`,
+                  top: `${spot.y}%`,
+                  width: `${spot.widthPct}%`,
+                }}
+                className="group pointer-events-auto absolute -translate-x-1/2 -translate-y-1/2 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 rounded-2xl transition-all duration-300"
+              >
+                {isPopping && (
+                  <span className="animate-clay-enter pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 z-30 rounded-xl bg-stone-950/90 text-amber-100 border border-amber-300/35 px-2.5 py-0.5 text-[10px] font-extrabold whitespace-nowrap shadow-lg">
+                    {poppedArtifact.label}
+                  </span>
+                )}
+                <div
+                  key={isPopping ? `art-pop-${poppedArtifact.seq}` : 'art-idle'}
+                  className={isPopping ? 'animate-artifact-pop' : def.sway ? 'animate-artifact-sway' : ''}
+                >
+                  <img
+                    src={def.sprite}
+                    alt={def.name}
+                    referrerPolicy="no-referrer"
+                    className={`w-full h-auto object-contain select-none transition-transform duration-200 group-hover:scale-[1.03] drop-shadow-[0_6px_8px_rgba(20,30,15,0.34)] ${
+                      flip ? '-scale-x-100' : ''
+                    }`}
+                  />
+                </div>
+              </button>
+            );
+          })}
+      </div>
+
       {/* Animated Roaming Chickens (or Buy First Miner Prompt when 0 hens owned) */}
-      <div className="absolute inset-0 z-10">
+      <div className="absolute inset-0 z-10 pointer-events-none">
         {totalChickens <= 0 && (
-          <div className="absolute inset-x-4 top-1/2 -translate-y-1/2 flex justify-center z-20">
+          <div className="pointer-events-auto absolute inset-x-4 top-1/2 -translate-y-1/2 flex justify-center z-20">
             <div className="animate-clay-enter clay-card-warm !rounded-3xl max-w-[290px] w-full p-4 text-center space-y-2.5 shadow-xl">
               <div className="w-12 h-12 rounded-2xl clay-icon-well mx-auto flex items-center justify-center">
                 <ChickenSprite breed="leghorn" className="w-9 h-9" />
@@ -386,7 +481,7 @@ export function FarmMeadow({
               }}
               className={`group absolute -translate-x-1/2 -translate-y-1/2 p-1 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 rounded-full ${
                 isGoldenTarget ? 'ring-2 ring-amber-300/90 bg-amber-300/20' : ''
-              }`}
+              } pointer-events-auto`}
             >
               {chirps
                 .filter((c) => c.henId === hen.id)
@@ -422,6 +517,48 @@ export function FarmMeadow({
             </button>
           );
         })}
+      </div>
+
+      {/* Meadow Foreground Artifacts Layer (pond, corner fence, wildflowers, front hay) */}
+      <div className="absolute inset-0 z-[12] pointer-events-none">
+        {placedArtifacts
+          .filter((item) => item.spot.zLayer === 'front')
+          .map(({ def, spot, flip }) => {
+            const isPopping = poppedArtifact?.id === def.id;
+            return (
+              <button
+                key={def.id}
+                type="button"
+                onClick={() => handleTapArtifact(def.id, `${def.name} · ${def.tagline}`)}
+                aria-label={`${def.name}: ${def.tagline}`}
+                style={{
+                  left: `${spot.x}%`,
+                  top: `${spot.y}%`,
+                  width: `${spot.widthPct}%`,
+                }}
+                className="group pointer-events-auto absolute -translate-x-1/2 -translate-y-1/2 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 rounded-2xl transition-all duration-300"
+              >
+                {isPopping && (
+                  <span className="animate-clay-enter pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 z-30 rounded-xl bg-stone-950/90 text-amber-100 border border-amber-300/35 px-2.5 py-0.5 text-[10px] font-extrabold whitespace-nowrap shadow-lg">
+                    {poppedArtifact.label}
+                  </span>
+                )}
+                <div
+                  key={isPopping ? `art-pop-${poppedArtifact.seq}` : 'art-idle'}
+                  className={isPopping ? 'animate-artifact-pop' : def.sway ? 'animate-artifact-sway' : ''}
+                >
+                  <img
+                    src={def.sprite}
+                    alt={def.name}
+                    referrerPolicy="no-referrer"
+                    className={`w-full h-auto object-contain select-none transition-transform duration-200 group-hover:scale-[1.03] drop-shadow-[0_7px_9px_rgba(16,24,12,0.36)] ${
+                      flip ? '-scale-x-100' : ''
+                    }`}
+                  />
+                </div>
+              </button>
+            );
+          })}
       </div>
 
       {/* Bottom Clay HUD Dock */}

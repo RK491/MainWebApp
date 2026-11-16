@@ -277,6 +277,18 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["seasonNumber", "title", "prizePoolCoins", "endsAtMs", "lastWinners", "updatedAtMs", "updatedAt"]
+    },
+    "ChannelsConfig": {
+      "title": "ChannelsConfig",
+      "description": "Admin-managed required Telegram channels for verification gate.",
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "channels": { "type": "array" },
+        "updatedAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["enabled", "channels", "updatedAtMs", "updatedAt"]
     }
   },
   "firestore": {
@@ -322,7 +334,7 @@
     },
     "/app_config/{configId}": {
       "schema": { "$ref": "#/entities/AdsConfig" },
-      "description": "Global app configuration for ads and seasonal leaderboard."
+      "description": "Global app configuration for ads, seasonal leaderboard, and required Telegram channels."
     }
   }
 }

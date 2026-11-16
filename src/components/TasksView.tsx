@@ -35,6 +35,7 @@ import {
   getAdNetworkClaimCountToday,
   getTaskRemainingSlots,
   mergeTaskDefinitions,
+  REQUIRED_TELEGRAM_CHANNELS,
   sortTasks,
   USER_TASK_MAX_REWARD_COINS,
   USER_TASK_MAX_SLOTS,
@@ -47,6 +48,7 @@ import type {
   AdConfig,
   AdNetworkId,
   ChannelVerificationResult,
+  RequiredTelegramChannel,
   TaskCategory,
   TaskDefinition,
   TaskSortOption,
@@ -65,6 +67,8 @@ interface TasksViewProps {
   todayStr: string;
   customTasks: TaskDefinition[];
   adConfig: AdConfig;
+  requiredChannels?: RequiredTelegramChannel[];
+  channelsGateEnabled?: boolean;
   payoutChannelUrl?: string;
   watchingAd?: boolean;
   activeAdNetwork?: AdNetworkId | null;
@@ -100,6 +104,8 @@ export function TasksView({
   todayStr,
   customTasks,
   adConfig,
+  requiredChannels,
+  channelsGateEnabled = true,
   payoutChannelUrl = DEFAULT_PAYOUT_CHANNEL_URL,
   watchingAd = false,
   activeAdNetwork = null,
@@ -116,6 +122,10 @@ export function TasksView({
   onRefreshTasks,
   onCreateTask,
 }: TasksViewProps) {
+  const activeRequiredChannels = (requiredChannels ?? REQUIRED_TELEGRAM_CHANNELS).filter(
+    (ch) => ch.enabled !== false && Boolean(ch.handle),
+  );
+  const channelGateActive = channelsGateEnabled && activeRequiredChannels.length > 0;
   const [filterTab, setFilterTab] = useState<FilterTab>('daily');
   const [sortBy, setSortBy] = useState<TaskSortOption>('most_reward');
   const [promoInput, setPromoInput] = useState('');
@@ -344,21 +354,21 @@ export function TasksView({
   const handleClaimCheckedTask = async (task: TaskDefinition) => {
     if (profile.completedTaskIds.includes(task.id)) return;
     if (
+      channelGateActive &&
       task.actionUrl &&
       onCheckChannels &&
       channelVerification?.verificationMode === 'telegram_bot'
     ) {
       const normalizedUrl = task.actionUrl.toLowerCase();
-      const targetHandle = normalizedUrl.includes('airdrop_galaxys')
-        ? '@AIRDROP_GALAXYS'
-        : normalizedUrl.includes('ag_payouts')
-          ? '@AG_PAYOUTS'
-          : null;
-      if (targetHandle) {
+      const matchedConfigChannel = activeRequiredChannels.find((ch) => {
+        const cleanSlug = ch.handle.replace(/^@/, '').toLowerCase();
+        return cleanSlug.length >= 2 && normalizedUrl.includes(cleanSlug);
+      });
+      if (matchedConfigChannel) {
         const fresh = (await onCheckChannels()) || channelVerification;
         if (fresh?.verificationMode === 'telegram_bot') {
           const matched = fresh.channels.find(
-            (ch) => ch.handle.toUpperCase() === targetHandle,
+            (ch) => ch.handle.toUpperCase() === matchedConfigChannel.handle.toUpperCase(),
           );
           if (matched && !matched.joined) {
             setTaskStages((prev) => {
@@ -815,8 +825,9 @@ export function TasksView({
         </div>
       )}
 
-      {onCheckChannels && (
+      {onCheckChannels && channelGateActive && (
         <ChannelCheckCard
+          requiredChannels={activeRequiredChannels}
           verification={channelVerification}
           checking={checkingChannels}
           onCheckChannels={() => {

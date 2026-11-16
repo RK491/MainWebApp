@@ -6,11 +6,12 @@ import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
 
 interface PacksViewProps {
   profile: UserFarmProfile;
+  buyingBusy?: boolean;
   onBuy: (breed: ChickenBreedId, qty: number) => void;
   onTopUp: () => void;
 }
 
-export function PacksView({ profile, onBuy, onTopUp }: PacksViewProps) {
+export function PacksView({ profile, buyingBusy = false, onBuy, onTopUp }: PacksViewProps) {
   const [quantities, setQuantities] = useState<Record<ChickenBreedId, number>>({
     leghorn: 1,
     rhode: 1,
@@ -152,12 +153,13 @@ export function PacksView({ profile, onBuy, onTopUp }: PacksViewProps) {
 
                   <button
                     type="button"
+                    disabled={buyingBusy}
                     onClick={() => onBuy(pack.id, qty)}
-                    className={`clay-btn min-h-[42px] px-4 rounded-2xl text-sm font-extrabold whitespace-nowrap ${
+                    className={`clay-btn min-h-[42px] px-4 rounded-2xl text-sm font-extrabold whitespace-nowrap disabled:opacity-60 ${
                       canAfford ? 'clay-btn-emerald' : 'clay-btn-amber'
                     }`}
                   >
-                    Buy
+                    {buyingBusy ? 'Opening...' : 'Buy'}
                   </button>
                 </div>
               </div>

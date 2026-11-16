@@ -261,7 +261,26 @@ export interface AdConfig {
   updatedAtMs: number;
 }
 
-export type ChannelVerificationMode = 'telegram_bot' | 'bot_unconfigured' | 'guest_browser';
+export type ChannelVerificationMode =
+  | 'telegram_bot'
+  | 'bot_unconfigured'
+  | 'guest_browser'
+  | 'disabled';
+
+export interface RequiredTelegramChannel {
+  id: string;
+  handle: string;
+  title: string;
+  description: string;
+  url: string;
+  enabled?: boolean;
+}
+
+export interface ChannelsConfig {
+  enabled: boolean;
+  channels: RequiredTelegramChannel[];
+  updatedAtMs: number;
+}
 
 export interface ChannelVerificationItem {
   id: string;

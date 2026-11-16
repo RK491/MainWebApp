@@ -316,6 +316,27 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidChannelsConfig(data) {
+      return data.keys().hasAll(['enabled', 'channels', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['enabled', 'channels', 'updatedAtMs', 'updatedAt'])
+        && data.enabled is bool
+        && data.channels is list
+        && data.channels.size() <= 10
+        && (data.channels.size() == 0 || (
+          data.channels[0] is map
+          && data.channels[0].keys().hasAll(['id', 'handle', 'title', 'description', 'url', 'enabled'])
+          && data.channels[0].keys().hasOnly(['id', 'handle', 'title', 'description', 'url', 'enabled'])
+          && data.channels[0].id is string && data.channels[0].id.size() >= 1 && data.channels[0].id.size() <= 48
+          && data.channels[0].handle is string && data.channels[0].handle.size() >= 2 && data.channels[0].handle.size() <= 64
+          && data.channels[0].title is string && data.channels[0].title.size() <= 60
+          && data.channels[0].description is string && data.channels[0].description.size() <= 140
+          && data.channels[0].url is string && data.channels[0].url.size() <= 256
+          && data.channels[0].enabled is bool
+        ))
+        && data.updatedAtMs is number && data.updatedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
     function isValidReferral(data, playerId, referredUid) {
       return data.keys().hasAll([
           'referrerUid', 'referredUid', 'referredName', 'referredHandle',
@@ -580,6 +601,9 @@ service cloud.firestore {
           && incoming().updatedAt == request.time)
         || (configId == 'season'
           && isValidSeasonConfig(incoming())
+          && incoming().updatedAt == request.time)
+        || (configId == 'channels'
+          && isValidChannelsConfig(incoming())
           && incoming().updatedAt == request.time)
       );
       allow delete: if false;

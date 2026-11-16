@@ -27,6 +27,7 @@ import {
   type DetectedGramTransfer,
 } from '../game/tonGram';
 import type { DepositOrder, UserFarmProfile } from '../types/farm';
+import { safeFetchJson } from '../utils/telegram';
 import { CoinIcon, QRCodeSvg } from './GameIcons';
 
 interface DepositViewProps {
@@ -105,7 +106,11 @@ export function DepositView({
     inFlightRef.current = true;
     setScanning(true);
     try {
-      const res = await fetch('/api/deposits/check-gram', {
+      const data = await safeFetchJson<{
+        found?: boolean;
+        transfers?: DetectedGramTransfer[];
+        scannerWarning?: string;
+      }>('/api/deposits/check-gram', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -113,11 +118,12 @@ export function DepositView({
           claimedTxHashes: Array.from(claimedHashesRef.current),
         }),
       });
-      const data = (await res.json()) as {
-        found?: boolean;
-        transfers?: DetectedGramTransfer[];
-        scannerWarning?: string;
-      };
+      if (!data) {
+        setScanStatus(
+          `Scanner offline or static host — awaiting GRAM transfer with memo ${memoTag}.`,
+        );
+        return;
+      }
 
       const freshTransfers = (data.transfers || []).filter((tr) => {
         const lower = tr.txHash.toLowerCase();

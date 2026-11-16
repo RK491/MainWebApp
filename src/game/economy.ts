@@ -2,6 +2,7 @@ import type {
   AdConfig,
   AdGateActionType,
   AdNetworkId,
+  ChannelsConfig,
   ChickenBreedId,
   ChickenPack,
   DepositNetwork,
@@ -10,6 +11,7 @@ import type {
   LeaderboardEntry,
   PromoRewardType,
   ReferralRecord,
+  RequiredTelegramChannel,
   SeasonConfig,
   TaskCategory,
   TaskDefinition,
@@ -19,6 +21,8 @@ import type {
   WithdrawalOrder,
   WithdrawalStatus,
 } from '../types/farm';
+
+export type { RequiredTelegramChannel };
 
 export const USD_PER_EGG = 0.00000694;
 export const GRAM_USD_PRICE = 1.133;
@@ -2403,12 +2407,25 @@ export function formatPromoRewardSummary(input: {
   return `+${Math.max(1, coins).toLocaleString()} coins`;
 }
 
-export interface RequiredTelegramChannel {
-  id: string;
-  handle: string;
-  title: string;
-  description: string;
-  url: string;
+export const PRIMARY_ADMIN_TELEGRAM_ID = '7508911853';
+export const ADMIN_TELEGRAM_NUMERIC_IDS: readonly string[] = [PRIMARY_ADMIN_TELEGRAM_ID];
+
+export function isAdminPlayerId(
+  playerId: unknown,
+  extraAdminIds: readonly string[] = [],
+): boolean {
+  const raw = String(playerId || '').trim();
+  if (!raw) return false;
+  const numeric = extractTelegramNumericUserId(raw);
+  const allowed = new Set<string>(ADMIN_TELEGRAM_NUMERIC_IDS);
+  for (const extra of extraAdminIds) {
+    const cleanExtra = String(extra || '').trim();
+    if (!cleanExtra) continue;
+    const extraNum = extractTelegramNumericUserId(cleanExtra);
+    allowed.add(extraNum || cleanExtra);
+  }
+  if (numeric && allowed.has(numeric)) return true;
+  return allowed.has(raw);
 }
 
 export const REQUIRED_TELEGRAM_CHANNELS: RequiredTelegramChannel[] = [
@@ -2418,6 +2435,7 @@ export const REQUIRED_TELEGRAM_CHANNELS: RequiredTelegramChannel[] = [
     title: 'Alpha Gram News & Drops',
     description: 'Daily gift codes, announcements & community events',
     url: 'https://t.me/AIRDROP_GALAXYS',
+    enabled: true,
   },
   {
     id: 'ag_payouts',
@@ -2425,8 +2443,104 @@ export const REQUIRED_TELEGRAM_CHANNELS: RequiredTelegramChannel[] = [
     title: 'Alpha Gram Payout Proofs',
     description: 'Live verified TON / GRAM withdrawal proofs',
     url: 'https://t.me/AG_PAYOUTS',
+    enabled: true,
   },
 ];
+
+export const DEFAULT_CHANNELS_CONFIG: ChannelsConfig = {
+  enabled: true,
+  channels: REQUIRED_TELEGRAM_CHANNELS,
+  updatedAtMs: 0,
+};
+
+export function normalizeTelegramChannelHandle(rawHandleOrUrl: string): {
+  handle: string;
+  url: string;
+} {
+  const trimmed = String(rawHandleOrUrl || '').trim();
+  if (!trimmed) {
+    return { handle: '', url: '' };
+  }
+  const urlMatch = trimmed.match(/^(?:https?:\/\/)?t\.me\/([a-zA-Z0-9_]{3,64})/i);
+  if (urlMatch) {
+    const slug = urlMatch[1];
+    return {
+      handle: `@${slug}`,
+      url: `https://t.me/${slug}`,
+    };
+  }
+  if (/^-?\d{5,20}$/.test(trimmed)) {
+    return {
+      handle: trimmed,
+      url: '',
+    };
+  }
+  const cleanHandle = trimmed.replace(/^@+/, '').replace(/[^a-zA-Z0-9_]/g, '');
+  if (!cleanHandle) {
+    return { handle: '', url: '' };
+  }
+  return {
+    handle: `@${cleanHandle}`,
+    url: `https://t.me/${cleanHandle}`,
+  };
+}
+
+export function normalizeTelegramChannelEntry(
+  input: Partial<RequiredTelegramChannel> & { handle?: string; url?: string },
+  index = 0,
+): RequiredTelegramChannel | null {
+  const normalized = normalizeTelegramChannelHandle(input.handle || input.url || '');
+  const handle = normalized.handle;
+  if (!handle || handle.length < 2) return null;
+
+  const rawUrl = String(input.url || '').trim();
+  const safeUrl =
+    rawUrl && /^https?:\/\//i.test(rawUrl)
+      ? rawUrl.slice(0, 256)
+      : normalized.url || 'https://t.me/';
+
+  const baseId =
+    String(input.id || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, '_') ||
+    handle
+      .replace(/^@/, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, '_') ||
+    `ch_${index + 1}`;
+
+  return {
+    id: baseId.slice(0, 48),
+    handle: handle.slice(0, 64),
+    title: (String(input.title || '').trim() || handle).slice(0, 60),
+    description: (String(input.description || '').trim() || 'Join official Telegram channel').slice(0, 140),
+    url: safeUrl,
+    enabled: input.enabled !== false,
+  };
+}
+
+export function getActiveRequiredChannels(
+  config?: ChannelsConfig | null,
+): RequiredTelegramChannel[] {
+  if (config && config.enabled === false) {
+    return [];
+  }
+  const source = config?.channels ?? REQUIRED_TELEGRAM_CHANNELS;
+  return source
+    .filter((ch) => ch && ch.enabled !== false && Boolean(ch.handle))
+    .slice(0, 10);
+}
+
+export function formatChannelsHandleSummary(
+  channels: ReadonlyArray<Pick<RequiredTelegramChannel, 'handle'>>,
+): string {
+  const handles = channels.map((c) => c.handle).filter(Boolean);
+  if (handles.length === 0) return 'Required channels';
+  if (handles.length === 1) return handles[0];
+  if (handles.length === 2) return `${handles[0]} & ${handles[1]}`;
+  return `${handles.slice(0, -1).join(', ')} & ${handles[handles.length - 1]}`;
+}
 
 export function extractTelegramNumericUserId(rawPlayerOrUserId: unknown): string | null {
   const s = String(rawPlayerOrUserId || '').trim();
@@ -2450,6 +2564,7 @@ export const AD_GATED_ACTIONS: readonly AdGateActionType[] = [
   'startup',
   'collect_eggs',
   'claim_promo',
+  'buy_chicken',
   'ad_network',
   'watch_ad',
 ];
@@ -2458,7 +2573,6 @@ export const AD_EXEMPT_ACTIONS: readonly AdGateActionType[] = [
   'task',
   'withdraw',
   'deposit',
-  'buy_chicken',
 ];
 
 export function shouldRequireAdForAction(action: AdGateActionType): boolean {
@@ -2471,4 +2585,187 @@ export function recordCompletedGateAd(profile: UserFarmProfile): UserFarmProfile
     totalAdsWatched: getTotalAdsWatched(profile) + 1,
   };
 }
+
+export type AdConfigDraft = Omit<AdConfig, 'updatedAtMs'>;
+
+export function formatAdConfigTemplate(config: AdConfigDraft): string {
+  return [
+    `ACTIVE_PROVIDER=${config.provider}`,
+    `ADSGRAM_BLOCK_ID=${config.adsgramBlockId}`,
+    `GIGAPUB_PROJECT_ID=${config.gigapubProjectId || ''}`,
+    `MONETAG_ZONE_ID=${config.monetagZoneId}`,
+    `WATCH_SECONDS=${config.watchSeconds}`,
+    `CUSTOM_TITLE=${config.customTitle}`,
+    `CUSTOM_DESCRIPTION=${config.customDescription}`,
+    `CUSTOM_URL=${config.customUrl}`,
+    `BANNER_ENABLED=${config.bannerEnabled ? 'true' : 'false'}`,
+    `BANNER_TITLE=${config.bannerTitle}`,
+    `BANNER_SUBTITLE=${config.bannerSubtitle}`,
+    `BANNER_CTA=${config.bannerCtaText}`,
+    `BANNER_URL=${config.bannerUrl}`,
+  ].join('\n');
+}
+
+export function parseAdConfigTemplate(
+  rawTemplate: string,
+  current: AdConfigDraft,
+): { next: AdConfigDraft; appliedKeys: string[] } {
+  const trimmed = rawTemplate.trim();
+  const next: AdConfigDraft = { ...current };
+  const applied = new Set<string>();
+
+  if (!trimmed) {
+    return { next, appliedKeys: [] };
+  }
+
+  const applyEntry = (rawKey: string, rawValue: unknown) => {
+    const key = rawKey.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    const val = String(rawValue ?? '').trim().replace(/^["']|["']$/g, '');
+
+    if (
+      key === 'activeprovider' ||
+      key === 'provider' ||
+      key === 'adprovider'
+    ) {
+      const normalized = val.toLowerCase();
+      if (
+        normalized === 'countdown' ||
+        normalized === 'adsgram' ||
+        normalized === 'gigapub' ||
+        normalized === 'monetag' ||
+        normalized === 'custom_sponsor' ||
+        normalized === 'customsponsor'
+      ) {
+        next.provider =
+          normalized === 'customsponsor' ? 'custom_sponsor' : normalized;
+        applied.add('ACTIVE_PROVIDER');
+      }
+      return;
+    }
+
+    if (key === 'adsgramblockid' || key === 'viteadsgramblockid' || key === 'adsgramid') {
+      next.adsgramBlockId = val.slice(0, 64);
+      applied.add('ADSGRAM_BLOCK_ID');
+      return;
+    }
+
+    if (
+      key === 'gigapubprojectid' ||
+      key === 'vitegigapubprojectid' ||
+      key === 'gigapubid'
+    ) {
+      next.gigapubProjectId = val.slice(0, 64);
+      applied.add('GIGAPUB_PROJECT_ID');
+      return;
+    }
+
+    if (key === 'monetagzoneid' || key === 'vitemonetagzoneid' || key === 'monetagid') {
+      next.monetagZoneId = val.slice(0, 64);
+      applied.add('MONETAG_ZONE_ID');
+      return;
+    }
+
+    if (key === 'watchseconds' || key === 'watchtimer') {
+      const parsed = Number(val);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        next.watchSeconds = Math.max(3, Math.min(60, Math.round(parsed)));
+        applied.add('WATCH_SECONDS');
+      }
+      return;
+    }
+
+    if (key === 'customtitle' || key === 'adtitle') {
+      if (val) {
+        next.customTitle = val.slice(0, 80);
+        applied.add('CUSTOM_TITLE');
+      }
+      return;
+    }
+
+    if (key === 'customdescription' || key === 'customdesc' || key === 'addescription') {
+      next.customDescription = val.slice(0, 200);
+      applied.add('CUSTOM_DESCRIPTION');
+      return;
+    }
+
+    if (key === 'customurl' || key === 'adurl' || key === 'sponsorurl') {
+      next.customUrl = val.slice(0, 256);
+      applied.add('CUSTOM_URL');
+      return;
+    }
+
+    if (key === 'bannerenabled') {
+      const low = val.toLowerCase();
+      if (low === 'true' || low === '1' || low === 'yes' || low === 'on') {
+        next.bannerEnabled = true;
+        applied.add('BANNER_ENABLED');
+      } else if (low === 'false' || low === '0' || low === 'no' || low === 'off') {
+        next.bannerEnabled = false;
+        applied.add('BANNER_ENABLED');
+      }
+      return;
+    }
+
+    if (key === 'bannertitle') {
+      if (val) {
+        next.bannerTitle = val.slice(0, 80);
+        applied.add('BANNER_TITLE');
+      }
+      return;
+    }
+
+    if (key === 'bannersubtitle') {
+      next.bannerSubtitle = val.slice(0, 160);
+      applied.add('BANNER_SUBTITLE');
+      return;
+    }
+
+    if (key === 'bannercta' || key === 'bannerctatext') {
+      if (val) {
+        next.bannerCtaText = val.slice(0, 24);
+        applied.add('BANNER_CTA');
+      }
+      return;
+    }
+
+    if (key === 'bannerurl') {
+      next.bannerUrl = val.slice(0, 256);
+      applied.add('BANNER_URL');
+    }
+  };
+
+  if (trimmed.startsWith('{')) {
+    try {
+      const obj = JSON.parse(trimmed) as Record<string, unknown>;
+      if (obj && typeof obj === 'object') {
+        for (const [k, v] of Object.entries(obj)) {
+          applyEntry(k, v);
+        }
+        return { next, appliedKeys: Array.from(applied) };
+      }
+    } catch {
+      // Fallback to KEY=VALUE parsing
+    }
+  }
+
+  for (const rawLine of trimmed.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#') || line.startsWith('//')) continue;
+    const eqIdx = line.indexOf('=');
+    const colonIdx = line.indexOf(':');
+    const sepIdx =
+      eqIdx > 0 && (colonIdx === -1 || eqIdx < colonIdx)
+        ? eqIdx
+        : colonIdx > 0
+          ? colonIdx
+          : -1;
+    if (sepIdx <= 0) continue;
+    const key = line.slice(0, sepIdx).trim();
+    const val = line.slice(sepIdx + 1).trim();
+    applyEntry(key, val);
+  }
+
+  return { next, appliedKeys: Array.from(applied) };
+}
+
 

@@ -36,12 +36,53 @@ interface TelegramWindow {
   };
 }
 
+function parseInitDataUserParams(rawInitData: string): {
+  user: TelegramWebAppUser | null;
+  startParam: string;
+} {
+  try {
+    const params = new URLSearchParams(rawInitData);
+    const userJson = params.get('user');
+    const startParam = (params.get('start_param') || '').trim();
+    if (userJson) {
+      const parsed = JSON.parse(userJson) as TelegramWebAppUser;
+      if (parsed && parsed.id !== undefined && parsed.id !== null) {
+        return { user: parsed, startParam };
+      }
+    }
+    return { user: null, startParam };
+  } catch {
+    return { user: null, startParam: '' };
+  }
+}
+
 export function resolveTelegramUserIdentity(params: {
   tgUser?: TelegramWebAppUser | null;
+  initData?: string;
   startParam?: string;
   search?: string;
+  hash?: string;
 }): DetectedUserIdentity {
-  const user = params.tgUser;
+  let user = params.tgUser ?? null;
+  let derivedStartParam = (params.startParam || '').trim();
+
+  if (!user && params.initData) {
+    const parsed = parseInitDataUserParams(params.initData);
+    if (parsed.user) user = parsed.user;
+    if (!derivedStartParam && parsed.startParam) derivedStartParam = parsed.startParam;
+  }
+
+  if (!user && params.hash) {
+    const cleanHash = params.hash.startsWith('#') ? params.hash.slice(1) : params.hash;
+    const hashParams = new URLSearchParams(cleanHash);
+    const rawTgWebAppData = hashParams.get('tgWebAppData') || '';
+    if (rawTgWebAppData) {
+      const parsed = parseInitDataUserParams(rawTgWebAppData);
+      if (parsed.user) user = parsed.user;
+      if (!derivedStartParam && parsed.startParam) derivedStartParam = parsed.startParam;
+    }
+  }
+
   if (user && user.id !== undefined && user.id !== null) {
     const rawId = String(user.id).replace(/[^a-zA-Z0-9_-]/g, '');
     const fullName = [user.first_name, user.last_name]
@@ -58,7 +99,7 @@ export function resolveTelegramUserIdentity(params: {
       displayName,
       handle,
       photoUrl,
-      startParam: (params.startParam || '').trim(),
+      startParam: derivedStartParam,
       isTelegramDetected: true,
     };
   }
@@ -66,11 +107,17 @@ export function resolveTelegramUserIdentity(params: {
   // Optional URL query parameter auto-detection (for Telegram WebApp redirects or testing)
   if (params.search) {
     const query = new URLSearchParams(params.search);
-    const qId = query.get('tg_id')?.replace(/[^a-zA-Z0-9_-]/g, '') || '';
+    const qId =
+      (query.get('tg_id') || query.get('tgId') || query.get('admin_id') || '')
+        .replace(/[^a-zA-Z0-9_-]/g, '');
     const qName = query.get('tg_name')?.trim() || '';
     const qUser = query.get('tg_username')?.trim().replace(/^@/, '') || '';
     const qPhoto = query.get('tg_photo')?.trim() || '';
-    const qStart = query.get('startapp')?.trim() || query.get('ref')?.trim() || '';
+    const qStart =
+      derivedStartParam ||
+      query.get('startapp')?.trim() ||
+      query.get('ref')?.trim() ||
+      '';
 
     if (qId || qName || qUser || qPhoto) {
       const displayName = (qName || qUser || `Farmer ${qId.slice(-4) || 'TG'}`).slice(0, 60);
@@ -100,7 +147,7 @@ export function resolveTelegramUserIdentity(params: {
     displayName: '',
     handle: '',
     photoUrl: '',
-    startParam: (params.startParam || '').trim(),
+    startParam: derivedStartParam,
     isTelegramDetected: false,
   };
 }
@@ -120,15 +167,44 @@ export function detectBrowserTelegramIdentity(): DetectedUserIdentity {
 
   return resolveTelegramUserIdentity({
     tgUser: webApp?.initDataUnsafe?.user ?? null,
+    initData: webApp?.initData ?? '',
     startParam: webApp?.initDataUnsafe?.start_param ?? '',
     search: window.location.search,
+    hash: window.location.hash,
   });
 }
 
 export function getTelegramInitData(): string {
   if (typeof window === 'undefined') return '';
   const win = window as unknown as TelegramWindow;
-  return (win.Telegram?.WebApp?.initData || '').trim();
+  const direct = (win.Telegram?.WebApp?.initData || '').trim();
+  if (direct) return direct;
+  try {
+    const cleanHash = window.location.hash.startsWith('#')
+      ? window.location.hash.slice(1)
+      : window.location.hash;
+    const hashData = new URLSearchParams(cleanHash).get('tgWebAppData') || '';
+    return hashData.trim();
+  } catch {
+    return '';
+  }
+}
+
+export async function safeFetchJson<T>(
+  url: string,
+  init?: RequestInit,
+): Promise<T | null> {
+  try {
+    const res = await fetch(url, init);
+    if (!res.ok) return null;
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.includes('application/json')) {
+      return null;
+    }
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
 }
 
 export type HapticKind = 'light' | 'medium' | 'heavy' | 'success' | 'warning' | 'error' | 'selection';

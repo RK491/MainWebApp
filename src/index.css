@@ -544,6 +544,40 @@
   animation: alphaOrbit 3.2s ease-in-out infinite;
 }
 
+@keyframes artifactSway {
+  0%, 100% {
+    transform: rotate(-1deg) translateY(0px);
+  }
+  50% {
+    transform: rotate(1.1deg) translateY(-1.5px);
+  }
+}
+
+@keyframes artifactPop {
+  0% {
+    transform: scale(1) translateY(0px);
+  }
+  30% {
+    transform: scale(1.08, 0.92) translateY(2px);
+  }
+  65% {
+    transform: scale(0.96, 1.06) translateY(-5px);
+  }
+  100% {
+    transform: scale(1) translateY(0px);
+  }
+}
+
+.animate-artifact-sway {
+  transform-origin: center bottom;
+  animation: artifactSway 4.8s ease-in-out infinite;
+}
+
+.animate-artifact-pop {
+  transform-origin: center bottom;
+  animation: artifactPop 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 .animate-splash-pop {
   animation: splashPopIn 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
@@ -570,6 +604,8 @@
   .animate-pollen-drift,
   .animate-collect-halo,
   .animate-alpha-orbit,
+  .animate-artifact-sway,
+  .animate-artifact-pop,
   .clay-shimmer-bar::after,
   .animate-splash-pop,
   .animate-splash-progress {

@@ -18,6 +18,7 @@ import {
   buyChickens,
   calculatePendingEggs,
   calculateProductionRate,
+  CHICKEN_PACKS,
   claimAchievement,
   claimAdNetworkReward,
   claimDailyStreak,
@@ -30,13 +31,16 @@ import {
   createDefaultSeasonConfig,
   createPaidTaskOrder,
   DEFAULT_AD_CONFIG,
+  DEFAULT_CHANNELS_CONFIG,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
   detectTop10RankCelebration,
   executeDeposit,
   executeWithdrawal,
   formatAwayDuration,
+  formatChannelsHandleSummary,
   formatPromoRewardSummary,
+  getActiveRequiredChannels,
   recordCompletedGateAd,
   reinvestEggs,
   upgradeBasket,
@@ -47,6 +51,11 @@ import {
   normalizeTxHash,
   type DetectedGramTransfer,
 } from './game/tonGram';
+import {
+  type FarmArtifactLayout,
+  loadFarmArtifactLayout,
+  saveFarmArtifactLayout,
+} from './game/farmArtifacts';
 import {
   applyReferralCodeInFirestore,
   commitPlayerMutation,
@@ -61,12 +70,15 @@ import {
   getStoredPlayerId,
   incrementPromoCodeUseInFirestore,
   incrementTaskClaimCountInFirestore,
+  loadCachedPlayerProfile,
   resolveActivePlayerIdentity,
   reviewWithdrawalInFirestore,
   saveAdConfigInFirestore,
+  saveChannelsConfigInFirestore,
   saveSeasonConfigInFirestore,
   subscribeToAdConfig,
   subscribeToAllWithdrawRequests,
+  subscribeToChannelsConfig,
   subscribeToCustomTasks,
   subscribeToLeaderboard,
   subscribeToPlayer,
@@ -78,6 +90,7 @@ import {
 import type {
   AdConfig,
   AdNetworkId,
+  ChannelsConfig,
   ChannelVerificationResult,
   ChickenBreedId,
   DepositOrder,
@@ -126,12 +139,18 @@ import {
   stopAmbientMusic,
   syncAmbientMusic,
 } from './utils/sound';
-import { getTelegramChannelUrl, getTelegramInitData, triggerHapticFeedback } from './utils/telegram';
+import {
+  getTelegramChannelUrl,
+  getTelegramInitData,
+  safeFetchJson,
+  triggerHapticFeedback,
+} from './utils/telegram';
 import { applyThemeToDocument, getStoredTheme, setStoredTheme, type ThemeMode } from './utils/theme';
 import { AdminPanelView } from './components/AdminPanelView';
 import { BottomNav } from './components/BottomNav';
 import { ChannelCheckModal } from './components/ChannelCheckPanel';
 import { DepositView } from './components/DepositView';
+import { FarmArtifactsDrawer } from './components/FarmArtifactsDrawer';
 import { FarmMeadow } from './components/FarmMeadow';
 import { FriendsView } from './components/FriendsView';
 import { CoinIcon, EggIcon } from './components/GameIcons';
@@ -153,9 +172,16 @@ function getTodayDateString(): string {
 }
 
 export default function App() {
-  const [detectedIdentity] = useState(() => resolveActivePlayerIdentity());
+  const [detectedIdentity, setDetectedIdentity] = useState(() => resolveActivePlayerIdentity());
   const activePlayerId = detectedIdentity.playerId || getStoredPlayerId();
   const initialSeed = useMemo(() => {
+    const cached = loadCachedPlayerProfile(activePlayerId);
+    if (cached) {
+      return {
+        profile: { ...cached, language: cached.language || getStoredLanguage(activePlayerId) },
+        transactions: [] as TransactionEntry[],
+      };
+    }
     const seed = createDefaultProfile(
       activePlayerId,
       detectedIdentity.displayName,
@@ -181,9 +207,16 @@ export default function App() {
   const [cloudLeaderboard, setCloudLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [customTasks, setCustomTasks] = useState<TaskDefinition[]>([]);
   const [adConfig, setAdConfig] = useState<AdConfig>(DEFAULT_AD_CONFIG);
+  const [channelsConfig, setChannelsConfig] = useState<ChannelsConfig>(DEFAULT_CHANNELS_CONFIG);
   const [allWithdrawRequests, setAllWithdrawRequests] = useState<WithdrawRequestRecord[]>([]);
   const [promoCodes, setPromoCodes] = useState<DynamicPromoCode[]>([]);
   const [seasonConfig, setSeasonConfig] = useState<SeasonConfig>(() => createDefaultSeasonConfig());
+
+  const activeRequiredChannels = useMemo(
+    () => getActiveRequiredChannels(channelsConfig),
+    [channelsConfig],
+  );
+  const channelsGateEnabled = channelsConfig.enabled && activeRequiredChannels.length > 0;
 
   const [activeTab, setActiveTab] = useState<NavTab>('farm');
   const [subView, setSubView] = useState<SubView>(() => {
@@ -193,6 +226,10 @@ export default function App() {
     return 'none';
   });
   const [showSettings, setShowSettings] = useState(false);
+  const [showArtifactsDrawer, setShowArtifactsDrawer] = useState(false);
+  const [artifactLayout, setArtifactLayout] = useState<FarmArtifactLayout>(() =>
+    loadFarmArtifactLayout(activePlayerId),
+  );
   const [watchingAdLoading, setWatchingAdLoading] = useState(false);
   const [activeAdNetwork, setActiveAdNetwork] = useState<AdNetworkId | null>(null);
   const [adModalState, setAdModalState] = useState<{
@@ -203,6 +240,9 @@ export default function App() {
     pendingEggs?: number | null;
     promoCode?: string | null;
     promoRewardSummary?: string | null;
+    chickenBreed?: ChickenBreedId | null;
+    chickenQty?: number | null;
+    minerCostCoins?: number | null;
     mandatory?: boolean;
   }>({
     open: false,
@@ -300,6 +340,18 @@ export default function App() {
     applyThemeToDocument(themeMode);
   }, [themeMode]);
 
+  useEffect(() => {
+    setArtifactLayout(loadFarmArtifactLayout(profile.uid));
+  }, [profile.uid]);
+
+  const handleChangeArtifactLayout = useCallback(
+    (next: FarmArtifactLayout) => {
+      setArtifactLayout(next);
+      saveFarmArtifactLayout(latestProfileRef.current.uid, next);
+    },
+    [],
+  );
+
   const handleToggleTheme = useCallback(() => {
     playTabTapSound(soundsEnabled);
     setThemeMode((prev) => {
@@ -339,37 +391,75 @@ export default function App() {
   }, [musicEnabled]);
 
   useEffect(() => {
+    // Re-check Telegram WebApp hydration shortly after mount in case SDK populates asynchronously
+    if (detectedIdentity.isTelegramDetected) return;
+    const timers = [150, 500, 1200].map((delay) =>
+      window.setTimeout(() => {
+        const next = resolveActivePlayerIdentity();
+        if (next.isTelegramDetected && next.playerId && next.playerId !== activePlayerId) {
+          setDetectedIdentity(next);
+          const cached = loadCachedPlayerProfile(next.playerId);
+          if (cached) {
+            latestProfileRef.current = cached;
+            setProfile(cached);
+          }
+        }
+      }, delay),
+    );
+    return () => {
+      timers.forEach((id) => window.clearTimeout(id));
+    };
+  }, [activePlayerId, detectedIdentity.isTelegramDetected]);
+
+  useEffect(() => {
     const initData = getTelegramInitData();
     if (!initData) return;
-    fetch('/api/auth/verify-telegram', {
+    void safeFetchJson('/api/auth/verify-telegram', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ initData }),
-    }).catch(() => {
-      // Non-fatal outside Telegram signed WebApp context
     });
   }, []);
 
   const handleCheckChannels = useCallback(
     async (opts?: { silent?: boolean }): Promise<ChannelVerificationResult | null> => {
+      if (!channelsGateEnabled) {
+        const disabledResult: ChannelVerificationResult = {
+          ok: true,
+          allJoined: true,
+          verificationMode: 'disabled',
+          telegramUserId: null,
+          channels: [],
+          checkedAtMs: Date.now(),
+        };
+        setChannelVerification(disabledResult);
+        setShowChannelGateModal(false);
+        return disabledResult;
+      }
+
       setCheckingChannels(true);
       try {
-        const res = await fetch('/api/telegram/check-channels', {
+        const data = await safeFetchJson<ChannelVerificationResult>('/api/telegram/check-channels', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             playerId: latestProfileRef.current.uid,
             initData: getTelegramInitData(),
+            requiredChannels: activeRequiredChannels,
           }),
         });
-        if (!res.ok) {
+        if (!data) {
           if (!opts?.silent) {
             showToast('Could not verify channels right now. Please retry.');
           }
           return null;
         }
-        const data = (await res.json()) as ChannelVerificationResult;
         setChannelVerification(data);
+
+        if (data.verificationMode === 'disabled') {
+          setShowChannelGateModal(false);
+          return data;
+        }
 
         if (data.verificationMode === 'telegram_bot') {
           if (data.allJoined) {
@@ -385,7 +475,7 @@ export default function App() {
             if (!opts?.silent) {
               playClaimSound(soundsEnabled);
               triggerHapticFeedback('success');
-              showToast('Verified! Both @AIRDROP_GALAXYS & @AG_PAYOUTS joined.');
+              showToast(`Verified! Joined ${formatChannelsHandleSummary(activeRequiredChannels)}.`);
             }
           } else {
             try {
@@ -401,7 +491,7 @@ export default function App() {
               .join(' & ');
             if (!opts?.silent) {
               triggerHapticFeedback('warning');
-              showToast(`Join required: ${missing || '@AIRDROP_GALAXYS & @AG_PAYOUTS'}`);
+              showToast(`Join required: ${missing || formatChannelsHandleSummary(activeRequiredChannels)}`);
             }
           }
         } else if (!opts?.silent) {
@@ -422,10 +512,14 @@ export default function App() {
         setCheckingChannels(false);
       }
     },
-    [showToast, soundsEnabled],
+    [activeRequiredChannels, channelsGateEnabled, showToast, soundsEnabled],
   );
 
   useEffect(() => {
+    if (!channelsGateEnabled) {
+      setShowChannelGateModal(false);
+      return;
+    }
     if (skipWelcome) return;
     if (!detectedIdentity.isTelegramDetected) return;
     if (autoCheckedChannelsRef.current === activePlayerId) return;
@@ -436,7 +530,7 @@ export default function App() {
         setShowChannelGateModal(true);
       }
     });
-  }, [activePlayerId, detectedIdentity.isTelegramDetected, handleCheckChannels, skipWelcome]);
+  }, [activePlayerId, channelsGateEnabled, detectedIdentity.isTelegramDetected, handleCheckChannels, skipWelcome]);
 
   const handleToggleMuteAll = useCallback(() => {
     const next = computeMuteAllToggle(audioSettings);
@@ -594,30 +688,22 @@ export default function App() {
   // Verify Firestore connection, fetch server GRAM config & subscribe to live public leaderboard
   useEffect(() => {
     testFirestoreConnection();
-    fetch('/api/config')
-      .then((res) => (res.ok ? res.json() : null))
-      .then(
-        (
-          cfg: {
-            gramDepositAddress?: string;
-            gramJettonMaster?: string;
-            payoutChannel?: string;
-          } | null,
-        ) => {
-          if (cfg?.gramDepositAddress) {
-            setDepositAddress(cfg.gramDepositAddress);
-          }
-          if (cfg?.gramJettonMaster) {
-            setGramJettonMaster(cfg.gramJettonMaster);
-          }
-          if (cfg?.payoutChannel) {
-            setPayoutChannel(cfg.payoutChannel);
-          }
-        },
-      )
-      .catch(() => {
-        // Fallback to default GRAM deposit config
-      });
+    void safeFetchJson<{
+      gramDepositAddress?: string;
+      gramJettonMaster?: string;
+      payoutChannel?: string;
+    }>('/api/config').then((cfg) => {
+      if (!cfg) return;
+      if (cfg.gramDepositAddress) {
+        setDepositAddress(cfg.gramDepositAddress);
+      }
+      if (cfg.gramJettonMaster) {
+        setGramJettonMaster(cfg.gramJettonMaster);
+      }
+      if (cfg.payoutChannel) {
+        setPayoutChannel(cfg.payoutChannel);
+      }
+    });
     const unsubLb = subscribeToLeaderboard((entries) => {
       setCloudLeaderboard(entries);
       setIsLeaderboardSynced(true);
@@ -627,6 +713,9 @@ export default function App() {
     });
     const unsubAds = subscribeToAdConfig((cfg) => {
       setAdConfig(cfg);
+    });
+    const unsubChannels = subscribeToChannelsConfig((cfg) => {
+      setChannelsConfig(cfg);
     });
     const unsubPromos = subscribeToPromoCodes((codes) => {
       setPromoCodes(codes);
@@ -638,6 +727,7 @@ export default function App() {
       unsubLb();
       unsubTasks();
       unsubAds();
+      unsubChannels();
       unsubPromos();
       unsubSeason();
     };
@@ -654,11 +744,51 @@ export default function App() {
   // Ensure active player exists in Firestore and subscribe live to all subcollections
   useEffect(() => {
     let cancelled = false;
-    let unsubPlayer: (() => void) | null = null;
+    let retryTimer: number | null = null;
+    let syncedSuccess = false;
 
-    const init = async () => {
+    const handlePlayerCallbacks = {
+      onProfile: (p: UserFarmProfile) => {
+        setStoredLanguage(p.language, p.uid);
+        latestProfileRef.current = p;
+        setProfile(p);
+        setIsPlayerSynced(true);
+      },
+      onTransactions: (txs: TransactionEntry[]) => setTransactions(txs),
+      onReferralTransactions: (refTxs: TransactionEntry[]) => setReferralTransactions(refTxs),
+      onDeposits: (deps: DepositOrder[]) => setDeposits(deps),
+      onWithdrawals: (wds: WithdrawalOrder[]) => {
+        const prevMap = prevWithdrawalStatusRef.current;
+        const nextMap = new Map<string, string>();
+        let newlyApproved = false;
+        for (const w of wds) {
+          nextMap.set(w.id, w.status);
+          if (prevMap) {
+            const prevStatus = prevMap.get(w.id);
+            if (
+              (prevStatus === 'pending' || prevStatus === 'processing') &&
+              w.status === 'approved'
+            ) {
+              newlyApproved = true;
+            }
+          }
+        }
+        prevWithdrawalStatusRef.current = nextMap;
+        if (newlyApproved) {
+          triggerWithdrawalConfetti();
+          showToast('Withdrawal approved & completed!');
+        }
+        setWithdrawals(wds);
+      },
+      onReferrals: (refs: ReferralRecord[]) => setReferrals(refs),
+    };
+
+    // Always attach live Firestore snapshot listener right away so cached & queued writes stay reactive
+    const unsubPlayer = subscribeToPlayer(activePlayerId, handlePlayerCallbacks);
+
+    const init = async (attempt = 0): Promise<void> => {
       try {
-        const { profile: ensured, isNewPlayer } = await ensurePlayerInFirestore(activePlayerId, {
+        const { profile: ensured, isNewPlayer, fromCache } = await ensurePlayerInFirestore(activePlayerId, {
           displayName: detectedIdentity.displayName,
           handle: detectedIdentity.handle,
           photoUrl: detectedIdentity.photoUrl,
@@ -666,6 +796,7 @@ export default function App() {
         });
         if (cancelled) return;
 
+        syncedSuccess = !fromCache;
         const resolvedProfile: UserFarmProfile =
           userSelectedLangRef.current && userSelectedLangRef.current !== ensured.language
             ? { ...ensured, language: userSelectedLangRef.current }
@@ -673,6 +804,7 @@ export default function App() {
         setStoredLanguage(resolvedProfile.language, activePlayerId);
         latestProfileRef.current = resolvedProfile;
         setProfile(resolvedProfile);
+        setIsPlayerSynced(!fromCache);
 
         if (!skipWelcome && isNewPlayer) {
           const seenKey = `chickenland_signup_bonus_seen_${activePlayerId}`;
@@ -712,54 +844,46 @@ export default function App() {
           }
         }
 
-        if (cancelled) return;
-        setIsPlayerSynced(true);
-        unsubPlayer = subscribeToPlayer(activePlayerId, {
-          onProfile: (p) => {
-            setStoredLanguage(p.language, p.uid);
-            latestProfileRef.current = p;
-            setProfile(p);
-          },
-          onTransactions: (txs) => setTransactions(txs),
-          onReferralTransactions: (refTxs) => setReferralTransactions(refTxs),
-          onDeposits: (deps) => setDeposits(deps),
-          onWithdrawals: (wds) => {
-            const prevMap = prevWithdrawalStatusRef.current;
-            const nextMap = new Map<string, string>();
-            let newlyApproved = false;
-            for (const w of wds) {
-              nextMap.set(w.id, w.status);
-              if (prevMap) {
-                const prevStatus = prevMap.get(w.id);
-                if (
-                  (prevStatus === 'pending' || prevStatus === 'processing') &&
-                  w.status === 'approved'
-                ) {
-                  newlyApproved = true;
-                }
-              }
+        if (fromCache && attempt < 3 && !cancelled) {
+          retryTimer = window.setTimeout(() => {
+            if (!cancelled) {
+              ensurePromiseRef.current = init(attempt + 1);
             }
-            prevWithdrawalStatusRef.current = nextMap;
-            if (newlyApproved) {
-              triggerWithdrawalConfetti();
-              showToast('Withdrawal approved & completed!');
-            }
-            setWithdrawals(wds);
-          },
-          onReferrals: (refs) => setReferrals(refs),
-        });
+          }, 1500 * Math.pow(2, attempt));
+        }
       } catch {
-        if (!cancelled) {
-          showToast('Could not connect to Firestore database. Please retry.');
+        if (cancelled) return;
+        const cached = loadCachedPlayerProfile(activePlayerId);
+        if (cached) {
+          latestProfileRef.current = cached;
+          setProfile(cached);
+        }
+        if (attempt < 3) {
+          retryTimer = window.setTimeout(() => {
+            if (!cancelled) {
+              ensurePromiseRef.current = init(attempt + 1);
+            }
+          }, 1200 * Math.pow(2, attempt));
+        } else {
+          showToast('Using saved local farm data while reconnecting to cloud.');
         }
       }
     };
 
-    ensurePromiseRef.current = init();
+    const handleOnlineRetry = () => {
+      if (!cancelled && !syncedSuccess) {
+        ensurePromiseRef.current = init(0);
+      }
+    };
+    window.addEventListener('online', handleOnlineRetry);
+
+    ensurePromiseRef.current = init(0);
 
     return () => {
       cancelled = true;
-      if (unsubPlayer) unsubPlayer();
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      window.removeEventListener('online', handleOnlineRetry);
+      unsubPlayer();
     };
   }, [
     activePlayerId,
@@ -929,26 +1053,70 @@ export default function App() {
     })();
   };
 
+  const executeBuyChickens = useCallback(
+    async (breed: ChickenBreedId, qty: number, countCompletedAd = false) => {
+      const current = latestProfileRef.current;
+      const now = Date.now();
+      const res = buyChickens(current, breed, qty, now);
+      if ('error' in res) {
+        showToast(res.error);
+        return;
+      }
+      const nextProfile = countCompletedAd ? recordCompletedGateAd(res.profile) : res.profile;
+      playCoinChimeSound(soundsEnabled);
+      triggerHapticFeedback('medium');
+      await persistMutation({
+        nextProfile,
+        transaction: res.transaction,
+        activateReferral: res.shouldActivateReferral,
+      });
+      if (res.shouldActivateReferral) {
+        showToast(`Purchased ${qty} chicken${qty > 1 ? 's' : ''} & activated referral reward!`);
+      } else {
+        showToast(`Purchased ${qty} chicken${qty > 1 ? 's' : ''}!`);
+      }
+    },
+    [persistMutation, showToast, soundsEnabled],
+  );
+
   const handleBuyChickens = async (breed: ChickenBreedId, qty: number) => {
+    if (watchingAdLoading) return;
     await ensurePromiseRef.current;
     const current = latestProfileRef.current;
     const now = Date.now();
-    const res = buyChickens(current, breed, qty, now);
-    if ('error' in res) {
-      showToast(res.error);
+    const precheck = buyChickens(current, breed, qty, now);
+    if ('error' in precheck) {
+      showToast(precheck.error);
       return;
     }
-    playCoinChimeSound(soundsEnabled);
-    triggerHapticFeedback('medium');
-    await persistMutation({
-      nextProfile: res.profile,
-      transaction: res.transaction,
-      activateReferral: res.shouldActivateReferral,
-    });
-    if (res.shouldActivateReferral) {
-      showToast(`Purchased ${qty} chicken${qty > 1 ? 's' : ''} & activated referral reward!`);
-    } else {
-      showToast(`Purchased ${qty} chicken${qty > 1 ? 's' : ''}!`);
+
+    const pack = CHICKEN_PACKS.find((p) => p.id === breed);
+    const costCoins = (pack?.coinCost ?? 0) * qty;
+
+    setWatchingAdLoading(true);
+    setActiveAdNetwork(null);
+    try {
+      const external = await tryRunExternalRewardedAd(adConfig);
+      if (external.handled) {
+        if (external.rewarded) {
+          await executeBuyChickens(breed, qty, true);
+        } else {
+          showToast('Complete the ad to buy this miner.');
+        }
+        return;
+      }
+      setAdModalState({
+        open: true,
+        kind: 'buy_chicken',
+        chickenBreed: breed,
+        chickenQty: qty,
+        minerCostCoins: costCoins,
+        notice: external.message ?? null,
+        network: null,
+        mandatory: false,
+      });
+    } finally {
+      setWatchingAdLoading(false);
     }
   };
 
@@ -1025,30 +1193,21 @@ export default function App() {
     });
     triggerWithdrawalConfetti();
 
-    try {
-      const notifyRes = await fetch('/api/withdraw/notify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          displayName: profile.displayName,
-          handle: profile.handle,
-          playerId: profile.uid,
-          eggsAmount: res.withdrawal.eggsAmount,
-          gramAmount: res.withdrawal.gramAmount,
-          usdValue: res.withdrawal.usdValue,
-          walletAddress: res.withdrawal.walletAddress,
-          memo: res.withdrawal.memo,
-          status: 'pending',
-        }),
-      });
-      const notifyData = (await notifyRes.json()) as { sent?: boolean };
-      if (notifyData.sent) {
-        showToast(`Withdrawal submitted (${res.withdrawal.gramAmount} GRAM) — Pending Admin approval`);
-        return;
-      }
-    } catch {
-      // Non-fatal notification failure
-    }
+    await safeFetchJson('/api/withdraw/notify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        displayName: profile.displayName,
+        handle: profile.handle,
+        playerId: profile.uid,
+        eggsAmount: res.withdrawal.eggsAmount,
+        gramAmount: res.withdrawal.gramAmount,
+        usdValue: res.withdrawal.usdValue,
+        walletAddress: res.withdrawal.walletAddress,
+        memo: res.withdrawal.memo,
+        status: 'pending',
+      }),
+    });
     showToast(`Withdrawal submitted (${res.withdrawal.gramAmount} GRAM) — Pending Admin approval`);
   };
 
@@ -1059,26 +1218,22 @@ export default function App() {
   ) => {
     try {
       await reviewWithdrawalInFirestore({ request, decision, adminNote });
-      try {
-        await fetch('/api/withdraw/notify', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            displayName: request.displayName,
-            handle: request.handle,
-            playerId: request.userId,
-            eggsAmount: request.eggsAmount,
-            gramAmount: request.gramAmount,
-            usdValue: request.usdValue,
-            walletAddress: request.walletAddress,
-            memo: request.memo,
-            status: decision,
-            adminNote,
-          }),
-        });
-      } catch {
-        // Non-fatal Telegram notification error
-      }
+      await safeFetchJson('/api/withdraw/notify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          displayName: request.displayName,
+          handle: request.handle,
+          playerId: request.userId,
+          eggsAmount: request.eggsAmount,
+          gramAmount: request.gramAmount,
+          usdValue: request.usdValue,
+          walletAddress: request.walletAddress,
+          memo: request.memo,
+          status: decision,
+          adminNote,
+        }),
+      });
       showToast(
         decision === 'approved'
           ? `Approved ${request.gramAmount} GRAM for ${request.displayName}!`
@@ -1203,6 +1358,16 @@ export default function App() {
       showToast('Ad settings saved!');
     } catch {
       showToast('Failed to save ad settings.');
+    }
+  };
+
+  const handleSaveChannelsConfig = async (cfg: Omit<ChannelsConfig, 'updatedAtMs'>) => {
+    try {
+      const saved = await saveChannelsConfigInFirestore(cfg);
+      setChannelsConfig(saved);
+      showToast('Channel check settings saved!');
+    } catch {
+      showToast('Failed to save channel settings.');
     }
   };
 
@@ -1623,6 +1788,7 @@ export default function App() {
           withdrawRequests={allWithdrawRequests}
           customTasks={customTasks}
           adConfig={adConfig}
+          channelsConfig={channelsConfig}
           promoCodes={promoCodes}
           seasonConfig={seasonConfig}
           leaderboardEntries={cloudLeaderboard}
@@ -1633,6 +1799,7 @@ export default function App() {
           onToggleTask={handleToggleCustomTask}
           onDeleteTask={handleDeleteCustomTask}
           onSaveAdConfig={handleSaveAdConfig}
+          onSaveChannelsConfig={handleSaveChannelsConfig}
           onCreatePromoCode={handleCreatePromoCode}
           onTogglePromoCode={handleTogglePromoCode}
           onDeletePromoCode={handleDeletePromoCode}
@@ -1665,6 +1832,7 @@ export default function App() {
           pendingEggs={pendingEggs}
           notificationsEnabled={notificationsEnabled}
           notificationPermission={notificationPermission}
+          artifactLayout={artifactLayout}
           onBack={() => setSubView('none')}
           onUpgradeBasket={handleUpgradeBasket}
           onGoPacks={() => {
@@ -1673,6 +1841,10 @@ export default function App() {
           }}
           onToggleNotifications={() => void handleToggleNotifications()}
           onActivateBooster={handleActivateBooster}
+          onOpenArtifactsDrawer={() => {
+            playTabTapSound(soundsEnabled);
+            setShowArtifactsDrawer(true);
+          }}
         />
       );
     }
@@ -1700,6 +1872,8 @@ export default function App() {
           profile={profile}
           withdrawals={withdrawals}
           channelVerification={channelVerification}
+          requiredChannels={activeRequiredChannels}
+          channelsGateEnabled={channelsGateEnabled}
           checkingChannels={checkingChannels}
           onCheckChannels={() => void handleCheckChannels()}
           onBack={() => setSubView('none')}
@@ -1716,6 +1890,7 @@ export default function App() {
       return (
         <PacksView
           profile={profile}
+          buyingBusy={watchingAdLoading}
           onBuy={handleBuyChickens}
           onTopUp={() => setSubView('deposit')}
         />
@@ -1733,6 +1908,8 @@ export default function App() {
           watchingAd={watchingAdLoading}
           activeAdNetwork={activeAdNetwork}
           channelVerification={channelVerification}
+          requiredChannels={activeRequiredChannels}
+          channelsGateEnabled={channelsGateEnabled}
           checkingChannels={checkingChannels}
           onCheckChannels={() => handleCheckChannels()}
           onTabTap={() => playTabTapSound(soundsEnabled)}
@@ -1983,8 +2160,17 @@ export default function App() {
               collectLabel={strings.collect}
               isVisible={showFarmOnMobile}
               isProfileSynced={isPlayerSynced}
+              artifactLayout={artifactLayout}
               onCollect={handleCollectEggs}
               onOpenYourFarm={() => openSubView('your_farm')}
+              onOpenArtifactsDrawer={() => {
+                playTabTapSound(soundsEnabled);
+                setShowArtifactsDrawer(true);
+              }}
+              onArtifactTap={() => {
+                playSoftTapSound(soundsEnabled);
+                triggerHapticFeedback('light');
+              }}
               onChickenTap={() => {
                 playSoftTapSound(soundsEnabled);
                 triggerHapticFeedback('light');
@@ -2055,14 +2241,19 @@ export default function App() {
         />
       )}
 
-      {!showSplash && !adModalState.open && !showSignUpBonusModal && showChannelGateModal && (
-        <ChannelCheckModal
-          verification={channelVerification}
-          checking={checkingChannels}
-          onCheckChannels={() => void handleCheckChannels()}
-          onClose={() => setShowChannelGateModal(false)}
-        />
-      )}
+      {!showSplash &&
+        !adModalState.open &&
+        !showSignUpBonusModal &&
+        channelsGateEnabled &&
+        showChannelGateModal && (
+          <ChannelCheckModal
+            verification={channelVerification}
+            requiredChannels={activeRequiredChannels}
+            checking={checkingChannels}
+            onCheckChannels={() => void handleCheckChannels()}
+            onClose={() => setShowChannelGateModal(false)}
+          />
+        )}
 
       {adModalState.open && (() => {
         const netDef = adModalState.network
@@ -2078,6 +2269,9 @@ export default function App() {
             pendingEggs={adModalState.pendingEggs ?? null}
             promoCode={adModalState.promoCode ?? null}
             promoRewardSummary={adModalState.promoRewardSummary ?? null}
+            chickenBreed={adModalState.chickenBreed ?? null}
+            chickenQty={adModalState.chickenQty ?? null}
+            minerCostCoins={adModalState.minerCostCoins ?? null}
             fallbackNotice={adModalState.notice}
             mandatory={adModalState.mandatory}
             onComplete={() => {
@@ -2091,6 +2285,12 @@ export default function App() {
                 executeCollectEggs(true);
               } else if (currentModal.kind === 'claim_promo' && currentModal.promoCode) {
                 executeClaimPromo(currentModal.promoCode, true);
+              } else if (currentModal.kind === 'buy_chicken' && currentModal.chickenBreed) {
+                void executeBuyChickens(
+                  currentModal.chickenBreed,
+                  currentModal.chickenQty || 1,
+                  true,
+                );
               } else if (currentModal.kind === 'ad_network' && currentModal.network) {
                 handleClaimAdNetwork(currentModal.network);
               } else {
@@ -2105,6 +2305,8 @@ export default function App() {
                 showToast('Ad cancelled — eggs were not collected.');
               } else if (cancelledKind === 'claim_promo') {
                 showToast('Ad cancelled — gift code was not claimed.');
+              } else if (cancelledKind === 'buy_chicken') {
+                showToast('Ad cancelled — miner was not purchased.');
               } else {
                 showToast('Ad closed early — reward not claimed.');
               }
@@ -2127,6 +2329,17 @@ export default function App() {
           onToggleNotifications={() => void handleToggleNotifications()}
           onToggleTheme={handleToggleTheme}
           onClose={() => setShowSettings(false)}
+        />
+      )}
+      {showArtifactsDrawer && (
+        <FarmArtifactsDrawer
+          layout={artifactLayout}
+          onChangeLayout={handleChangeArtifactLayout}
+          onSoftTap={() => {
+            playSoftTapSound(soundsEnabled);
+            triggerHapticFeedback('selection');
+          }}
+          onClose={() => setShowArtifactsDrawer(false)}
         />
       )}
       <OfflineIndicator />

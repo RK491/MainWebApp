@@ -10,21 +10,21 @@ import {
   Copy,
   Dices,
   ExternalLink,
-  Eye,
-  EyeOff,
   Flame,
   Gift,
   Infinity as InfinityIcon,
+  KeyRound,
   Link2,
   ListPlus,
-  Lock,
-  LogOut,
   Megaphone,
   PauseCircle,
   PlayCircle,
+  Plus,
+  Radio,
   Search,
   Send,
   Share2,
+  ShieldAlert,
   ShieldCheck,
   Sparkles,
   Ticket,
@@ -37,19 +37,26 @@ import {
 import type {
   AdConfig,
   AdProviderType,
+  ChannelsConfig,
   ChickenBreedId,
   DynamicPromoCode,
   LeaderboardEntry,
   PromoRewardType,
+  RequiredTelegramChannel,
   SeasonConfig,
   TaskDefinition,
   WithdrawRequestRecord,
 } from '../types/farm';
 import {
   CHICKEN_PACKS,
+  formatAdConfigTemplate,
   formatPromoRewardSummary,
   generateGiftCodeString,
   getWithdrawalStatusMeta,
+  isAdminPlayerId,
+  normalizeTelegramChannelEntry,
+  parseAdConfigTemplate,
+  PRIMARY_ADMIN_TELEGRAM_ID,
 } from '../game/economy';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
 
@@ -58,6 +65,7 @@ interface AdminPanelViewProps {
   withdrawRequests: WithdrawRequestRecord[];
   customTasks: TaskDefinition[];
   adConfig: AdConfig;
+  channelsConfig: ChannelsConfig;
   promoCodes: DynamicPromoCode[];
   seasonConfig: SeasonConfig;
   leaderboardEntries: LeaderboardEntry[];
@@ -80,6 +88,7 @@ interface AdminPanelViewProps {
   onToggleTask: (taskId: string, isActive: boolean) => Promise<void>;
   onDeleteTask: (taskId: string) => Promise<void>;
   onSaveAdConfig: (config: Omit<AdConfig, 'updatedAtMs'>) => Promise<void>;
+  onSaveChannelsConfig: (config: Omit<ChannelsConfig, 'updatedAtMs'>) => Promise<void>;
   onCreatePromoCode: (input: {
     code: string;
     label: string;
@@ -96,8 +105,6 @@ interface AdminPanelViewProps {
   onSaveSeasonConfig: (config: Omit<SeasonConfig, 'updatedAtMs'>) => Promise<void>;
   onDistributeSeasonPrizes: (nextDurationDays: number) => Promise<void>;
 }
-
-const ADMIN_SESSION_KEY = 'chickenland_admin_unlocked_v1';
 
 const AD_PROVIDER_CARDS: Array<{
   id: AdProviderType;
@@ -178,6 +185,7 @@ export function AdminPanelView({
   withdrawRequests,
   customTasks,
   adConfig,
+  channelsConfig,
   promoCodes,
   seasonConfig,
   leaderboardEntries,
@@ -188,30 +196,40 @@ export function AdminPanelView({
   onToggleTask,
   onDeleteTask,
   onSaveAdConfig,
+  onSaveChannelsConfig,
   onCreatePromoCode,
   onTogglePromoCode,
   onDeletePromoCode,
   onSaveSeasonConfig,
   onDistributeSeasonPrizes,
 }: AdminPanelViewProps) {
-  const [unlocked, setUnlocked] = useState(() => {
-    try {
-      return sessionStorage.getItem(ADMIN_SESSION_KEY) === '1';
-    } catch {
-      return false;
-    }
-  });
-  const [passcode, setPasscode] = useState('');
-  const [showPasscode, setShowPasscode] = useState(false);
-  const [authError, setAuthError] = useState<string | null>(null);
-  const [checkingAuth, setCheckingAuth] = useState(false);
+  const isAuthorizedAdmin = isAdminPlayerId(playerId);
 
-  const [tab, setTab] = useState<'withdrawals' | 'promos' | 'tasks' | 'ads' | 'season'>('withdrawals');
+  const [tab, setTab] = useState<
+    'withdrawals' | 'channels' | 'promos' | 'tasks' | 'ads' | 'ad_ids' | 'season'
+  >('withdrawals');
   const [wdFilter, setWdFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
   const [wdSearch, setWdSearch] = useState('');
   const [noteById, setNoteById] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  // Check Channels management draft state
+  const [channelsEnabledDraft, setChannelsEnabledDraft] = useState<boolean>(channelsConfig.enabled);
+  const [channelsDraft, setChannelsDraft] = useState<RequiredTelegramChannel[]>(
+    channelsConfig.channels,
+  );
+  const [newChannelHandle, setNewChannelHandle] = useState('');
+  const [newChannelTitle, setNewChannelTitle] = useState('');
+  const [newChannelDesc, setNewChannelDesc] = useState('');
+  const [newChannelUrl, setNewChannelUrl] = useState('');
+  const [channelFormError, setChannelFormError] = useState<string | null>(null);
+  const [savingChannels, setSavingChannels] = useState(false);
+
+  useEffect(() => {
+    setChannelsEnabledDraft(channelsConfig.enabled);
+    setChannelsDraft(channelsConfig.channels);
+  }, [channelsConfig]);
 
   // New task form state
   const [taskTitle, setTaskTitle] = useState('');
@@ -269,9 +287,8 @@ export function AdminPanelView({
     bannerUrl: adConfig.bannerUrl,
   }));
   const [savingAds, setSavingAds] = useState(false);
-
-  useEffect(() => {
-    setAdDraft({
+  const [templateInput, setTemplateInput] = useState<string>(() =>
+    formatAdConfigTemplate({
       provider: adConfig.provider,
       adsgramBlockId: adConfig.adsgramBlockId,
       gigapubProjectId: adConfig.gigapubProjectId || '',
@@ -285,72 +302,29 @@ export function AdminPanelView({
       bannerSubtitle: adConfig.bannerSubtitle,
       bannerCtaText: adConfig.bannerCtaText,
       bannerUrl: adConfig.bannerUrl,
-    });
-  }, [adConfig]);
+    }),
+  );
+  const [templateStatus, setTemplateStatus] = useState<string | null>(null);
 
-  // Allow instant unlock if playerId is in server ADMIN_TELEGRAM_IDS
   useEffect(() => {
-    if (unlocked) return;
-    fetch('/api/admin/auth', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ playerId, checkOnly: true }),
-    })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: { ok?: boolean } | null) => {
-        if (data?.ok) {
-          setUnlocked(true);
-          try {
-            sessionStorage.setItem(ADMIN_SESSION_KEY, '1');
-          } catch {
-            // ignore
-          }
-        }
-      })
-      .catch(() => {
-        // Require passcode
-      });
-  }, [playerId, unlocked]);
-
-  const handleUnlock = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAuthError(null);
-    setCheckingAuth(true);
-    try {
-      const res = await fetch('/api/admin/auth', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ passcode, playerId }),
-      });
-      const data = (await res.json()) as { ok?: boolean; error?: string };
-      if (!res.ok || !data.ok) {
-        setAuthError(data.error || 'Incorrect admin passcode.');
-        return;
-      }
-      onTabTap?.();
-      setUnlocked(true);
-      setPasscode('');
-      try {
-        sessionStorage.setItem(ADMIN_SESSION_KEY, '1');
-      } catch {
-        // ignore
-      }
-    } catch {
-      setAuthError('Could not verify passcode with server.');
-    } finally {
-      setCheckingAuth(false);
-    }
-  };
-
-  const handleLockSession = () => {
-    onTabTap?.();
-    setUnlocked(false);
-    try {
-      sessionStorage.removeItem(ADMIN_SESSION_KEY);
-    } catch {
-      // ignore
-    }
-  };
+    const synced = {
+      provider: adConfig.provider,
+      adsgramBlockId: adConfig.adsgramBlockId,
+      gigapubProjectId: adConfig.gigapubProjectId || '',
+      monetagZoneId: adConfig.monetagZoneId,
+      customTitle: adConfig.customTitle,
+      customDescription: adConfig.customDescription,
+      customUrl: adConfig.customUrl,
+      watchSeconds: adConfig.watchSeconds,
+      bannerEnabled: adConfig.bannerEnabled,
+      bannerTitle: adConfig.bannerTitle,
+      bannerSubtitle: adConfig.bannerSubtitle,
+      bannerCtaText: adConfig.bannerCtaText,
+      bannerUrl: adConfig.bannerUrl,
+    };
+    setAdDraft(synced);
+    setTemplateInput(formatAdConfigTemplate(synced));
+  }, [adConfig]);
 
   const pendingRequests = useMemo(
     () => withdrawRequests.filter((r) => r.status === 'pending'),
@@ -455,10 +429,33 @@ export function AdminPanelView({
     setSavingAds(true);
     try {
       await onSaveAdConfig(adDraft);
+      setTemplateStatus('Saved live to Firestore for all players!');
     } finally {
       setSavingAds(false);
     }
   };
+
+  const handleApplyAdTemplate = () => {
+    const { next, appliedKeys } = parseAdConfigTemplate(templateInput, adDraft);
+    if (appliedKeys.length === 0) {
+      setTemplateStatus('No recognized keys found. Keep KEY=VALUE lines like ADSGRAM_BLOCK_ID=1234.');
+      return;
+    }
+    onTabTap?.();
+    setAdDraft(next);
+    setTemplateInput(formatAdConfigTemplate(next));
+    setTemplateStatus(
+      `Applied ${appliedKeys.length} field${appliedKeys.length > 1 ? 's' : ''} (${appliedKeys.join(', ')}) — click Save below to publish live.`,
+    );
+  };
+
+  const savedAdIdsCount = useMemo(
+    () =>
+      [adConfig.adsgramBlockId, adConfig.gigapubProjectId, adConfig.monetagZoneId].filter(
+        (v) => Boolean(v && v.trim()),
+      ).length,
+    [adConfig.adsgramBlockId, adConfig.gigapubProjectId, adConfig.monetagZoneId],
+  );
 
   const handleGenerateGiftSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -528,7 +525,75 @@ export function AdminPanelView({
     }
   };
 
-  if (!unlocked) {
+  const activeChannelsCount = useMemo(
+    () => (channelsDraft ?? []).filter((ch) => ch.enabled !== false).length,
+    [channelsDraft],
+  );
+
+  const handleAddChannelDraft = (e: React.FormEvent) => {
+    e.preventDefault();
+    setChannelFormError(null);
+    if (channelsDraft.length >= 10) {
+      setChannelFormError('Maximum 10 required channels can be configured.');
+      return;
+    }
+    const normalized = normalizeTelegramChannelEntry(
+      {
+        handle: newChannelHandle,
+        title: newChannelTitle,
+        description: newChannelDesc,
+        url: newChannelUrl,
+        enabled: true,
+      },
+      channelsDraft.length,
+    );
+    if (!normalized) {
+      setChannelFormError('Enter a valid @username, https://t.me/ link, or numeric channel ID.');
+      return;
+    }
+    if (
+      channelsDraft.some(
+        (existing) => existing.handle.toLowerCase() === normalized.handle.toLowerCase(),
+      )
+    ) {
+      setChannelFormError(`${normalized.handle} is already in your Check Channels list.`);
+      return;
+    }
+    onTabTap?.();
+    setChannelsDraft((prev) => [...prev, normalized]);
+    setNewChannelHandle('');
+    setNewChannelTitle('');
+    setNewChannelDesc('');
+    setNewChannelUrl('');
+  };
+
+  const handleToggleChannelDraft = (channelId: string) => {
+    onTabTap?.();
+    setChannelsDraft((prev) =>
+      prev.map((ch) =>
+        ch.id === channelId ? { ...ch, enabled: ch.enabled === false } : ch,
+      ),
+    );
+  };
+
+  const handleRemoveChannelDraft = (channelId: string) => {
+    onTabTap?.();
+    setChannelsDraft((prev) => prev.filter((ch) => ch.id !== channelId));
+  };
+
+  const handleSaveChannelsSubmit = async () => {
+    setSavingChannels(true);
+    try {
+      await onSaveChannelsConfig({
+        enabled: channelsEnabledDraft,
+        channels: channelsDraft,
+      });
+    } finally {
+      setSavingChannels(false);
+    }
+  };
+
+  if (!isAuthorizedAdmin) {
     return (
       <div className="animate-clay-enter space-y-6 pb-8">
         <div className="flex items-center gap-3">
@@ -548,72 +613,48 @@ export function AdminPanelView({
               Admin Console
             </h1>
             <p className="text-xs text-stone-500 dark:text-stone-400">
-              Operations · payouts, gift codes, tasks &amp; ad network
+              Restricted to verified Telegram Admin ID {PRIMARY_ADMIN_TELEGRAM_ID}
             </p>
           </div>
         </div>
 
-        <form
-          onSubmit={(e) => void handleUnlock(e)}
-          className="clay-card overflow-hidden max-w-md mx-auto"
-        >
+        <div className="clay-card overflow-hidden max-w-md mx-auto">
           <div className="bg-stone-900 dark:bg-stone-950 border-b border-stone-800 px-5 py-4 text-white flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-amber-500/15 border border-amber-400/25 flex items-center justify-center shrink-0">
-              <Lock className="w-5 h-5 text-amber-300" />
+            <div className="w-10 h-10 rounded-2xl bg-rose-500/15 border border-rose-400/25 flex items-center justify-center shrink-0">
+              <ShieldAlert className="w-5 h-5 text-rose-300" />
             </div>
             <div>
-              <h2 className="text-base font-extrabold tracking-tight">Owner Verification</h2>
-              <p className="text-xs text-stone-300">Server-validated console access</p>
+              <h2 className="text-base font-extrabold tracking-tight">Admin Access Restricted</h2>
+              <p className="text-xs text-stone-300">Automatic Telegram ID authentication</p>
             </div>
           </div>
 
           <div className="p-5 space-y-4">
-            <div className="space-y-1.5">
-              <label htmlFor="admin-passcode-input" className="text-xs font-bold text-stone-700 dark:text-stone-300">
-                Admin Passcode
-              </label>
-              <div className="relative">
-                <input
-                  id="admin-passcode-input"
-                  type={showPasscode ? 'text' : 'password'}
-                  value={passcode}
-                  onChange={(e) => {
-                    setPasscode(e.target.value);
-                    setAuthError(null);
-                  }}
-                  placeholder="Enter admin passcode"
-                  aria-label="Admin passcode"
-                  className="clay-inset w-full min-h-[44px] pl-3.5 pr-11 text-sm font-semibold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 dark:placeholder:text-stone-500 focus:outline-none focus:ring-2 focus:ring-amber-400"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPasscode((v) => !v)}
-                  aria-label={showPasscode ? 'Hide passcode' : 'Show passcode'}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-stone-400 hover:text-stone-700 dark:hover:text-stone-200 cursor-pointer"
-                >
-                  {showPasscode ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
+            <p className="text-xs font-semibold text-stone-600 dark:text-stone-300 leading-relaxed">
+              Owner console opens automatically only for Telegram Admin ID{' '}
+              <span className="font-mono-num font-extrabold text-stone-900 dark:text-stone-100">
+                {PRIMARY_ADMIN_TELEGRAM_ID}
+              </span>
+              . No passcode is used.
+            </p>
+            <div className="clay-inset !rounded-xl px-3.5 py-2.5 flex items-center justify-between text-xs">
+              <span className="font-bold text-stone-500 dark:text-stone-400">Current Account ID</span>
+              <span className="font-mono-num font-extrabold text-stone-900 dark:text-stone-100">
+                {playerId || 'Guest'}
+              </span>
             </div>
-
-            {authError && (
-              <div
-                role="alert"
-                className="rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800/70 px-3 py-2.5 text-xs font-semibold text-rose-700 dark:text-rose-300"
-              >
-                {authError}
-              </div>
-            )}
-
             <button
-              type="submit"
-              disabled={checkingAuth || !passcode.trim()}
-              className="clay-btn clay-btn-emerald w-full min-h-[46px] rounded-2xl disabled:opacity-50 font-extrabold text-sm"
+              type="button"
+              onClick={() => {
+                onTabTap?.();
+                onBack();
+              }}
+              className="clay-btn clay-btn-neutral w-full min-h-[44px] rounded-2xl font-extrabold text-sm"
             >
-              {checkingAuth ? 'Verifying...' : 'Unlock Admin Console'}
+              Back to Farm
             </button>
           </div>
-        </form>
+        </div>
       </div>
     );
   }
@@ -652,27 +693,16 @@ export function AdminPanelView({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h1 className="text-lg font-extrabold tracking-tight truncate">Admin Console</h1>
-              <span className="hidden sm:inline-flex items-center gap-1 text-[11px] font-bold text-emerald-300">
-                <ShieldCheck className="w-3.5 h-3.5" />
-                <span>Owner</span>
+              <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-500/20 border border-emerald-400/30 px-2 py-0.5 text-[10px] font-extrabold text-emerald-200 shrink-0">
+                <ShieldCheck className="w-3 h-3" />
+                <span>ID {PRIMARY_ADMIN_TELEGRAM_ID}</span>
               </span>
             </div>
             <p className="text-[11px] text-stone-300 truncate">
-              Payouts, Gift Code Generator, Tasks, Ads &amp; Season Control
+              Payouts, Check Channels, Gift Codes, Tasks, Ads &amp; Season Control
             </p>
           </div>
         </div>
-
-        <button
-          type="button"
-          onClick={handleLockSession}
-          title="Lock console session"
-          aria-label="Lock console session"
-          className="min-h-[38px] px-3 rounded-xl bg-white/10 hover:bg-white/15 border border-white/12 text-xs font-bold text-stone-200 inline-flex items-center gap-1.5 shrink-0 cursor-pointer transition-colors"
-        >
-          <LogOut className="w-3.5 h-3.5" />
-          <span className="hidden sm:inline">Lock</span>
-        </button>
       </div>
 
       {/* 4-Column Executive KPI Strip */}
@@ -694,6 +724,26 @@ export function AdminPanelView({
           </div>
           <div className="mt-0.5 text-[11px] text-stone-500 dark:text-stone-400 font-mono-num">
             {pendingGramVolume.toFixed(3)} GRAM queued
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            onTabTap?.();
+            setTab('channels');
+          }}
+          className="clay-card clay-hover-lift !rounded-2xl p-3.5 text-left cursor-pointer"
+        >
+          <div className="flex items-center justify-between text-[11px] font-bold text-stone-500 dark:text-stone-400">
+            <span>Check Channels</span>
+            <Radio className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
+          </div>
+          <div className="mt-1 text-xl font-extrabold text-stone-900 dark:text-stone-100 font-mono-num">
+            {channelsConfig.enabled ? channelsConfig.channels.filter((c) => c.enabled !== false).length : 0}
+          </div>
+          <div className="mt-0.5 text-[11px] text-stone-500 dark:text-stone-400">
+            {channelsConfig.enabled ? 'Gate Active' : 'Gate Paused'}
           </div>
         </button>
 
@@ -726,34 +776,14 @@ export function AdminPanelView({
           className="clay-card clay-hover-lift !rounded-2xl p-3.5 text-left cursor-pointer"
         >
           <div className="flex items-center justify-between text-[11px] font-bold text-stone-500 dark:text-stone-400">
-            <span>Live Tasks</span>
+            <span>Live Tasks · Ads</span>
             <ListPlus className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
           </div>
           <div className="mt-1 text-xl font-extrabold text-stone-900 dark:text-stone-100 font-mono-num">
             {activeTaskCount}
           </div>
-          <div className="mt-0.5 text-[11px] text-stone-500 dark:text-stone-400 font-mono-num">
-            of {customTasks.length} published
-          </div>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            onTabTap?.();
-            setTab('ads');
-          }}
-          className="clay-card clay-hover-lift !rounded-2xl p-3.5 text-left cursor-pointer"
-        >
-          <div className="flex items-center justify-between text-[11px] font-bold text-stone-500 dark:text-stone-400">
-            <span>Ad Network</span>
-            <Megaphone className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
-          </div>
-          <div className="mt-1 text-sm font-extrabold text-stone-900 dark:text-stone-100 truncate pt-1">
+          <div className="mt-0.5 text-[11px] text-stone-500 dark:text-stone-400 truncate">
             {activeProviderLabel}
-          </div>
-          <div className="mt-0.5 text-[11px] text-stone-500 dark:text-stone-400 font-mono-num">
-            {adConfig.watchSeconds}s · {adConfig.bannerEnabled ? 'Banner On' : 'Banner Off'}
           </div>
         </button>
       </div>
@@ -762,14 +792,16 @@ export function AdminPanelView({
       <div
         role="tablist"
         aria-label="Admin console sections"
-        className="clay-inset !rounded-2xl grid grid-cols-5 gap-1 p-1.5"
+        className="clay-inset !rounded-2xl grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-7 gap-1 p-1.5"
       >
         {(
           [
             { id: 'withdrawals', label: 'Payouts', icon: Wallet, count: pendingRequests.length },
+            { id: 'channels', label: 'Channels', icon: Radio, count: activeChannelsCount },
             { id: 'promos', label: 'Gift Codes', icon: Gift, count: 0 },
             { id: 'tasks', label: 'Tasks', icon: ListPlus, count: 0 },
             { id: 'ads', label: 'Ads', icon: Megaphone, count: 0 },
+            { id: 'ad_ids', label: 'Block IDs', icon: KeyRound, count: savedAdIdsCount },
             { id: 'season', label: 'Season', icon: Trophy, count: 0 },
           ] as const
         ).map((item) => {
@@ -796,16 +828,220 @@ export function AdminPanelView({
               {item.count > 0 && (
                 <span
                   className={`px-1.5 py-0.5 rounded-md text-[10px] font-mono-num font-extrabold ${
-                    isActive ? 'bg-amber-950/20 text-amber-950' : 'bg-rose-500 text-white'
+                    isActive
+                      ? 'bg-amber-950/20 text-amber-950'
+                      : item.id === 'channels'
+                        ? 'bg-sky-500 text-white'
+                        : item.id === 'ad_ids'
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-rose-500 text-white'
                   }`}
                 >
-                  {item.count}
+                  {item.id === 'ad_ids' ? `${item.count}/3` : item.count}
                 </span>
               )}
             </button>
           );
         })}
       </div>
+
+      {/* ========================================================================
+          CHECK CHANNELS MANAGEMENT TAB
+         ======================================================================== */}
+      {tab === 'channels' && (
+        <div key="admin-tab-channels" className="animate-clay-enter space-y-4">
+          <div className="clay-card p-4 space-y-3.5">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+                  <Radio className="w-4 h-4 text-sky-600 dark:text-sky-400" />
+                  <span>Required Check Channels</span>
+                </h2>
+                <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
+                  Configure Telegram channels verified before claiming tasks &amp; withdrawing GRAM.
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={channelsEnabledDraft}
+                aria-label="Toggle required channels verification gate"
+                onClick={() => {
+                  onTabTap?.();
+                  setChannelsEnabledDraft((v) => !v);
+                }}
+                className={`w-12 h-7 rounded-full p-1 transition-colors shrink-0 cursor-pointer ${
+                  channelsEnabledDraft ? 'bg-emerald-500' : 'bg-stone-300 dark:bg-stone-700'
+                }`}
+              >
+                <span
+                  className={`block w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                    channelsEnabledDraft ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="clay-card-warm !rounded-2xl px-3.5 py-2.5 text-xs font-semibold text-amber-900 dark:text-amber-200">
+              Make sure your Telegram Bot (<span className="font-mono-num">TELEGRAM_BOT_TOKEN</span>) is added as an{' '}
+              <span className="font-extrabold">Admin</span> in each required channel below so live{' '}
+              <span className="font-mono-num">getChatMember</span> verification succeeds.
+            </div>
+
+            {/* Add Channel Form */}
+            <form onSubmit={handleAddChannelDraft} className="clay-inset !rounded-2xl p-3.5 space-y-2.5">
+              <div className="text-xs font-extrabold text-stone-800 dark:text-stone-200">
+                Add Required Telegram Channel ({channelsDraft.length}/10)
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <input
+                  type="text"
+                  value={newChannelHandle}
+                  onChange={(e) => {
+                    setNewChannelHandle(e.target.value);
+                    setChannelFormError(null);
+                  }}
+                  placeholder="@channel or https://t.me/... or -100..."
+                  aria-label="Channel handle or t.me link"
+                  className="clay-card !rounded-xl min-h-[40px] px-3 text-xs font-semibold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-sky-400"
+                />
+                <input
+                  type="text"
+                  value={newChannelTitle}
+                  onChange={(e) => setNewChannelTitle(e.target.value)}
+                  placeholder="Channel Display Title (e.g. Official News)"
+                  aria-label="Channel display title"
+                  maxLength={60}
+                  className="clay-card !rounded-xl min-h-[40px] px-3 text-xs font-semibold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-sky-400"
+                />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <input
+                  type="text"
+                  value={newChannelDesc}
+                  onChange={(e) => setNewChannelDesc(e.target.value)}
+                  placeholder="Short description shown to users"
+                  aria-label="Channel description"
+                  maxLength={140}
+                  className="clay-card !rounded-xl min-h-[40px] px-3 text-xs text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-sky-400"
+                />
+                <input
+                  type="url"
+                  value={newChannelUrl}
+                  onChange={(e) => setNewChannelUrl(e.target.value)}
+                  placeholder="Optional Join URL (for private invite links)"
+                  aria-label="Optional invite URL"
+                  maxLength={256}
+                  className="clay-card !rounded-xl min-h-[40px] px-3 text-xs text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-sky-400"
+                />
+              </div>
+              {channelFormError && (
+                <div
+                  role="alert"
+                  className="rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800/70 px-3 py-2 text-xs font-bold text-rose-700 dark:text-rose-300"
+                >
+                  {channelFormError}
+                </div>
+              )}
+              <button
+                type="submit"
+                disabled={!newChannelHandle.trim()}
+                className="clay-btn clay-btn-sky w-full min-h-[40px] rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Add Channel to Gate List</span>
+              </button>
+            </form>
+
+            {/* Configured Channels List */}
+            <div className="space-y-2">
+              {channelsDraft.length === 0 ? (
+                <div className="clay-inset p-5 text-center text-xs text-stone-500 dark:text-stone-400">
+                  No check channels configured. Add one above or toggle the gate off.
+                </div>
+              ) : (
+                channelsDraft.map((ch) => {
+                  const isActive = ch.enabled !== false;
+                  return (
+                    <div
+                      key={ch.id}
+                      className={`clay-inset !rounded-2xl p-3 flex items-center justify-between gap-2.5 ${
+                        !isActive ? 'opacity-65' : ''
+                      }`}
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-xs font-extrabold text-stone-900 dark:text-stone-100 font-mono-num">
+                            {ch.handle}
+                          </span>
+                          <span
+                            className={`rounded-md border px-1.5 py-0.5 text-[10px] font-extrabold ${
+                              isActive
+                                ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                                : 'bg-stone-100 dark:bg-stone-800 border-stone-200 dark:border-stone-700 text-stone-500 dark:text-stone-400'
+                            }`}
+                          >
+                            {isActive ? 'Active' : 'Paused'}
+                          </span>
+                        </div>
+                        <div className="text-xs font-bold text-stone-700 dark:text-stone-200 truncate mt-0.5">
+                          {ch.title}
+                        </div>
+                        <div className="text-[11px] text-stone-500 dark:text-stone-400 truncate">
+                          {ch.description}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {ch.url && (
+                          <a
+                            href={ch.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            aria-label={`Open ${ch.handle}`}
+                            className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center text-sky-600 dark:text-sky-400"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                          </a>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleToggleChannelDraft(ch.id)}
+                          aria-label={isActive ? `Pause ${ch.handle}` : `Activate ${ch.handle}`}
+                          className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center text-stone-700 dark:text-stone-200"
+                        >
+                          {isActive ? (
+                            <PauseCircle className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                          ) : (
+                            <PlayCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveChannelDraft(ch.id)}
+                          aria-label={`Remove ${ch.handle}`}
+                          className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center text-rose-600 dark:text-rose-400"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <button
+              type="button"
+              disabled={savingChannels}
+              onClick={() => void handleSaveChannelsSubmit()}
+              className="clay-btn clay-btn-emerald w-full min-h-[44px] rounded-2xl font-extrabold text-sm disabled:opacity-50"
+            >
+              {savingChannels ? 'Saving Check Channels...' : 'Save Channel Settings'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ========================================================================
           WITHDRAWALS / PAYOUTS TAB
@@ -2108,13 +2344,26 @@ export function AdminPanelView({
           onSubmit={(e) => void handleSaveAdsSubmit(e)}
           className="animate-clay-enter clay-card p-4 space-y-4"
         >
-          <div>
-            <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100">
-              Rewarded Ad Network
-            </h2>
-            <p className="text-xs text-stone-500 dark:text-stone-400">
-              Controls how players complete &ldquo;Watch X/10&rdquo; &amp; Sponsored Banners
-            </p>
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100">
+                Rewarded Ad Network
+              </h2>
+              <p className="text-xs text-stone-500 dark:text-stone-400">
+                Controls Startup, Egg Collect, Miner Buy, Gift Claim, Watch X/10 &amp; Banners
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                onTabTap?.();
+                setTab('ad_ids');
+              }}
+              className="clay-btn clay-btn-sky min-h-[36px] px-3 rounded-xl text-[11px] font-extrabold inline-flex items-center gap-1 shrink-0"
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              <span>Paste Template</span>
+            </button>
           </div>
 
           <div className="space-y-2">
@@ -2146,53 +2395,69 @@ export function AdminPanelView({
             </div>
           </div>
 
-          {adDraft.provider === 'adsgram' && (
-            <div className="space-y-1">
-              <label htmlFor="admin-adsgram-id" className="text-xs font-bold text-stone-700 dark:text-stone-300">
-                AdsGram Block ID
-              </label>
-              <input
-                id="admin-adsgram-id"
-                type="text"
-                value={adDraft.adsgramBlockId}
-                onChange={(e) => setAdDraft((d) => ({ ...d, adsgramBlockId: e.target.value }))}
-                placeholder="e.g. 1234"
-                className="clay-inset w-full min-h-[42px] px-3 text-sm font-mono-num text-stone-900 dark:text-stone-100"
-              />
+          {/* All Network Block / Project / Zone IDs (Always Visible) */}
+          <div className="clay-inset !rounded-2xl p-3 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-extrabold text-stone-800 dark:text-stone-200">
+                Ad Network Block &amp; Zone IDs
+              </span>
+              <span className="text-[10px] font-bold text-stone-500 dark:text-stone-400">
+                Used by Gates &amp; Daily Ad Tasks
+              </span>
             </div>
-          )}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div className="space-y-1">
+                <label htmlFor="admin-adsgram-id" className="text-[11px] font-bold text-stone-700 dark:text-stone-300 flex items-center justify-between">
+                  <span>AdsGram Block ID</span>
+                  {adDraft.provider === 'adsgram' && (
+                    <span className="text-[10px] font-extrabold text-amber-700 dark:text-amber-300">Active</span>
+                  )}
+                </label>
+                <input
+                  id="admin-adsgram-id"
+                  type="text"
+                  value={adDraft.adsgramBlockId}
+                  onChange={(e) => setAdDraft((d) => ({ ...d, adsgramBlockId: e.target.value }))}
+                  placeholder="e.g. 1234"
+                  className="clay-card !rounded-xl w-full min-h-[40px] px-3 text-xs font-mono-num text-stone-900 dark:text-stone-100"
+                />
+              </div>
 
-          {adDraft.provider === 'gigapub' && (
-            <div className="space-y-1">
-              <label htmlFor="admin-gigapub-id" className="text-xs font-bold text-stone-700 dark:text-stone-300">
-                Gigapub Project ID
-              </label>
-              <input
-                id="admin-gigapub-id"
-                type="text"
-                value={adDraft.gigapubProjectId || ''}
-                onChange={(e) => setAdDraft((d) => ({ ...d, gigapubProjectId: e.target.value }))}
-                placeholder="e.g. 5678"
-                className="clay-inset w-full min-h-[42px] px-3 text-sm font-mono-num text-stone-900 dark:text-stone-100"
-              />
-            </div>
-          )}
+              <div className="space-y-1">
+                <label htmlFor="admin-gigapub-id" className="text-[11px] font-bold text-stone-700 dark:text-stone-300 flex items-center justify-between">
+                  <span>Gigapub Project ID</span>
+                  {adDraft.provider === 'gigapub' && (
+                    <span className="text-[10px] font-extrabold text-amber-700 dark:text-amber-300">Active</span>
+                  )}
+                </label>
+                <input
+                  id="admin-gigapub-id"
+                  type="text"
+                  value={adDraft.gigapubProjectId || ''}
+                  onChange={(e) => setAdDraft((d) => ({ ...d, gigapubProjectId: e.target.value }))}
+                  placeholder="e.g. 5678"
+                  className="clay-card !rounded-xl w-full min-h-[40px] px-3 text-xs font-mono-num text-stone-900 dark:text-stone-100"
+                />
+              </div>
 
-          {adDraft.provider === 'monetag' && (
-            <div className="space-y-1">
-              <label htmlFor="admin-monetag-id" className="text-xs font-bold text-stone-700 dark:text-stone-300">
-                Monetag Zone ID
-              </label>
-              <input
-                id="admin-monetag-id"
-                type="text"
-                value={adDraft.monetagZoneId}
-                onChange={(e) => setAdDraft((d) => ({ ...d, monetagZoneId: e.target.value }))}
-                placeholder="e.g. 9012345"
-                className="clay-inset w-full min-h-[42px] px-3 text-sm font-mono-num text-stone-900 dark:text-stone-100"
-              />
+              <div className="space-y-1">
+                <label htmlFor="admin-monetag-id" className="text-[11px] font-bold text-stone-700 dark:text-stone-300 flex items-center justify-between">
+                  <span>Monetag Zone ID</span>
+                  {adDraft.provider === 'monetag' && (
+                    <span className="text-[10px] font-extrabold text-amber-700 dark:text-amber-300">Active</span>
+                  )}
+                </label>
+                <input
+                  id="admin-monetag-id"
+                  type="text"
+                  value={adDraft.monetagZoneId}
+                  onChange={(e) => setAdDraft((d) => ({ ...d, monetagZoneId: e.target.value }))}
+                  placeholder="e.g. 9012345"
+                  className="clay-card !rounded-xl w-full min-h-[40px] px-3 text-xs font-mono-num text-stone-900 dark:text-stone-100"
+                />
+              </div>
             </div>
-          )}
+          </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
             <div className="space-y-1">
@@ -2347,6 +2612,275 @@ export function AdminPanelView({
           >
             {savingAds ? 'Saving Ad Settings...' : 'Save Ad Settings'}
           </button>
+        </form>
+      )}
+
+      {/* ========================================================================
+          BLOCK IDS & PASTE TEMPLATE TAB
+         ======================================================================== */}
+      {tab === 'ad_ids' && (
+        <form
+          key="admin-tab-ad-ids"
+          onSubmit={(e) => void handleSaveAdsSubmit(e)}
+          className="animate-clay-enter space-y-4"
+        >
+          {/* Bulk Paste & Copy Template Card */}
+          <div className="clay-card p-4 space-y-3.5">
+            <div className="flex items-start justify-between gap-2 flex-wrap">
+              <div>
+                <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+                  <KeyRound className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                  <span>Ad Block IDs &amp; Paste Template</span>
+                </h2>
+                <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
+                  Paste all Block IDs, Zone IDs &amp; sponsor settings in one place — applies live without redeploying.
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => void handleCopy('ad_tpl', templateInput)}
+                  className="clay-btn clay-btn-neutral min-h-[36px] px-3 rounded-xl text-[11px] font-extrabold inline-flex items-center gap-1.5"
+                >
+                  {copiedKey === 'ad_tpl' ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                      <span>Copied Template</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>Copy Template</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onTabTap?.();
+                    setTemplateInput(formatAdConfigTemplate(adDraft));
+                    setTemplateStatus('Loaded current fields into template.');
+                  }}
+                  className="clay-btn clay-btn-neutral min-h-[36px] px-3 rounded-xl text-[11px] font-extrabold"
+                >
+                  Sync Fields
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label
+                htmlFor="admin-ad-bulk-template"
+                className="text-xs font-bold text-stone-700 dark:text-stone-300 flex items-center justify-between"
+              >
+                <span>Bulk Paste Box (KEY=VALUE or JSON)</span>
+                <span className="text-[10px] font-mono-num text-stone-500 dark:text-stone-400">
+                  Fill IDs &amp; click Apply
+                </span>
+              </label>
+              <textarea
+                id="admin-ad-bulk-template"
+                rows={9}
+                value={templateInput}
+                onChange={(e) => {
+                  setTemplateInput(e.target.value);
+                  setTemplateStatus(null);
+                }}
+                spellCheck={false}
+                placeholder={[
+                  'ACTIVE_PROVIDER=adsgram',
+                  'ADSGRAM_BLOCK_ID=1234',
+                  'GIGAPUB_PROJECT_ID=5678',
+                  'MONETAG_ZONE_ID=9012345',
+                  'WATCH_SECONDS=5',
+                ].join('\n')}
+                className="clay-inset w-full p-3 text-xs font-mono-num leading-relaxed text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-sky-400"
+              />
+            </div>
+
+            {templateStatus && (
+              <div className="clay-card-mint !rounded-xl px-3 py-2 text-xs font-bold text-emerald-800 dark:text-emerald-200 flex items-center gap-1.5">
+                <ClipboardCheck className="w-4 h-4 shrink-0" />
+                <span>{templateStatus}</span>
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={handleApplyAdTemplate}
+              className="clay-btn clay-btn-sky w-full min-h-[40px] rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5"
+            >
+              <Sparkles className="w-4 h-4" />
+              <span>Apply Pasted Template to Fields</span>
+            </button>
+          </div>
+
+          {/* Direct Individual Network IDs */}
+          <div className="clay-card p-4 space-y-3.5">
+            <div>
+              <h3 className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
+                Network Block &amp; Zone IDs ({[adDraft.adsgramBlockId, adDraft.gigapubProjectId, adDraft.monetagZoneId].filter((v) => Boolean(v && v.trim())).length}/3)
+              </h3>
+              <p className="text-xs text-stone-500 dark:text-stone-400">
+                Paste each SDK ID directly or populate via template above
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              <div className="clay-inset !rounded-2xl p-3 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label htmlFor="tpl-adsgram-id" className="text-xs font-extrabold text-stone-800 dark:text-stone-200">
+                    AdsGram Block ID
+                  </label>
+                  <span
+                    className={`rounded-md border px-1.5 py-0.5 text-[10px] font-extrabold ${
+                      adDraft.adsgramBlockId.trim()
+                        ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                        : 'bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800/70 text-amber-800 dark:text-amber-300'
+                    }`}
+                  >
+                    {adDraft.adsgramBlockId.trim() ? 'Ready' : 'Empty'}
+                  </span>
+                </div>
+                <input
+                  id="tpl-adsgram-id"
+                  type="text"
+                  value={adDraft.adsgramBlockId}
+                  onChange={(e) => setAdDraft((d) => ({ ...d, adsgramBlockId: e.target.value }))}
+                  placeholder="Paste AdsGram Block ID (e.g. 1234 or int-1234)"
+                  className="clay-card !rounded-xl w-full min-h-[42px] px-3 text-sm font-mono-num text-stone-900 dark:text-stone-100"
+                />
+              </div>
+
+              <div className="clay-inset !rounded-2xl p-3 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label htmlFor="tpl-gigapub-id" className="text-xs font-extrabold text-stone-800 dark:text-stone-200">
+                    Gigapub Project ID
+                  </label>
+                  <span
+                    className={`rounded-md border px-1.5 py-0.5 text-[10px] font-extrabold ${
+                      (adDraft.gigapubProjectId || '').trim()
+                        ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                        : 'bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800/70 text-amber-800 dark:text-amber-300'
+                    }`}
+                  >
+                    {(adDraft.gigapubProjectId || '').trim() ? 'Ready' : 'Empty'}
+                  </span>
+                </div>
+                <input
+                  id="tpl-gigapub-id"
+                  type="text"
+                  value={adDraft.gigapubProjectId || ''}
+                  onChange={(e) => setAdDraft((d) => ({ ...d, gigapubProjectId: e.target.value }))}
+                  placeholder="Paste Gigapub Project ID (e.g. 5678)"
+                  className="clay-card !rounded-xl w-full min-h-[42px] px-3 text-sm font-mono-num text-stone-900 dark:text-stone-100"
+                />
+              </div>
+
+              <div className="clay-inset !rounded-2xl p-3 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label htmlFor="tpl-monetag-id" className="text-xs font-extrabold text-stone-800 dark:text-stone-200">
+                    Monetag Zone ID
+                  </label>
+                  <span
+                    className={`rounded-md border px-1.5 py-0.5 text-[10px] font-extrabold ${
+                      adDraft.monetagZoneId.trim()
+                        ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                        : 'bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800/70 text-amber-800 dark:text-amber-300'
+                    }`}
+                  >
+                    {adDraft.monetagZoneId.trim() ? 'Ready' : 'Empty'}
+                  </span>
+                </div>
+                <input
+                  id="tpl-monetag-id"
+                  type="text"
+                  value={adDraft.monetagZoneId}
+                  onChange={(e) => setAdDraft((d) => ({ ...d, monetagZoneId: e.target.value }))}
+                  placeholder="Paste Monetag Zone ID (e.g. 9012345)"
+                  className="clay-card !rounded-xl w-full min-h-[42px] px-3 text-sm font-mono-num text-stone-900 dark:text-stone-100"
+                />
+              </div>
+            </div>
+
+            {/* Active Provider + Timer */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+              <div className="space-y-1">
+                <label htmlFor="tpl-provider-select" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                  Primary Gate Provider
+                </label>
+                <select
+                  id="tpl-provider-select"
+                  value={adDraft.provider}
+                  onChange={(e) =>
+                    setAdDraft((d) => ({
+                      ...d,
+                      provider: e.target.value as AdProviderType,
+                    }))
+                  }
+                  className="clay-inset w-full min-h-[42px] px-3 text-xs font-extrabold text-stone-900 dark:text-stone-100"
+                >
+                  {AD_PROVIDER_CARDS.map((card) => (
+                    <option key={card.id} value={card.id}>
+                      {card.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label htmlFor="tpl-watch-seconds" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                  Fallback Ad Timer (sec)
+                </label>
+                <input
+                  id="tpl-watch-seconds"
+                  type="number"
+                  min={3}
+                  max={60}
+                  value={adDraft.watchSeconds}
+                  onChange={(e) =>
+                    setAdDraft((d) => ({
+                      ...d,
+                      watchSeconds: Math.max(3, Math.min(60, Number(e.target.value) || 5)),
+                    }))
+                  }
+                  className="clay-inset w-full min-h-[42px] px-3 text-sm font-mono-num font-extrabold text-stone-900 dark:text-stone-100"
+                />
+              </div>
+            </div>
+
+            {/* Active Ad Gates Map */}
+            <div className="clay-card-warm !rounded-2xl p-3 space-y-2">
+              <div className="text-[11px] font-extrabold uppercase tracking-wider text-amber-900 dark:text-amber-300">
+                Active Ad Gates Connected
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 text-[11px] font-bold">
+                {[
+                  'App Launch (Startup)',
+                  'Egg Harvest (Collect)',
+                  'Miner Buy (Packs)',
+                  'Gift / Promo Claim',
+                  'Daily Ad Network Cards',
+                  'Watch X/10 Hen Step',
+                ].map((gate) => (
+                  <div
+                    key={gate}
+                    className="clay-card !rounded-xl px-2.5 py-1.5 flex items-center gap-1.5 text-stone-800 dark:text-stone-200"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                    <span className="truncate">{gate}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={savingAds}
+              className="clay-btn clay-btn-emerald w-full min-h-[44px] rounded-2xl disabled:opacity-50 font-extrabold text-sm"
+            >
+              {savingAds ? 'Saving Block IDs...' : 'Save Block IDs & Ad Config'}
+            </button>
+          </div>
         </form>
       )}
 
