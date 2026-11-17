@@ -4,7 +4,6 @@ import {
   ArrowLeft,
   ArrowUpRight,
   Award,
-  Bell,
   Bot,
   Check,
   CheckCircle2,
@@ -49,7 +48,6 @@ import type {
   UserFarmProfile,
 } from '../types/farm';
 import { LANGUAGE_OPTIONS, t } from '../utils/i18n';
-import type { BrowserNotificationPermission } from '../utils/notifications';
 import type { ThemeMode } from '../utils/theme';
 import { ChickenSprite, CoinIcon, EggIcon, PlayerAvatar } from './GameIcons';
 import { PWAInstallButton } from './PWAControls';
@@ -369,14 +367,11 @@ export function ProfileView({
 interface YourFarmViewProps {
   profile: UserFarmProfile;
   pendingEggs: number;
-  notificationsEnabled: boolean;
-  notificationPermission: BrowserNotificationPermission;
   telegramRemindersEnabled?: boolean;
   onBack: () => void;
   onUpgradeBasket: () => void;
   onGoPacks: () => void;
   onOpenWithdraw?: () => void;
-  onToggleNotifications: () => void;
   onToggleTelegramReminders?: () => void;
   onActivateBooster?: () => void;
   onPurchaseAutoHarvestDrone?: (
@@ -388,14 +383,11 @@ interface YourFarmViewProps {
 export function YourFarmView({
   profile,
   pendingEggs,
-  notificationsEnabled,
-  notificationPermission,
   telegramRemindersEnabled = true,
   onBack,
   onUpgradeBasket,
   onGoPacks,
   onOpenWithdraw,
-  onToggleNotifications,
   onToggleTelegramReminders,
   onActivateBooster,
   onPurchaseAutoHarvestDrone,
@@ -852,46 +844,6 @@ export function YourFarmView({
             </div>
           )}
 
-          {/* Background Browser Notification Reminder Toggle */}
-          <div className="clay-inset px-3.5 py-3 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-9 h-9 rounded-xl clay-icon-well text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
-                <Bell className="w-4 h-4" />
-              </div>
-              <div className="min-w-0">
-                <div className="text-xs font-extrabold text-stone-900 dark:text-stone-100">
-                  Basket full browser alert
-                </div>
-                <div className="text-[11px] text-stone-500 dark:text-stone-400 truncate">
-                  {notificationPermission === 'unsupported'
-                    ? 'Not supported in this browser'
-                    : notificationPermission === 'denied'
-                      ? 'Blocked in browser site settings'
-                      : notificationsEnabled
-                        ? 'Reminds you in background when basket hits 100%'
-                        : 'Get a browser alert when basket is full'}
-                </div>
-              </div>
-            </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={notificationsEnabled}
-              aria-label="Toggle basket full browser alerts"
-              disabled={notificationPermission === 'unsupported'}
-              onClick={onToggleNotifications}
-              className={`w-12 h-7 rounded-full p-1 transition-colors shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
-                notificationsEnabled ? 'bg-emerald-500' : 'bg-stone-300 dark:bg-stone-700'
-              }`}
-            >
-              <span
-                className={`block w-5 h-5 rounded-full bg-white shadow transition-transform ${
-                  notificationsEnabled ? 'translate-x-5' : 'translate-x-0'
-                }`}
-              />
-            </button>
-          </div>
-
           {onToggleTelegramReminders && (
             <div className="clay-inset px-3.5 py-3 flex items-center justify-between gap-3">
               <div className="flex items-center gap-2.5 min-w-0">
@@ -935,14 +887,11 @@ interface SettingsModalProps {
   currentLanguage: LanguageCode;
   musicEnabled: boolean;
   soundsEnabled: boolean;
-  notificationsEnabled: boolean;
-  notificationPermission: BrowserNotificationPermission;
   telegramRemindersEnabled?: boolean;
   themeMode: ThemeMode;
   onChangeLanguage: (lang: LanguageCode) => void;
   onToggleMusic: () => void;
   onToggleSounds: () => void;
-  onToggleNotifications: () => void;
   onToggleTelegramReminders?: () => void;
   onToggleTheme: () => void;
   onClose: () => void;
@@ -952,14 +901,11 @@ export function SettingsModal({
   currentLanguage,
   musicEnabled,
   soundsEnabled,
-  notificationsEnabled,
-  notificationPermission,
   telegramRemindersEnabled = true,
   themeMode,
   onChangeLanguage,
   onToggleMusic,
   onToggleSounds,
-  onToggleNotifications,
   onToggleTelegramReminders,
   onToggleTheme,
   onClose,
@@ -1084,38 +1030,6 @@ export function SettingsModal({
               <span
                 className={`block w-5 h-5 rounded-full bg-white shadow transition-transform ${
                   soundsEnabled ? 'translate-x-5' : 'translate-x-0'
-                }`}
-              />
-            </button>
-          </div>
-
-          <div className="px-4 py-3 flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2.5 text-sm font-bold text-stone-800 dark:text-stone-100">
-                <Bell className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
-                <span>{strings.basketFullAlerts}</span>
-              </div>
-              {notificationPermission === 'denied' && (
-                <div className="text-[11px] text-rose-600 dark:text-rose-400 pl-6">Blocked in browser settings</div>
-              )}
-              {notificationPermission === 'unsupported' && (
-                <div className="text-[11px] text-stone-400 dark:text-stone-500 pl-6">Unsupported in this browser</div>
-              )}
-            </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={notificationsEnabled}
-              aria-label="Toggle basket full notifications"
-              disabled={notificationPermission === 'unsupported'}
-              onClick={onToggleNotifications}
-              className={`w-12 h-7 rounded-full p-1 transition-colors shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
-                notificationsEnabled ? 'bg-emerald-500' : 'bg-stone-300 dark:bg-stone-700'
-              }`}
-            >
-              <span
-                className={`block w-5 h-5 rounded-full bg-white shadow transition-transform ${
-                  notificationsEnabled ? 'translate-x-5' : 'translate-x-0'
                 }`}
               />
             </button>

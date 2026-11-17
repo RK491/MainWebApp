@@ -87,6 +87,7 @@ interface TasksViewProps {
   channelVerification?: ChannelVerificationResult | null;
   checkingChannels?: boolean;
   onCheckChannels?: () => Promise<ChannelVerificationResult | null> | void;
+  onVerifyTaskChannel?: (actionUrl: string) => Promise<{ joined: boolean; handle?: string }>;
   onTabTap?: () => void;
   onClaimPromo: (code: string) => void;
   onClaimDaily: () => void;
@@ -129,6 +130,7 @@ export function TasksView({
   channelVerification = null,
   checkingChannels = false,
   onCheckChannels,
+  onVerifyTaskChannel,
   onTabTap,
   onClaimPromo,
   onClaimDaily,
@@ -381,32 +383,31 @@ export function TasksView({
 
   const handleClaimCheckedTask = async (task: TaskDefinition) => {
     if (profile.completedTaskIds.includes(task.id)) return;
-    if (
-      channelGateActive &&
-      task.actionUrl &&
-      onCheckChannels &&
-      channelVerification?.verificationMode === 'telegram_bot'
-    ) {
-      const normalizedUrl = task.actionUrl.toLowerCase();
-      const matchedConfigChannel = activeRequiredChannels.find((ch) => {
+    if (channelGateActive && onCheckChannels) {
+      const normalizedUrl = (task.actionUrl || '').toLowerCase();
+      const matchesRequired = activeRequiredChannels.some((ch) => {
         const cleanSlug = ch.handle.replace(/^@/, '').toLowerCase();
-        return cleanSlug.length >= 2 && normalizedUrl.includes(cleanSlug);
+        const cleanUrl = (ch.url || '').trim().toLowerCase();
+        return (
+          (cleanSlug.length >= 2 && normalizedUrl.includes(cleanSlug)) ||
+          (cleanUrl.length >= 8 && normalizedUrl.includes(cleanUrl))
+        );
       });
-      if (matchedConfigChannel) {
+      if (
+        matchesRequired ||
+        !channelVerification ||
+        (channelVerification.verificationMode === 'telegram_bot' && !channelVerification.allJoined)
+      ) {
         const fresh = (await onCheckChannels()) || channelVerification;
-        if (fresh?.verificationMode === 'telegram_bot') {
-          const matched = fresh.channels.find(
-            (ch) => ch.handle.toUpperCase() === matchedConfigChannel.handle.toUpperCase(),
-          );
-          if (matched && !matched.joined) {
-            setTaskStages((prev) => {
-              const next = { ...prev };
-              delete next[task.id];
-              return next;
-            });
-            return;
-          }
+        if (fresh?.verificationMode === 'telegram_bot' && !fresh.allJoined) {
+          return;
         }
+      }
+    }
+    if (onVerifyTaskChannel && task.actionUrl) {
+      const taskCheck = await onVerifyTaskChannel(task.actionUrl);
+      if (!taskCheck.joined) {
+        return;
       }
     }
     onCompleteTask(task.id);

@@ -502,16 +502,24 @@ export function stopAmbientMusic(): void {
   if (musicMasterGain && audioCtx) {
     try {
       const now = audioCtx.currentTime;
-      musicMasterGain.gain.setTargetAtTime(0.0001, now, 0.08);
+      musicMasterGain.gain.setTargetAtTime(0.0001, now, 0.05);
     } catch {
       // Ignore WebAudio teardown errors
     }
+  }
+  if (
+    audioCtx &&
+    audioCtx.state === 'running' &&
+    typeof document !== 'undefined' &&
+    document.visibilityState === 'hidden'
+  ) {
+    audioCtx.suspend().catch(() => {});
   }
 }
 
 export function syncAmbientMusic(enabled: boolean): void {
   if (typeof window === 'undefined') return;
-  if (!enabled) {
+  if (!enabled || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) {
     stopAmbientMusic();
     return;
   }

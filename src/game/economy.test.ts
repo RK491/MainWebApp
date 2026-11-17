@@ -58,6 +58,7 @@ import {
   DEFAULT_GET_CODE_CHANNEL_URL,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
+  DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
   detectTop10RankCelebration,
   encodeAchievementsWithAds,
   encodePromoLabelMeta,
@@ -72,12 +73,14 @@ import {
   isAutoHarvestDroneActive,
   isCoopFeverActive,
   purchaseAutoHarvestDrone,
+  renderWithdrawApproveMessage,
   USER_TASK_MIN_REWARD_COINS,
   filterWithdrawalsByTab,
   formatAdConfigTemplate,
   formatChannelsHandleSummary,
   formatPromoRewardSummary,
   formatReferralHandle,
+  formatShortTonWallet,
   FREE_EGGS_MILESTONE_BONUS,
   FREE_EGGS_PER_AD,
   generateGiftCodeString,
@@ -3046,6 +3049,53 @@ test('compact achievement tokens round-trip ads, separate withdrawAdsWatched & c
   assert.equal(decoded.coopFeverAdsWatched, 27);
   assert.equal(decoded.autoHarvestUntilMs, 1794900000000);
   assert.equal(decoded.telegramRemindersEnabled, false);
+});
+
+test('renderWithdrawApproveMessage formats default payout DM with walletShort and supports custom Admin template edits + HTML escaping', () => {
+  const wallet = 'UQD_gS1234567890abcdefghijklmnopqrstuvwxyzMcrwh';
+  assert.equal(formatShortTonWallet(wallet), 'UQD_gS...Mcrwh');
+  assert.equal(formatShortTonWallet('UQD1234'), 'UQD1234');
+
+  const def = renderWithdrawApproveMessage({
+    template: DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
+    gramAmount: '0.011239',
+    eggsAmount: 11239,
+    walletAddress: wallet,
+    usdValue: 0.0112,
+    displayName: 'Test <User>',
+    handle: '@testuser',
+    txId: 'wd_01',
+    adminNote: 'Sent on TON',
+  });
+
+  assert.ok(def.plainText.includes('✅ Withdrawal Paid!'));
+  assert.ok(def.plainText.includes('💎 Amount: 0.011239 GRAM'));
+  assert.ok(def.plainText.includes('🥚 Eggs: 11239'));
+  assert.ok(def.plainText.includes('👛 Wallet: UQD_gS...Mcrwh'));
+  assert.ok(def.plainText.includes('⚡ Status: Confirmed on TON'));
+  assert.ok(def.htmlText.startsWith('<b>✅ Withdrawal Paid!</b>'));
+  assert.equal(def.buttonText, '🔎 View transaction');
+  assert.equal(def.buttonUrl, `https://tonviewer.com/${encodeURIComponent(wallet)}`);
+
+  // Custom editable template with tx hash in adminNote -> uses {txUrl} transaction link and escapes HTML
+  const txHash64 = 'a'.repeat(64);
+  const custom = renderWithdrawApproveMessage({
+    template: {
+      messageTemplate: 'Paid {gramAmount} GRAM to {displayName} ({walletShort})\nNote: {adminNote}',
+      buttonText: 'Track Tx',
+      buttonUrlTemplate: '{txUrl}',
+    },
+    gramAmount: '5.5000',
+    eggsAmount: 5500,
+    walletAddress: wallet,
+    usdValue: 0.55,
+    displayName: '<Admin&Test>',
+    adminNote: txHash64,
+  });
+
+  assert.ok(custom.htmlText.startsWith('<b>Paid 5.5000 GRAM to &lt;Admin&amp;Test&gt; (UQD_gS...Mcrwh)</b>'));
+  assert.equal(custom.buttonText, 'Track Tx');
+  assert.equal(custom.buttonUrl, `https://tonviewer.com/transaction/${txHash64}`);
 });
 
 

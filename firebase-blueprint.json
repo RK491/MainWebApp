@@ -319,17 +319,34 @@
       },
       "required": ["adminIds", "admins", "updatedAtMs", "updatedAt"]
     },
-    "AdminSecurityConfig": {
-      "title": "AdminSecurityConfig",
-      "description": "Salted scrypt hash of the custom Admin Console passcode updated from the Admin Panel.",
+    "PayoutTemplateConfig": {
+      "title": "PayoutTemplateConfig",
+      "description": "Admin-editable Telegram DM message template sent to users when their withdrawal is approved.",
       "type": "object",
       "properties": {
-        "passcodeHash": { "type": "string", "minLength": 16, "maxLength": 200 },
-        "updatedBy": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "messageTemplate": { "type": "string", "minLength": 1, "maxLength": 1500 },
+        "buttonText": { "type": "string", "maxLength": 48 },
+        "buttonUrlTemplate": { "type": "string", "maxLength": 256 },
         "updatedAtMs": { "type": "number" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["passcodeHash", "updatedBy", "updatedAtMs", "updatedAt"]
+      "required": ["messageTemplate", "buttonText", "buttonUrlTemplate", "updatedAtMs", "updatedAt"]
+    },
+    "BotSubscriber": {
+      "title": "BotSubscriber",
+      "description": "Telegram user captured via Bot /start webhook/polling or Mini App launch for broadcasts.",
+      "type": "object",
+      "properties": {
+        "chatId": { "type": "string", "minLength": 3, "maxLength": 32, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "username": { "type": "string", "maxLength": 40 },
+        "firstName": { "type": "string", "maxLength": 60 },
+        "source": { "type": "string", "enum": ["bot_start", "bot_message", "miniapp"] },
+        "isBotBlocked": { "type": "boolean" },
+        "joinedAtMs": { "type": "number" },
+        "lastSeenAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["chatId", "username", "firstName", "source", "isBotBlocked", "joinedAtMs", "lastSeenAtMs", "updatedAt"]
     }
   },
   "firestore": {
@@ -375,11 +392,15 @@
     },
     "/app_config/{configId}": {
       "schema": { "$ref": "#/entities/AdsConfig" },
-      "description": "Global app configuration for ads, seasonal leaderboard, required Telegram channels, admins, and admin security hash."
+      "description": "Global app configuration for ads, seasonal leaderboard, required Telegram channels, admins, and payout DM template."
     },
     "/banned_users/{playerId}": {
       "schema": { "$ref": "#/entities/BannedUser" },
       "description": "Admin-managed registry of blocked/banned player IDs prevented from accessing game features."
+    },
+    "/bot_subscribers/{chatId}": {
+      "schema": { "$ref": "#/entities/BotSubscriber" },
+      "description": "Telegram Bot subscriber registry populated from Bot /start interactions and Mini App logins."
     }
   }
 }

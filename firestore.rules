@@ -385,6 +385,31 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidPayoutTemplateConfig(data) {
+      return data.keys().hasAll(['messageTemplate', 'buttonText', 'buttonUrlTemplate', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['messageTemplate', 'buttonText', 'buttonUrlTemplate', 'updatedAtMs', 'updatedAt'])
+        && data.messageTemplate is string && data.messageTemplate.size() >= 1 && data.messageTemplate.size() <= 1500
+        && data.buttonText is string && data.buttonText.size() <= 48
+        && data.buttonUrlTemplate is string && data.buttonUrlTemplate.size() <= 256
+        && data.updatedAtMs is number && data.updatedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidBotSubscriber(data, chatId) {
+      return data.keys().hasAll(['chatId', 'username', 'firstName', 'source', 'isBotBlocked', 'joinedAtMs', 'lastSeenAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['chatId', 'username', 'firstName', 'source', 'isBotBlocked', 'joinedAtMs', 'lastSeenAtMs', 'updatedAt'])
+        && isValidId(data.chatId)
+        && data.chatId == chatId
+        && data.chatId.size() <= 32
+        && data.username is string && data.username.size() <= 40
+        && data.firstName is string && data.firstName.size() <= 60
+        && data.source in ['bot_start', 'bot_message', 'miniapp']
+        && data.isBotBlocked is bool
+        && data.joinedAtMs is number && data.joinedAtMs >= 0
+        && data.lastSeenAtMs is number && data.lastSeenAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
     function isValidReferral(data, playerId, referredUid) {
       return data.keys().hasAll([
           'referrerUid', 'referredUid', 'referredName', 'referredHandle',
@@ -684,6 +709,9 @@ service cloud.firestore {
         || (configId == 'admins'
           && isValidAdminsConfig(incoming())
           && incoming().updatedAt == request.time)
+        || (configId == 'payout_template'
+          && isValidPayoutTemplateConfig(incoming())
+          && incoming().updatedAt == request.time)
       );
       allow delete: if false;
     }
@@ -700,6 +728,15 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'handle', 'reason', 'bannedBy', 'bannedAtMs']);
       allow delete: if isValidId(playerId);
+    }
+
+    match /bot_subscribers/{chatId} {
+      allow get: if isValidId(chatId);
+      allow list: if request.query.limit != null && request.query.limit <= 100;
+      allow create, update: if isValidId(chatId)
+        && isValidBotSubscriber(incoming(), chatId)
+        && incoming().updatedAt == request.time;
+      allow delete: if false;
     }
   }
 }

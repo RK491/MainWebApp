@@ -341,3 +341,11 @@ export interface AdminsConfig {
   admins: AdminRoleEntry[];
   updatedAtMs: number;
 }
+
+export interface WithdrawApproveMessageTemplate {
+  messageTemplate: string;
+  buttonText: string;
+  buttonUrlTemplate: string;
+  updatedAtMs: number;
+}
+

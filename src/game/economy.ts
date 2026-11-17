@@ -23,6 +23,7 @@ import type {
   TaskSortOption,
   TransactionEntry,
   UserFarmProfile,
+  WithdrawApproveMessageTemplate,
   WithdrawalOrder,
   WithdrawalStatus,
 } from '../types/farm';
@@ -3911,4 +3912,121 @@ export function buildReferralBotNotificationMessage(params: {
     `Whenever your referred user makes a deposit, you will automatically receive a <b>${pct}% share</b> of their deposit in Coins!`,
   ].join('\n');
 }
+
+export const DEFAULT_WITHDRAW_APPROVE_MESSAGE_BODY = [
+  '✅ Withdrawal Paid!',
+  '',
+  'Your withdrawal has been successfully sent and confirmed on TON.',
+  '',
+  '💎 Amount: {gramAmount} GRAM',
+  '🥚 Eggs: {eggsAmount}',
+  '👛 Wallet: {walletShort}',
+  '⚡ Status: Confirmed on TON',
+  '',
+  'Thank you for using Alpha Gram 🐔💚',
+].join('\n');
+
+export const DEFAULT_WITHDRAW_APPROVE_TEMPLATE: WithdrawApproveMessageTemplate = {
+  messageTemplate: DEFAULT_WITHDRAW_APPROVE_MESSAGE_BODY,
+  buttonText: '🔎 View transaction',
+  buttonUrlTemplate: 'https://tonviewer.com/{walletAddress}',
+  updatedAtMs: 0,
+};
+
+export function formatShortTonWallet(walletAddress: string): string {
+  const clean = String(walletAddress || '').trim();
+  if (clean.length <= 14) return clean;
+  return `${clean.slice(0, 6)}...${clean.slice(-5)}`;
+}
+
+export function renderWithdrawApproveMessage(params: {
+  template?: Partial<WithdrawApproveMessageTemplate> | null;
+  gramAmount: string;
+  eggsAmount: number;
+  walletAddress: string;
+  usdValue: number;
+  displayName?: string;
+  handle?: string;
+  txId?: string;
+  memo?: string;
+  adminNote?: string;
+}): {
+  plainText: string;
+  htmlText: string;
+  buttonText: string;
+  buttonUrl: string;
+} {
+  const rawBody =
+    typeof params.template?.messageTemplate === 'string' &&
+    params.template.messageTemplate.trim().length > 0
+      ? params.template.messageTemplate
+      : DEFAULT_WITHDRAW_APPROVE_TEMPLATE.messageTemplate;
+  const rawBtnText =
+    typeof params.template?.buttonText === 'string'
+      ? params.template.buttonText.trim()
+      : DEFAULT_WITHDRAW_APPROVE_TEMPLATE.buttonText;
+  const rawBtnUrl =
+    typeof params.template?.buttonUrlTemplate === 'string' &&
+    params.template.buttonUrlTemplate.trim().length > 0
+      ? params.template.buttonUrlTemplate.trim()
+      : DEFAULT_WITHDRAW_APPROVE_TEMPLATE.buttonUrlTemplate;
+
+  const cleanWallet = String(params.walletAddress || '').trim();
+  const cleanNote = String(params.adminNote || '').trim();
+  const txUrlFromNote = /^https:\/\/[^\s]+$/i.test(cleanNote)
+    ? cleanNote
+    : /^[a-fA-F0-9]{64}$/.test(cleanNote)
+      ? `https://tonviewer.com/transaction/${cleanNote}`
+      : `https://tonviewer.com/${encodeURIComponent(cleanWallet)}`;
+
+  const tokens: Record<string, string> = {
+    '{gramAmount}': String(params.gramAmount || '0').trim(),
+    '{eggsAmount}': Math.max(0, Math.floor(Number(params.eggsAmount) || 0)).toString(),
+    '{eggsFormatted}': Math.max(0, Math.floor(Number(params.eggsAmount) || 0)).toLocaleString(),
+    '{walletAddress}': cleanWallet,
+    '{walletShort}': formatShortTonWallet(cleanWallet),
+    '{usdValue}': Math.max(0, Number(params.usdValue) || 0).toFixed(4),
+    '{displayName}': String(params.displayName || 'Farmer').trim(),
+    '{handle}': String(params.handle || '@farmer').trim(),
+    '{txId}': String(params.txId || '').trim(),
+    '{memo}': String(params.memo || '').trim(),
+    '{adminNote}': cleanNote,
+    '{txUrl}': txUrlFromNote,
+  };
+
+  const applyTokens = (input: string, escapeForHtml: boolean): string => {
+    let out = escapeForHtml ? escapeTelegramHtml(input) : input;
+    for (const [key, val] of Object.entries(tokens)) {
+      const safeVal = escapeForHtml ? escapeTelegramHtml(val) : val;
+      out = out.split(key).join(safeVal);
+    }
+    return out;
+  };
+
+  const plainText = applyTokens(rawBody, false).slice(0, 1500);
+  const htmlLines = applyTokens(rawBody, true).split('\n');
+  if (htmlLines.length > 0 && htmlLines[0].trim()) {
+    htmlLines[0] = `<b>${htmlLines[0]}</b>`;
+  }
+  const htmlText = htmlLines.join('\n').slice(0, 3500);
+
+  const buttonText = applyTokens(rawBtnText, false).slice(0, 48);
+  let buttonUrl = rawBtnUrl;
+  const encodedWallet = encodeURIComponent(cleanWallet);
+  buttonUrl = buttonUrl
+    .split('{walletAddress}').join(encodedWallet)
+    .split('{txUrl}').join(txUrlFromNote)
+    .split('{txId}').join(encodeURIComponent(String(params.txId || '').trim()));
+  if (!/^https:\/\/[^\s]+$/i.test(buttonUrl)) {
+    buttonUrl = `https://tonviewer.com/${encodedWallet}`;
+  }
+
+  return {
+    plainText,
+    htmlText,
+    buttonText,
+    buttonUrl,
+  };
+}
+
 

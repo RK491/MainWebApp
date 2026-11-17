@@ -69,6 +69,7 @@ export function WithdrawView({
   const channelGateActive = channelsGateEnabled && activeChannels.length > 0;
   const adGate = getWithdrawAdGateStatus(profile);
   const adGatePct = Math.min(100, Math.round((adGate.watched / adGate.required) * 100));
+  const channelGatePending = Boolean(channelGateActive && checkingChannels && !channelVerification);
   const channelGateBlocked =
     channelGateActive &&
     channelVerification?.verificationMode === 'telegram_bot' &&
@@ -95,9 +96,18 @@ export function WithdrawView({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setSuccessMsg(null);
+    if (channelGatePending) {
+      setErrorMsg('Verifying channel membership, please wait a second...');
+      return;
+    }
     if (channelGateBlocked) {
       const summary = formatChannelsHandleSummary(activeChannels);
       setErrorMsg(`Join ${summary} and tap Check Channels before withdrawing.`);
+      return;
+    }
+    if (channelGateActive && !channelVerification && onCheckChannels) {
+      onCheckChannels();
+      setErrorMsg('Checking required channel membership first — please tap Withdraw again once verified.');
       return;
     }
     const err = validateWithdrawalInput(profile, numericEggs, walletAddress);
@@ -371,18 +381,20 @@ export function WithdrawView({
 
         <button
           type="submit"
-          disabled={!adGate.unlocked || channelGateBlocked}
+          disabled={!adGate.unlocked || channelGateBlocked || channelGatePending}
           className={`clay-btn w-full min-h-[50px] rounded-2xl font-extrabold text-sm ${
-            adGate.unlocked && !channelGateBlocked
+            adGate.unlocked && !channelGateBlocked && !channelGatePending
               ? 'clay-btn-sky'
               : 'clay-inset text-stone-500 dark:text-stone-400 cursor-not-allowed shadow-none'
           }`}
         >
           {!adGate.unlocked
             ? `Watch ${adGate.remaining} More Ad${adGate.remaining === 1 ? '' : 's'} to Withdraw`
-            : channelGateBlocked
-              ? 'Join Required Channels to Withdraw'
-              : 'Withdraw'}
+            : channelGatePending
+              ? 'Verifying Channel Membership...'
+              : channelGateBlocked
+                ? 'Join Required Channels to Withdraw'
+                : 'Withdraw'}
         </button>
       </form>
 

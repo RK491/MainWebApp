@@ -65,6 +65,13 @@ export function ChannelCheckCard({
   const isCompact = variant === 'compact';
 
   const statusBadge = (() => {
+    if (checking && !verification) {
+      return {
+        label: 'Checking...',
+        className:
+          'bg-sky-50 dark:bg-sky-950/60 border-sky-200 dark:border-sky-800/70 text-sky-700 dark:text-sky-300',
+      };
+    }
     if (!verification) {
       return {
         label: 'Not Checked',
@@ -84,6 +91,13 @@ export function ChannelCheckCard({
         label: `${joinedCount}/${items.length} Joined`,
         className:
           'bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800/70 text-amber-700 dark:text-amber-300',
+      };
+    }
+    if (mode === 'guest_browser') {
+      return {
+        label: 'Open in Telegram',
+        className:
+          'bg-sky-50 dark:bg-sky-950/60 border-sky-200 dark:border-sky-800/70 text-sky-700 dark:text-sky-300',
       };
     }
     return {
@@ -156,7 +170,11 @@ export function ChannelCheckCard({
                     {ch.handle}
                   </div>
                   <div className="text-[11px] text-stone-500 dark:text-stone-400 break-words">
-                    {ch.error && ch.status !== 'no_telegram_user' ? ch.error : ch.title}
+                    {ch.error && ch.status !== 'no_telegram_user'
+                      ? ch.error
+                      : isStrictTelegram && !isJoined
+                        ? 'Not joined yet — tap Join then Check Channels'
+                        : ch.title}
                   </div>
                 </div>
               </div>
@@ -192,6 +210,12 @@ export function ChannelCheckCard({
       {verification && mode === 'bot_unconfigured' && (
         <div className="rounded-xl bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 px-3 py-2 text-[11px] font-semibold text-amber-800 dark:text-amber-300">
           Server bot verification requires TELEGRAM_BOT_TOKEN and adding the bot as an Admin in {summaryHandles}.
+        </div>
+      )}
+
+      {verification && mode === 'guest_browser' && (
+        <div className="rounded-xl bg-sky-50/90 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800/60 px-3 py-2 text-[11px] font-semibold text-sky-800 dark:text-sky-300">
+          Telegram ID not detected in this browser preview — open via your Telegram Bot Mini App to auto-verify membership.
         </div>
       )}
 
@@ -307,7 +331,11 @@ export function ChannelCheckModal({
                       {ch.handle}
                     </div>
                     <div className="text-xs text-stone-500 dark:text-stone-400 break-words">
-                      {ch.error && ch.status !== 'no_telegram_user' ? ch.error : ch.description}
+                      {ch.error && ch.status !== 'no_telegram_user'
+                        ? ch.error
+                        : isStrictTelegram && !isJoined
+                          ? 'Not joined yet — tap Join then Check Channels'
+                          : ch.description}
                     </div>
                   </div>
                 </div>
@@ -334,6 +362,12 @@ export function ChannelCheckModal({
         {verification?.verificationMode === 'bot_unconfigured' && (
           <div className="rounded-xl bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 px-3 py-2 text-[11px] font-semibold text-amber-800 dark:text-amber-300">
             Bot verification requires TELEGRAM_BOT_TOKEN on the server and adding the bot as an Admin in each channel.
+          </div>
+        )}
+
+        {verification?.verificationMode === 'guest_browser' && (
+          <div className="rounded-xl bg-sky-50/90 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800/60 px-3 py-2 text-[11px] font-semibold text-sky-800 dark:text-sky-300">
+            Open this Mini App inside your Telegram Bot so we can verify your Telegram membership automatically.
           </div>
         )}
 

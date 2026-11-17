@@ -5,6 +5,7 @@ import {
   Ban,
   Check,
   CheckCircle2,
+  ChevronDown,
   ClipboardCheck,
   Clock,
   Coins,
@@ -25,12 +26,14 @@ import {
   Loader2,
   Lock,
   Megaphone,
+  MessageSquare,
   Minus,
   PauseCircle,
   PlayCircle,
   Plus,
   Radio,
   RefreshCw,
+  RotateCcw,
   Search,
   Send,
   Share2,
@@ -42,6 +45,7 @@ import {
   Ticket,
   Trash2,
   Unlink,
+  Upload,
   UserCheck,
   UserPlus,
   Users,
@@ -64,6 +68,7 @@ import type {
   RequiredTelegramChannel,
   TaskDefinition,
   UserFarmProfile,
+  WithdrawApproveMessageTemplate,
   WithdrawRequestRecord,
 } from '../types/farm';
 import {
@@ -72,6 +77,7 @@ import {
   canBanPlayerId,
   CHICKEN_PACKS,
   DEFAULT_GET_CODE_CHANNEL_URL,
+  DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
   extractTelegramNumericUserId,
   filterPlayersBySearchQuery,
   formatAdConfigTemplate,
@@ -87,6 +93,7 @@ import {
   normalizeTelegramChannelEntry,
   parseAdConfigTemplate,
   PRIMARY_ADMIN_TELEGRAM_ID,
+  renderWithdrawApproveMessage,
 } from '../game/economy';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
 
@@ -118,6 +125,17 @@ interface BroadcastResult {
   error?: string;
 }
 
+interface BroadcastAudienceStats {
+  ok: boolean;
+  totalRecipients?: number;
+  botSubscriberCount?: number;
+  blockedBotCount?: number;
+  playerRecipientCount?: number;
+  newUpdates?: number;
+  webhookActive?: boolean;
+  error?: string;
+}
+
 interface AdminPanelViewProps {
   playerId: string;
   adminUnlocked: boolean;
@@ -128,6 +146,10 @@ interface AdminPanelViewProps {
   onTestChannels?: (channels?: RequiredTelegramChannel[]) => Promise<ChannelDiagnosticResult>;
   onLockAdmin?: () => void;
   withdrawRequests: WithdrawRequestRecord[];
+  withdrawApproveTemplate?: WithdrawApproveMessageTemplate;
+  onSaveWithdrawApproveTemplate?: (
+    template: Omit<WithdrawApproveMessageTemplate, 'updatedAtMs'>,
+  ) => Promise<boolean | void>;
   customTasks: TaskDefinition[];
   adConfig: AdConfig;
   channelsConfig: ChannelsConfig;
@@ -208,11 +230,15 @@ interface AdminPanelViewProps {
     handle?: string;
   }) => Promise<void>;
   onRemoveAdmin: (targetId: string) => Promise<void>;
+  onFetchBroadcastStats?: (excludeBanned: boolean) => Promise<BroadcastAudienceStats>;
+  onSyncBotSubscribers?: () => Promise<BroadcastAudienceStats>;
   onSendBroadcast?: (input: {
     title: string;
     message: string;
     mediaType: 'none' | 'photo' | 'video' | 'animation';
     mediaUrl?: string;
+    mediaDataUrl?: string;
+    mediaFilename?: string;
     buttonText?: string;
     buttonUrl?: string;
     excludeBanned?: boolean;
@@ -304,6 +330,8 @@ export function AdminPanelView({
   onTestChannels,
   onLockAdmin,
   withdrawRequests,
+  withdrawApproveTemplate = DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
+  onSaveWithdrawApproveTemplate,
   customTasks,
   adConfig,
   channelsConfig,
@@ -332,6 +360,8 @@ export function AdminPanelView({
   onRemoveReferralRelation,
   onAddAdmin,
   onRemoveAdmin,
+  onFetchBroadcastStats,
+  onSyncBotSubscribers,
   onSendBroadcast,
 }: AdminPanelViewProps) {
   const extraAdminIds = useMemo(
@@ -353,6 +383,20 @@ export function AdminPanelView({
   const [noteById, setNoteById] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  // Payout approval user DM template editor state
+  const [wdTemplateOpen, setWdTemplateOpen] = useState(false);
+  const [wdMsgDraft, setWdMsgDraft] = useState(withdrawApproveTemplate.messageTemplate);
+  const [wdBtnTextDraft, setWdBtnTextDraft] = useState(withdrawApproveTemplate.buttonText);
+  const [wdBtnUrlDraft, setWdBtnUrlDraft] = useState(withdrawApproveTemplate.buttonUrlTemplate);
+  const [savingWdTemplate, setSavingWdTemplate] = useState(false);
+  const [wdTemplateFeedback, setWdTemplateFeedback] = useState<string | null>(null);
+
+  useEffect(() => {
+    setWdMsgDraft(withdrawApproveTemplate.messageTemplate);
+    setWdBtnTextDraft(withdrawApproveTemplate.buttonText);
+    setWdBtnUrlDraft(withdrawApproveTemplate.buttonUrlTemplate);
+  }, [withdrawApproveTemplate]);
 
   // User Management & Inspector state
   const [userSearch, setUserSearch] = useState('');
@@ -436,12 +480,37 @@ export function AdminPanelView({
   const [bcastMessage, setBcastMessage] = useState('');
   const [bcastMediaType, setBcastMediaType] = useState<'none' | 'photo' | 'video' | 'animation'>('none');
   const [bcastMediaUrl, setBcastMediaUrl] = useState('');
+  const [bcastMediaDataUrl, setBcastMediaDataUrl] = useState('');
+  const [bcastMediaFilename, setBcastMediaFilename] = useState('');
+  const [bcastMediaFileSize, setBcastMediaFileSize] = useState(0);
+  const [bcastFileError, setBcastFileError] = useState<string | null>(null);
   const [bcastButtonText, setBcastButtonText] = useState('');
   const [bcastButtonUrl, setBcastButtonUrl] = useState('');
   const [bcastExcludeBanned, setBcastExcludeBanned] = useState(true);
   const [bcastPreviewError, setBcastPreviewError] = useState(false);
   const [sendingBroadcast, setSendingBroadcast] = useState<'test' | 'all' | null>(null);
   const [broadcastResult, setBroadcastResult] = useState<BroadcastResult | null>(null);
+  const [bcastAudienceStats, setBcastAudienceStats] = useState<BroadcastAudienceStats | null>(null);
+  const [loadingBcastStats, setLoadingBcastStats] = useState(false);
+  const [syncingBotUsers, setSyncingBotUsers] = useState(false);
+
+  useEffect(() => {
+    if (!adminUnlocked || tab !== 'broadcast' || !onFetchBroadcastStats) return;
+    let cancelled = false;
+    setLoadingBcastStats(true);
+    void onFetchBroadcastStats(bcastExcludeBanned)
+      .then((res) => {
+        if (!cancelled && res.ok) {
+          setBcastAudienceStats(res);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingBcastStats(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [adminUnlocked, tab, bcastExcludeBanned, onFetchBroadcastStats]);
 
   // Guided 3-step Gift Code Generator state
   const [giftStep, setGiftStep] = useState<1 | 2 | 3>(1);
@@ -3046,8 +3115,222 @@ export function AdminPanelView({
       {/* ========================================================================
           WITHDRAWALS / PAYOUTS TAB
          ======================================================================== */}
-      {tab === 'withdrawals' && (
+      {tab === 'withdrawals' && (() => {
+        const sampleReq = withdrawRequests[0];
+        const previewRendered = renderWithdrawApproveMessage({
+          template: {
+            messageTemplate: wdMsgDraft,
+            buttonText: wdBtnTextDraft,
+            buttonUrlTemplate: wdBtnUrlDraft,
+          },
+          gramAmount: sampleReq?.gramAmount || '0.011239',
+          eggsAmount: sampleReq?.eggsAmount ?? 11239,
+          walletAddress: sampleReq?.walletAddress || 'UQD_gSExampleWalletAddressMcrwh',
+          usdValue: sampleReq?.usdValue ?? 0.0112,
+          displayName: sampleReq?.displayName || 'Farmer',
+          handle: sampleReq?.handle || '@farmer',
+          txId: sampleReq?.txId || 'wd_demo123',
+          memo: sampleReq?.memo || '',
+          adminNote: 'Sent on TON',
+        });
+        const previewLines = previewRendered.plainText.split('\n');
+
+        return (
         <div key="admin-tab-withdrawals" className="animate-clay-enter space-y-3">
+          {/* Collapsible User Approval DM Template Editor */}
+          <div className="clay-card !rounded-2xl overflow-hidden">
+            <button
+              type="button"
+              onClick={() => {
+                onTabTap?.();
+                setWdTemplateOpen((v) => !v);
+              }}
+              className="w-full px-4 py-3 flex items-center justify-between gap-2 text-left hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors cursor-pointer"
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-xl clay-icon-well-mint text-emerald-700 dark:text-emerald-300 flex items-center justify-center shrink-0">
+                  <MessageSquare className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-extrabold text-stone-900 dark:text-stone-100 truncate">
+                    Approval User DM Message Editor
+                  </div>
+                  <div className="text-[11px] text-stone-500 dark:text-stone-400 truncate">
+                    Auto-sent to user&apos;s Telegram DM when you approve a withdrawal
+                  </div>
+                </div>
+              </div>
+              <ChevronDown
+                className={`w-4 h-4 text-stone-500 transition-transform shrink-0 ${
+                  wdTemplateOpen ? 'rotate-180' : ''
+                }`}
+              />
+            </button>
+
+            {wdTemplateOpen && (
+              <div className="px-4 pb-4 pt-1 border-t border-stone-200/70 dark:border-stone-700/70 space-y-3">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label
+                      htmlFor="wd-dm-template"
+                      className="text-xs font-bold text-stone-700 dark:text-stone-300"
+                    >
+                      DM Message Template
+                    </label>
+                    <span className="font-mono-num text-[11px] text-stone-400">
+                      {wdMsgDraft.length}/1500
+                    </span>
+                  </div>
+                  <textarea
+                    id="wd-dm-template"
+                    rows={7}
+                    maxLength={1500}
+                    value={wdMsgDraft}
+                    onChange={(e) => {
+                      setWdMsgDraft(e.target.value);
+                      setWdTemplateFeedback(null);
+                    }}
+                    className="clay-inset w-full p-3 text-xs font-mono-num font-medium text-stone-900 dark:text-stone-100 resize-y min-h-[140px]"
+                  />
+                  <div className="flex flex-wrap gap-1.5 pt-0.5">
+                    {[
+                      '{gramAmount}',
+                      '{eggsAmount}',
+                      '{walletShort}',
+                      '{walletAddress}',
+                      '{txUrl}',
+                      '{displayName}',
+                      '{adminNote}',
+                    ].map((tok) => (
+                      <button
+                        key={tok}
+                        type="button"
+                        onClick={() => {
+                          setWdMsgDraft((prev) => (prev + (prev.endsWith('\n') || !prev ? '' : ' ') + tok).slice(0, 1500));
+                          setWdTemplateFeedback(null);
+                        }}
+                        className="px-2 py-1 rounded-lg bg-stone-100 dark:bg-stone-800 hover:bg-stone-200 dark:hover:bg-stone-700 text-[10px] font-mono-num font-extrabold text-stone-700 dark:text-stone-200 cursor-pointer"
+                      >
+                        +{tok}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="wd-dm-btn-text"
+                      className="text-xs font-bold text-stone-700 dark:text-stone-300"
+                    >
+                      Inline Button Label (optional)
+                    </label>
+                    <input
+                      id="wd-dm-btn-text"
+                      type="text"
+                      maxLength={48}
+                      value={wdBtnTextDraft}
+                      onChange={(e) => {
+                        setWdBtnTextDraft(e.target.value);
+                        setWdTemplateFeedback(null);
+                      }}
+                      placeholder="🔎 View transaction"
+                      className="clay-inset w-full min-h-[40px] px-3 text-xs font-bold text-stone-900 dark:text-stone-100"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="wd-dm-btn-url"
+                      className="text-xs font-bold text-stone-700 dark:text-stone-300"
+                    >
+                      Button Link Template
+                    </label>
+                    <input
+                      id="wd-dm-btn-url"
+                      type="text"
+                      maxLength={256}
+                      value={wdBtnUrlDraft}
+                      onChange={(e) => {
+                        setWdBtnUrlDraft(e.target.value);
+                        setWdTemplateFeedback(null);
+                      }}
+                      placeholder="https://tonviewer.com/{walletAddress}"
+                      className="clay-inset w-full min-h-[40px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100"
+                    />
+                  </div>
+                </div>
+
+                {/* Live Telegram Dark Bubble Preview */}
+                <div className="space-y-1">
+                  <div className="text-[10px] font-extrabold uppercase tracking-wider text-stone-500 dark:text-stone-400">
+                    Live Telegram DM Preview
+                  </div>
+                  <div className="rounded-2xl bg-[#0e1621] p-3 space-y-1.5 border border-slate-800">
+                    <div className="rounded-xl bg-[#182533] px-3.5 py-2.5 text-xs text-slate-100 whitespace-pre-wrap leading-relaxed">
+                      {previewLines.map((line, i) => (
+                        <div key={i} className={i === 0 ? 'font-extrabold text-white' : ''}>
+                          {line || '\u00A0'}
+                        </div>
+                      ))}
+                    </div>
+                    {previewRendered.buttonText && (
+                      <div className="rounded-xl bg-[#2b5278]/70 px-3 py-2 text-center text-xs font-bold text-white flex items-center justify-center gap-1.5">
+                        <span>{previewRendered.buttonText}</span>
+                        <ExternalLink className="w-3 h-3 opacity-80" />
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {wdTemplateFeedback && (
+                  <p className="text-xs font-bold text-emerald-700 dark:text-emerald-300">
+                    {wdTemplateFeedback}
+                  </p>
+                )}
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={savingWdTemplate || !wdMsgDraft.trim() || !onSaveWithdrawApproveTemplate}
+                    onClick={async () => {
+                      if (!onSaveWithdrawApproveTemplate) return;
+                      setSavingWdTemplate(true);
+                      setWdTemplateFeedback(null);
+                      try {
+                        const ok = await onSaveWithdrawApproveTemplate({
+                          messageTemplate: wdMsgDraft.trim(),
+                          buttonText: wdBtnTextDraft.trim(),
+                          buttonUrlTemplate: wdBtnUrlDraft.trim() || DEFAULT_WITHDRAW_APPROVE_TEMPLATE.buttonUrlTemplate,
+                        });
+                        if (ok !== false) {
+                          setWdTemplateFeedback('Saved! Future withdrawal approvals will DM users with this template.');
+                        }
+                      } finally {
+                        setSavingWdTemplate(false);
+                      }
+                    }}
+                    className="clay-btn clay-btn-emerald flex-1 min-h-[40px] rounded-xl text-xs font-extrabold disabled:opacity-50"
+                  >
+                    {savingWdTemplate ? 'Saving...' : 'Save Approval Message'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setWdMsgDraft(DEFAULT_WITHDRAW_APPROVE_TEMPLATE.messageTemplate);
+                      setWdBtnTextDraft(DEFAULT_WITHDRAW_APPROVE_TEMPLATE.buttonText);
+                      setWdBtnUrlDraft(DEFAULT_WITHDRAW_APPROVE_TEMPLATE.buttonUrlTemplate);
+                      setWdTemplateFeedback(null);
+                    }}
+                    className="clay-btn clay-btn-neutral min-h-[40px] px-3 rounded-xl text-xs font-extrabold inline-flex items-center gap-1"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Reset</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
           <div className="clay-card !rounded-2xl p-3.5 space-y-2.5">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
               <div className="relative flex-1">
@@ -3295,7 +3578,8 @@ export function AdminPanelView({
             </div>
           )}
         </div>
-      )}
+        );
+      })()}
 
       {/* ========================================================================
           GIFT CODES / PROMOS TAB — GUIDED 3-STEP GENERATOR
@@ -4933,12 +5217,59 @@ export function AdminPanelView({
       {tab === 'broadcast' && (() => {
         const cleanMediaUrl = bcastMediaUrl.trim();
         const isHttpsMedia = cleanMediaUrl.startsWith('https://');
+        const hasUploadedMedia = Boolean(bcastMediaDataUrl);
         const maxMessageLen = bcastMediaType === 'none' ? 2000 : 950;
         const canSend =
           Boolean(onSendBroadcast) &&
           !sendingBroadcast &&
           (bcastTitle.trim().length > 0 || bcastMessage.trim().length > 0) &&
-          (bcastMediaType === 'none' || isHttpsMedia);
+          (bcastMediaType === 'none' || isHttpsMedia || hasUploadedMedia);
+
+        const handlePickBroadcastFile = (file: File | null) => {
+          setBcastFileError(null);
+          if (!file) return;
+          if (file.size > 10 * 1024 * 1024) {
+            setBcastFileError('File exceeds 10 MB limit. Choose a smaller image/video/GIF.');
+            return;
+          }
+          const mime = (file.type || '').toLowerCase();
+          if (mime.startsWith('video/')) {
+            setBcastMediaType('video');
+          } else if (mime === 'image/gif') {
+            setBcastMediaType('animation');
+          } else if (mime.startsWith('image/')) {
+            setBcastMediaType('photo');
+          } else {
+            setBcastFileError('Unsupported file format. Please select an image, GIF, or MP4/WebM video.');
+            return;
+          }
+          const reader = new FileReader();
+          reader.onload = () => {
+            if (typeof reader.result === 'string') {
+              setBcastMediaDataUrl(reader.result);
+              setBcastMediaFilename(file.name);
+              setBcastMediaFileSize(file.size);
+              setBcastPreviewError(false);
+            }
+          };
+          reader.onerror = () => {
+            setBcastFileError('Could not read the selected file.');
+          };
+          reader.readAsDataURL(file);
+        };
+
+        const handleSyncBotClick = async () => {
+          if (!onSyncBotSubscribers || syncingBotUsers) return;
+          setSyncingBotUsers(true);
+          try {
+            const res = await onSyncBotSubscribers();
+            if (res.ok) {
+              setBcastAudienceStats(res);
+            }
+          } finally {
+            setSyncingBotUsers(false);
+          }
+        };
 
         const triggerBroadcast = async (testOnlyToAdmin: boolean) => {
           if (!onSendBroadcast || sendingBroadcast) return;
@@ -4949,7 +5280,9 @@ export function AdminPanelView({
               title: bcastTitle.trim(),
               message: bcastMessage.trim(),
               mediaType: bcastMediaType,
-              mediaUrl: bcastMediaType !== 'none' ? cleanMediaUrl : undefined,
+              mediaUrl: bcastMediaType !== 'none' && !hasUploadedMedia ? cleanMediaUrl : undefined,
+              mediaDataUrl: bcastMediaType !== 'none' && hasUploadedMedia ? bcastMediaDataUrl : undefined,
+              mediaFilename: bcastMediaType !== 'none' && hasUploadedMedia ? bcastMediaFilename : undefined,
               buttonText: bcastButtonText.trim() || undefined,
               buttonUrl: bcastButtonText.trim() ? bcastButtonUrl.trim() : undefined,
               excludeBanned: bcastExcludeBanned,
@@ -4976,7 +5309,7 @@ export function AdminPanelView({
                     <span>Telegram Bot Broadcast</span>
                   </h2>
                   <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
-                    Send announcement DMs (with optional photo, video, or GIF) to all registered Telegram players.
+                    Reach everyone who started your Telegram bot or opened the Mini App — with text, uploaded media, or HTTPS links.
                   </p>
                 </div>
                 {serverBotConfigured === false && (
@@ -4984,6 +5317,58 @@ export function AdminPanelView({
                     Bot Offline
                   </span>
                 )}
+              </div>
+
+              {/* Bot Audience Reach Summary */}
+              <div className="clay-inset !rounded-2xl p-3 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-extrabold uppercase tracking-wider text-stone-500 dark:text-stone-400">
+                    Bot Broadcast Audience
+                  </span>
+                  {onSyncBotSubscribers && (
+                    <button
+                      type="button"
+                      disabled={syncingBotUsers}
+                      onClick={() => void handleSyncBotClick()}
+                      className="clay-btn clay-btn-sky px-2.5 py-1 rounded-lg text-[11px] font-extrabold inline-flex items-center gap-1 disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${syncingBotUsers ? 'animate-spin' : ''}`} />
+                      <span>{syncingBotUsers ? 'Syncing...' : 'Sync Bot Users'}</span>
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div className="rounded-xl bg-white/70 dark:bg-stone-900/70 px-2 py-2">
+                    <div className="text-[10px] font-bold text-stone-500 dark:text-stone-400">
+                      Bot Subscribers
+                    </div>
+                    <div className="text-sm font-extrabold font-mono-num text-sky-700 dark:text-sky-300">
+                      {loadingBcastStats && !bcastAudienceStats
+                        ? '...'
+                        : (bcastAudienceStats?.botSubscriberCount ?? 0).toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="rounded-xl bg-white/70 dark:bg-stone-900/70 px-2 py-2">
+                    <div className="text-[10px] font-bold text-stone-500 dark:text-stone-400">
+                      App Players
+                    </div>
+                    <div className="text-sm font-extrabold font-mono-num text-stone-800 dark:text-stone-200">
+                      {loadingBcastStats && !bcastAudienceStats
+                        ? '...'
+                        : (bcastAudienceStats?.playerRecipientCount ?? 0).toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="rounded-xl bg-emerald-500/10 px-2 py-2">
+                    <div className="text-[10px] font-bold text-emerald-700 dark:text-emerald-300">
+                      Total Reachable
+                    </div>
+                    <div className="text-sm font-extrabold font-mono-num text-emerald-800 dark:text-emerald-200">
+                      {loadingBcastStats && !bcastAudienceStats
+                        ? '...'
+                        : (bcastAudienceStats?.totalRecipients ?? 0).toLocaleString()}
+                    </div>
+                  </div>
+                </div>
               </div>
 
               <div className="space-y-3">
@@ -5046,6 +5431,12 @@ export function AdminPanelView({
                             onTabTap?.();
                             setBcastMediaType(m.id);
                             setBcastPreviewError(false);
+                            setBcastFileError(null);
+                            if (m.id === 'none') {
+                              setBcastMediaDataUrl('');
+                              setBcastMediaFilename('');
+                              setBcastMediaFileSize(0);
+                            }
                           }}
                           className={`clay-btn min-h-[42px] px-2 rounded-xl text-xs font-extrabold flex items-center justify-center gap-1.5 ${
                             active
@@ -5062,34 +5453,103 @@ export function AdminPanelView({
                 </div>
 
                 {bcastMediaType !== 'none' && (
-                  <div className="space-y-2">
-                    <label htmlFor="bcast-media-url" className="text-xs font-bold text-stone-700 dark:text-stone-300 block">
-                      Public HTTPS Media URL ({bcastMediaType})
-                    </label>
-                    <input
-                      id="bcast-media-url"
-                      type="url"
-                      value={bcastMediaUrl}
-                      onChange={(e) => {
-                        setBcastMediaUrl(e.target.value);
-                        setBcastPreviewError(false);
-                      }}
-                      placeholder="https://example.com/banner.jpg"
-                      className="clay-inset w-full min-h-[44px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100"
-                    />
-                    {cleanMediaUrl && !isHttpsMedia && (
-                      <p className="text-[11px] font-bold text-rose-600 dark:text-rose-400">
-                        URL must start with https:// (local or http URLs are blocked).
-                      </p>
+                  <div className="space-y-2.5">
+                    {/* Device File Upload Option */}
+                    <div className="clay-inset !rounded-2xl p-3 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                          Upload from Device (max 10 MB)
+                        </span>
+                        {hasUploadedMedia && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setBcastMediaDataUrl('');
+                              setBcastMediaFilename('');
+                              setBcastMediaFileSize(0);
+                              setBcastFileError(null);
+                            }}
+                            className="text-[11px] font-bold text-rose-600 dark:text-rose-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <X className="w-3 h-3" />
+                            <span>Remove file</span>
+                          </button>
+                        )}
+                      </div>
+                      <label className="clay-btn clay-btn-neutral w-full min-h-[42px] px-3 rounded-xl text-xs font-extrabold flex items-center justify-center gap-2 cursor-pointer">
+                        <Upload className="w-4 h-4 text-sky-600 dark:text-sky-400 shrink-0" />
+                        <span className="truncate">
+                          {hasUploadedMedia
+                            ? `${bcastMediaFilename} (${(bcastMediaFileSize / 1024).toFixed(0)} KB)`
+                            : `Choose ${bcastMediaType === 'video' ? 'Video (MP4/WebM)' : bcastMediaType === 'animation' ? 'GIF' : 'Photo (JPG/PNG/WebP)'}`}
+                        </span>
+                        <input
+                          type="file"
+                          className="hidden"
+                          accept={
+                            bcastMediaType === 'video'
+                              ? 'video/mp4,video/webm,video/quicktime'
+                              : bcastMediaType === 'animation'
+                                ? 'image/gif,image/*'
+                                : 'image/jpeg,image/png,image/webp,image/gif'
+                          }
+                          onChange={(e) => {
+                            const f = e.target.files?.[0] || null;
+                            handlePickBroadcastFile(f);
+                            e.currentTarget.value = '';
+                          }}
+                        />
+                      </label>
+                      {bcastFileError && (
+                        <p className="text-[11px] font-bold text-rose-600 dark:text-rose-400">
+                          {bcastFileError}
+                        </p>
+                      )}
+                    </div>
+
+                    {!hasUploadedMedia && (
+                      <div className="space-y-1.5">
+                        <label htmlFor="bcast-media-url" className="text-xs font-bold text-stone-700 dark:text-stone-300 block">
+                          Or Paste Public HTTPS Media URL ({bcastMediaType})
+                        </label>
+                        <input
+                          id="bcast-media-url"
+                          type="url"
+                          value={bcastMediaUrl}
+                          onChange={(e) => {
+                            setBcastMediaUrl(e.target.value);
+                            setBcastPreviewError(false);
+                          }}
+                          placeholder="https://example.com/banner.jpg"
+                          className="clay-inset w-full min-h-[44px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100"
+                        />
+                        {cleanMediaUrl && !isHttpsMedia && (
+                          <p className="text-[11px] font-bold text-rose-600 dark:text-rose-400">
+                            URL must start with https:// (or use Upload from Device above).
+                          </p>
+                        )}
+                      </div>
                     )}
-                    {isHttpsMedia && (bcastMediaType === 'photo' || bcastMediaType === 'animation') && !bcastPreviewError && (
+
+                    {(hasUploadedMedia || isHttpsMedia) &&
+                      (bcastMediaType === 'photo' || bcastMediaType === 'animation') &&
+                      !bcastPreviewError && (
+                        <div className="clay-inset !rounded-2xl p-2 overflow-hidden">
+                          <img
+                            src={hasUploadedMedia ? bcastMediaDataUrl : cleanMediaUrl}
+                            alt="Broadcast media preview"
+                            referrerPolicy="no-referrer"
+                            onError={() => setBcastPreviewError(true)}
+                            className="w-full max-h-48 object-cover rounded-xl"
+                          />
+                        </div>
+                      )}
+                    {hasUploadedMedia && bcastMediaType === 'video' && (
                       <div className="clay-inset !rounded-2xl p-2 overflow-hidden">
-                        <img
-                          src={cleanMediaUrl}
-                          alt="Broadcast media preview"
-                          referrerPolicy="no-referrer"
-                          onError={() => setBcastPreviewError(true)}
-                          className="w-full max-h-48 object-cover rounded-xl"
+                        <video
+                          src={bcastMediaDataUrl}
+                          controls
+                          className="w-full max-h-48 rounded-xl bg-black"
                         />
                       </div>
                     )}

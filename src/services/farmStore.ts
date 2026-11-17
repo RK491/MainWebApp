@@ -38,6 +38,7 @@ import {
   DEFAULT_AD_CONFIG,
   DEFAULT_ADMINS_CONFIG,
   DEFAULT_CHANNELS_CONFIG,
+  DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
   eggsToUsd,
   encodeAchievementsWithAds,
   encodePromoLabelMeta,
@@ -76,6 +77,7 @@ import type {
   TaskDefinition,
   TransactionEntry,
   UserFarmProfile,
+  WithdrawApproveMessageTemplate,
   WithdrawalOrder,
   WithdrawRequestRecord,
 } from '../types/farm';
@@ -3329,6 +3331,65 @@ export async function adminRemoveReferralRelationInFirestore(params: {
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `players/${referrerUid}/referrals/${referredUid}`);
+  }
+}
+
+export function subscribeToWithdrawApproveTemplate(
+  onUpdate: (template: WithdrawApproveMessageTemplate) => void,
+): () => void {
+  return onSnapshot(
+    doc(db, 'app_config', 'payout_template'),
+    (snap) => {
+      if (!snap.exists()) {
+        onUpdate(DEFAULT_WITHDRAW_APPROVE_TEMPLATE);
+        return;
+      }
+      const d = snap.data();
+      const rawBody =
+        typeof d.messageTemplate === 'string' && d.messageTemplate.trim().length > 0
+          ? d.messageTemplate.slice(0, 1500)
+          : DEFAULT_WITHDRAW_APPROVE_TEMPLATE.messageTemplate;
+      const rawBtnText =
+        typeof d.buttonText === 'string'
+          ? d.buttonText.slice(0, 48)
+          : DEFAULT_WITHDRAW_APPROVE_TEMPLATE.buttonText;
+      const rawBtnUrl =
+        typeof d.buttonUrlTemplate === 'string' && d.buttonUrlTemplate.trim().length > 0
+          ? d.buttonUrlTemplate.trim().slice(0, 256)
+          : DEFAULT_WITHDRAW_APPROVE_TEMPLATE.buttonUrlTemplate;
+      onUpdate({
+        messageTemplate: rawBody,
+        buttonText: rawBtnText,
+        buttonUrlTemplate: rawBtnUrl,
+        updatedAtMs: Number(d.updatedAtMs ?? 0),
+      });
+    },
+    (err) => logSubscriptionError('app_config/payout_template', err),
+  );
+}
+
+export async function saveWithdrawApproveTemplateInFirestore(
+  input: Omit<WithdrawApproveMessageTemplate, 'updatedAtMs'>,
+): Promise<WithdrawApproveMessageTemplate> {
+  const nowMs = Date.now();
+  const payload: WithdrawApproveMessageTemplate = {
+    messageTemplate:
+      String(input.messageTemplate || '').trim().slice(0, 1500) ||
+      DEFAULT_WITHDRAW_APPROVE_TEMPLATE.messageTemplate,
+    buttonText: String(input.buttonText ?? '').trim().slice(0, 48),
+    buttonUrlTemplate:
+      String(input.buttonUrlTemplate || '').trim().slice(0, 256) ||
+      DEFAULT_WITHDRAW_APPROVE_TEMPLATE.buttonUrlTemplate,
+    updatedAtMs: nowMs,
+  };
+  try {
+    await setDoc(doc(db, 'app_config', 'payout_template'), {
+      ...payload,
+      updatedAt: serverTimestamp(),
+    });
+    return payload;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'app_config/payout_template');
   }
 }
 

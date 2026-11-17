@@ -43,6 +43,7 @@ import {
   DEFAULT_GET_CODE_CHANNEL_URL,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
+  DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
   eggsToUsd,
   executeDeposit,
   executeWithdrawal,
@@ -97,6 +98,7 @@ import {
   reviewWithdrawalInFirestore,
   saveAdConfigInFirestore,
   saveChannelsConfigInFirestore,
+  saveWithdrawApproveTemplateInFirestore,
   searchUsersInFirestore,
   subscribeToAdConfig,
   subscribeToAdminsConfig,
@@ -110,6 +112,7 @@ import {
   subscribeToPromoCodes,
   subscribeToRecentPlayers,
   subscribeToSeasonConfig,
+  subscribeToWithdrawApproveTemplate,
   toggleCustomTaskInFirestore,
   togglePromoCodeInFirestore,
   topUpPaidCustomTaskInFirestore,
@@ -138,6 +141,7 @@ import type {
   TaskDefinition,
   TransactionEntry,
   UserFarmProfile,
+  WithdrawApproveMessageTemplate,
   WithdrawalOrder,
   WithdrawRequestRecord,
 } from './types/farm';
@@ -148,15 +152,12 @@ import {
 } from './utils/ads';
 import { getStoredLanguage, setStoredLanguage, t } from './utils/i18n';
 import {
-  type BrowserNotificationPermission,
   calculateMsUntilBasketFull,
   dispatchBasketFullNotification,
-  getBasketNotificationPreference,
   getBrowserNotificationPermission,
   getStoredLastNotifiedCycle,
   isDocumentBackgrounded,
   requestBrowserNotificationPermission,
-  setBasketNotificationPreference,
   setStoredLastNotifiedCycle,
   shouldTriggerBasketFullNotification,
 } from './utils/notifications';
@@ -257,6 +258,8 @@ export default function App() {
   const [adConfig, setAdConfig] = useState<AdConfig>(DEFAULT_AD_CONFIG);
   const [channelsConfig, setChannelsConfig] = useState<ChannelsConfig>(DEFAULT_CHANNELS_CONFIG);
   const [allWithdrawRequests, setAllWithdrawRequests] = useState<WithdrawRequestRecord[]>([]);
+  const [withdrawApproveTemplate, setWithdrawApproveTemplate] =
+    useState<WithdrawApproveMessageTemplate>(DEFAULT_WITHDRAW_APPROVE_TEMPLATE);
   const [promoCodes, setPromoCodes] = useState<DynamicPromoCode[]>([]);
   const [recentPlayers, setRecentPlayers] = useState<UserFarmProfile[]>([]);
   const [leaderboardEntries, setLeaderboardEntries] = useState<LeaderboardEntry[]>([]);
@@ -288,6 +291,14 @@ export default function App() {
     [channelsConfig],
   );
   const channelsGateEnabled = channelsConfig.enabled && activeRequiredChannels.length > 0;
+  const activeChannelsSignature = useMemo(
+    () =>
+      activeRequiredChannels
+        .map((c) => c.handle.trim().toLowerCase())
+        .sort()
+        .join(','),
+    [activeRequiredChannels],
+  );
 
   const [activeTab, setActiveTab] = useState<NavTab>('farm');
   const [subView, setSubView] = useState<SubView>(() => {
@@ -326,12 +337,11 @@ export default function App() {
   const soundsEnabled = audioSettings.soundsEnabled;
   const allAudioMuted = isAllAudioMuted(audioSettings);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => getStoredTheme());
-  const [notificationPermission, setNotificationPermission] = useState<BrowserNotificationPermission>(() =>
+  const [notificationPermission, setNotificationPermission] = useState(() =>
     getBrowserNotificationPermission(),
   );
-  const [notificationsEnabled, setNotificationsEnabled] = useState<boolean>(() =>
-    getBasketNotificationPreference(),
-  );
+  // Basket Full Alerts are mandatory & always enabled
+  const notificationsEnabled = true;
   const lastNotifiedCollectedAtRef = useRef<number | null>(getStoredLastNotifiedCycle());
   const [toastText, setToastText] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -356,6 +366,7 @@ export default function App() {
   const [showChannelGateModal, setShowChannelGateModal] = useState(false);
   const [pendingPromoClaimCode, setPendingPromoClaimCode] = useState<string | null>(null);
   const pendingPromoClaimCodeRef = useRef<string | null>(null);
+  const lastAutoChannelCheckAtRef = useRef<number>(0);
 
   const skipWelcome = useMemo(() => {
     if (typeof window === 'undefined') return false;
@@ -442,9 +453,12 @@ export default function App() {
     }
 
     const handleFirstGesture = () => {
-      if (!isBannedRef.current) {
+      if (!isBannedRef.current && document.visibilityState !== 'hidden') {
         syncAmbientMusic(true);
       }
+    };
+    const handleBackgroundPause = () => {
+      stopAmbientMusic();
     };
     const handleVisibility = () => {
       if (document.visibilityState === 'hidden' || isBannedRef.current) {
@@ -459,6 +473,10 @@ export default function App() {
     window.addEventListener('click', handleFirstGesture, { passive: true });
     window.addEventListener('keydown', handleFirstGesture, { passive: true });
     document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('pagehide', handleBackgroundPause);
+    window.addEventListener('blur', handleBackgroundPause);
+    window.addEventListener('pageshow', handleVisibility);
+    window.addEventListener('focus', handleVisibility);
 
     return () => {
       window.removeEventListener('pointerdown', handleFirstGesture);
@@ -466,6 +484,10 @@ export default function App() {
       window.removeEventListener('click', handleFirstGesture);
       window.removeEventListener('keydown', handleFirstGesture);
       document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('pagehide', handleBackgroundPause);
+      window.removeEventListener('blur', handleBackgroundPause);
+      window.removeEventListener('pageshow', handleVisibility);
+      window.removeEventListener('focus', handleVisibility);
       stopAmbientMusic();
     };
   }, [isBanned, musicEnabled]);
@@ -495,6 +517,7 @@ export default function App() {
   }, [activePlayerId, detectedIdentity.isTelegramDetected]);
 
   useEffect(() => {
+    if (playerSessionTokenRef.current) return;
     const initData = getTelegramInitData();
     if (!initData) return;
     void safeFetchJson<{ ok?: boolean; verified?: boolean; sessionToken?: string }>(
@@ -510,7 +533,7 @@ export default function App() {
         setPlayerSessionToken(res.sessionToken);
       }
     });
-  }, []);
+  }, [activePlayerId, detectedIdentity.isTelegramDetected]);
 
   const handleToggleMuteAll = useCallback(() => {
     const next = computeMuteAllToggle(audioSettings);
@@ -584,15 +607,13 @@ export default function App() {
         },
       });
     }
-  }, [notificationsEnabled]);
+  }, []);
 
   useEffect(() => {
     checkAndNotifyBasketFull();
   }, [checkAndNotifyBasketFull, nowMs, profile]);
 
   useEffect(() => {
-    if (!notificationsEnabled) return;
-
     const handleVisibilityOrFocusChange = () => {
       setNowMs(Date.now());
       checkAndNotifyBasketFull();
@@ -624,47 +645,23 @@ export default function App() {
       window.removeEventListener('focus', handleVisibilityOrFocusChange);
       if (timerId !== null) window.clearTimeout(timerId);
     };
-  }, [
-    checkAndNotifyBasketFull,
-    notificationsEnabled,
-    profile,
-  ]);
+  }, [checkAndNotifyBasketFull, profile]);
 
-  const handleToggleNotifications = useCallback(async () => {
-    const currentPerm = getBrowserNotificationPermission();
-    setNotificationPermission(currentPerm);
-
-    if (currentPerm === 'unsupported') {
-      showToast('Browser notifications are not supported on this device.');
-      return;
-    }
-
-    if (notificationsEnabled) {
-      setNotificationsEnabled(false);
-      setBasketNotificationPreference(false);
-      showToast('Basket full browser alerts turned off.');
-      return;
-    }
-
-    if (currentPerm === 'denied') {
-      showToast('Notifications blocked — allow them in your browser site settings.');
-      return;
-    }
-
-    const finalPerm =
-      currentPerm === 'granted' ? 'granted' : await requestBrowserNotificationPermission();
-    setNotificationPermission(finalPerm);
-
-    if (finalPerm === 'granted') {
-      setNotificationsEnabled(true);
-      setBasketNotificationPreference(true);
-      showToast('Basket full alerts enabled! We will remind you in the background.');
-    } else {
-      setNotificationsEnabled(false);
-      setBasketNotificationPreference(false);
-      showToast('Notification permission was not granted.');
-    }
-  }, [notificationsEnabled, showToast]);
+  // Mandatory basket full browser alert: request notification permission on first interaction when needed
+  useEffect(() => {
+    if (notificationPermission !== 'default') return;
+    let asked = false;
+    const askOnce = () => {
+      if (asked) return;
+      asked = true;
+      window.removeEventListener('pointerdown', askOnce);
+      void requestBrowserNotificationPermission().then(setNotificationPermission);
+    };
+    window.addEventListener('pointerdown', askOnce, { passive: true, once: true });
+    return () => {
+      window.removeEventListener('pointerdown', askOnce);
+    };
+  }, [notificationPermission]);
 
   // Verify Firestore connection, fetch server GRAM config & subscribe to live config collections
   useEffect(() => {
@@ -729,6 +726,9 @@ export default function App() {
     const unsubSeason = subscribeToSeasonConfig((cfg) => {
       setSeasonConfig(cfg);
     });
+    const unsubPayoutTemplate = subscribeToWithdrawApproveTemplate((tpl) => {
+      setWithdrawApproveTemplate(tpl);
+    });
     return () => {
       unsubTasks();
       unsubAds();
@@ -737,6 +737,7 @@ export default function App() {
       unsubAdmins();
       unsubLeaderboard();
       unsubSeason();
+      unsubPayoutTemplate();
     };
   }, []);
 
@@ -1050,7 +1051,7 @@ export default function App() {
 
       setCheckingChannels(true);
       try {
-        const data = await safeFetchJson<ChannelVerificationResult>('/api/telegram/check-channels', {
+        const res = await fetch('/api/telegram/check-channels', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1060,12 +1061,17 @@ export default function App() {
             requiredChannels: activeRequiredChannels,
           }),
         });
-        if (!data) {
+        const rawPayload = (await res.json().catch(() => null)) as
+          | (ChannelVerificationResult & { error?: string })
+          | null;
+
+        if (!res.ok || !rawPayload) {
           if (!opts?.silent) {
-            showToast('Could not verify channels right now. Please retry.');
+            showToast(rawPayload?.error || 'Could not verify channels right now. Please retry.');
           }
           return null;
         }
+        const data: ChannelVerificationResult = rawPayload;
         setChannelVerification(data);
 
         if (data.verificationMode === 'disabled') {
@@ -1127,7 +1133,7 @@ export default function App() {
         } else if (!opts?.silent) {
           if (data.verificationMode === 'guest_browser') {
             triggerHapticFeedback('warning');
-            showToast('Join all required channels above to verify membership.');
+            showToast('Open this Mini App inside your Telegram Bot to verify your membership.');
           } else {
             showToast('Bot verification pending TELEGRAM_BOT_TOKEN on server.');
           }
@@ -1146,6 +1152,41 @@ export default function App() {
     [activeRequiredChannels, channelsGateEnabled, executeClaimPromo, showToast, soundsEnabled],
   );
 
+  const handleVerifyTaskChannel = useCallback(
+    async (actionUrl: string): Promise<{ joined: boolean; handle?: string }> => {
+      if (!actionUrl || !extractTelegramNumericUserId(latestProfileRef.current.uid)) {
+        return { joined: true };
+      }
+      try {
+        const res = await fetch('/api/telegram/check-task-channel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            playerId: latestProfileRef.current.uid,
+            initData: getTelegramInitData(),
+            token: playerSessionTokenRef.current,
+            actionUrl,
+          }),
+        });
+        const data = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          enforced?: boolean;
+          joined?: boolean;
+          handle?: string;
+        } | null;
+        if (res.ok && data?.ok && data.enforced && !data.joined) {
+          triggerHapticFeedback('warning');
+          showToast(`Join ${data.handle || 'the channel'} first to claim this task!`);
+          return { joined: false, handle: data.handle };
+        }
+      } catch {
+        // Non-blocking on transient network issues
+      }
+      return { joined: true };
+    },
+    [showToast],
+  );
+
   useEffect(() => {
     if (!channelsGateEnabled) {
       setShowChannelGateModal(false);
@@ -1155,8 +1196,72 @@ export default function App() {
         setPendingPromoClaimCode(null);
         executeClaimPromo(pendingCode, false);
       }
+      return;
     }
-  }, [channelsGateEnabled, executeClaimPromo]);
+
+    // Invalidate stale cached verification if required channels changed
+    setChannelVerification((prev) => {
+      if (!prev || prev.verificationMode !== 'telegram_bot') return prev;
+      const prevSig = (prev.channels || [])
+        .map((c) => c.handle.trim().toLowerCase())
+        .sort()
+        .join(',');
+      if (prevSig !== activeChannelsSignature) {
+        return null;
+      }
+      return prev;
+    });
+  }, [activeChannelsSignature, channelsGateEnabled, executeClaimPromo]);
+
+  // Automatically check membership on startup, when opening Tasks/Withdraw, and on foreground return
+  useEffect(() => {
+    if (!channelsGateEnabled) return;
+    const numericId = extractTelegramNumericUserId(profile.uid);
+    if (!numericId) return;
+
+    const shouldAutoVerify =
+      activeTab === 'tasks' || subView === 'withdraw' || showChannelGateModal || !channelVerification;
+    if (!shouldAutoVerify) return;
+
+    const currentSig = (channelVerification?.channels || [])
+      .map((c) => c.handle.trim().toLowerCase())
+      .sort()
+      .join(',');
+    const freshVerifiedForCurrent =
+      channelVerification?.verificationMode === 'telegram_bot' &&
+      channelVerification.allJoined &&
+      currentSig === activeChannelsSignature &&
+      Date.now() - Number(channelVerification.checkedAtMs || 0) < 60_000;
+
+    if (!freshVerifiedForCurrent && Date.now() - lastAutoChannelCheckAtRef.current >= 4000) {
+      lastAutoChannelCheckAtRef.current = Date.now();
+      void handleCheckChannels({ silent: true });
+    }
+
+    const handleReturnRefresh = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (activeTab !== 'tasks' && subView !== 'withdraw' && !showChannelGateModal) return;
+      if (Date.now() - lastAutoChannelCheckAtRef.current >= 3000) {
+        lastAutoChannelCheckAtRef.current = Date.now();
+        void handleCheckChannels({ silent: true });
+      }
+    };
+    document.addEventListener('visibilitychange', handleReturnRefresh);
+    window.addEventListener('focus', handleReturnRefresh);
+    return () => {
+      document.removeEventListener('visibilitychange', handleReturnRefresh);
+      window.removeEventListener('focus', handleReturnRefresh);
+    };
+  }, [
+    activeChannelsSignature,
+    activeTab,
+    channelVerification,
+    channelsGateEnabled,
+    handleCheckChannels,
+    profile.uid,
+    showChannelGateModal,
+    subView,
+  ]);
 
   const pendingEggs = useMemo(
     () => calculatePendingEggs(profile, nowMs),
@@ -1433,7 +1538,12 @@ export default function App() {
   ) => {
     try {
       await reviewWithdrawalInFirestore({ request, decision, adminNote });
-      await safeFetchJson('/api/withdraw/notify', {
+      const notifyRes = await safeFetchJson<{
+        ok?: boolean;
+        sent?: boolean;
+        userDmSent?: boolean;
+        userDmReason?: string;
+      }>('/api/withdraw/notify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1452,11 +1562,19 @@ export default function App() {
           adminNote,
         }),
       });
-      showToast(
-        decision === 'approved'
-          ? `Approved ${request.gramAmount} GRAM for ${request.displayName}!`
-          : `Rejected request & refunded ${request.eggsAmount.toLocaleString()} eggs.`,
-      );
+      if (decision === 'approved') {
+        showToast(
+          notifyRes?.userDmSent
+            ? `Approved ${request.gramAmount} GRAM & sent DM to ${request.displayName}!`
+            : `Approved ${request.gramAmount} GRAM for ${request.displayName}!`,
+        );
+      } else {
+        showToast(
+          notifyRes?.userDmSent
+            ? `Rejected, refunded ${request.eggsAmount.toLocaleString()} eggs & notified user!`
+            : `Rejected request & refunded ${request.eggsAmount.toLocaleString()} eggs.`,
+        );
+      }
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to review withdrawal.');
     }
@@ -1990,11 +2108,112 @@ export default function App() {
     showToast(`Removed Co-Admin ${label}!`);
   };
 
+  const handleSaveWithdrawApproveTemplate = async (
+    tpl: Omit<WithdrawApproveMessageTemplate, 'updatedAtMs'>,
+  ): Promise<boolean> => {
+    try {
+      const saved = await saveWithdrawApproveTemplateInFirestore(tpl);
+      setWithdrawApproveTemplate(saved);
+      await safeFetchJson('/api/admin/payout-template', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...tpl,
+          token: adminSessionToken,
+          initData: getTelegramInitData(),
+        }),
+      });
+      playClaimSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      showToast('Withdrawal approval DM message saved!');
+      return true;
+    } catch {
+      showToast('Failed to save approval DM template.');
+      return false;
+    }
+  };
+
+  const handleFetchBroadcastStats = useCallback(
+    async (excludeBanned: boolean) => {
+      try {
+        const res = await fetch('/api/admin/broadcast/stats', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: adminSessionToken,
+            initData: getTelegramInitData(),
+            excludeBanned,
+          }),
+        });
+        const payload = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          totalRecipients?: number;
+          botSubscriberCount?: number;
+          blockedBotCount?: number;
+          playerRecipientCount?: number;
+          error?: string;
+        };
+        return { ok: Boolean(res.ok && payload.ok), ...payload };
+      } catch {
+        return { ok: false, error: 'Failed to load broadcast audience.' };
+      }
+    },
+    [adminSessionToken],
+  );
+
+  const handleSyncBotSubscribers = useCallback(async () => {
+    try {
+      const res = await fetch('/api/admin/telegram/sync-bot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: adminSessionToken,
+          initData: getTelegramInitData(),
+        }),
+      });
+      const payload = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        totalRecipients?: number;
+        botSubscriberCount?: number;
+        blockedBotCount?: number;
+        playerRecipientCount?: number;
+        poll?: { newUpdates?: number; webhookActive?: boolean; error?: string };
+        error?: string;
+      };
+      if (res.ok && payload.ok) {
+        const syncedNew = payload.poll?.newUpdates ?? 0;
+        showToast(
+          syncedNew > 0
+            ? `Synced ${syncedNew} new bot user${syncedNew === 1 ? '' : 's'}! Total: ${payload.totalRecipients ?? 0}`
+            : `Bot audience synced (${payload.totalRecipients ?? 0} reachable).`,
+        );
+        return {
+          ok: true,
+          totalRecipients: payload.totalRecipients,
+          botSubscriberCount: payload.botSubscriberCount,
+          blockedBotCount: payload.blockedBotCount,
+          playerRecipientCount: payload.playerRecipientCount,
+          newUpdates: syncedNew,
+          webhookActive: payload.poll?.webhookActive,
+        };
+      }
+      const errMsg = payload.error || payload.poll?.error || 'Could not sync bot users.';
+      showToast(errMsg);
+      return { ok: false, error: errMsg };
+    } catch {
+      const errMsg = 'Network error syncing bot subscribers.';
+      showToast(errMsg);
+      return { ok: false, error: errMsg };
+    }
+  }, [adminSessionToken, showToast]);
+
   const handleSendBroadcast = async (input: {
     title: string;
     message: string;
     mediaType: 'none' | 'photo' | 'video' | 'animation';
     mediaUrl?: string;
+    mediaDataUrl?: string;
+    mediaFilename?: string;
     buttonText?: string;
     buttonUrl?: string;
     excludeBanned?: boolean;
@@ -2678,6 +2897,8 @@ export default function App() {
           recentPlayers={recentPlayers}
           bannedUsers={bannedUsers}
           adminsConfig={adminsConfig}
+          withdrawApproveTemplate={withdrawApproveTemplate}
+          onSaveWithdrawApproveTemplate={handleSaveWithdrawApproveTemplate}
           onTabTap={() => playTabTapSound(soundsEnabled)}
           onBack={() => setSubView('none')}
           onReviewWithdrawal={handleReviewWithdrawal}
@@ -2699,6 +2920,8 @@ export default function App() {
           onRemoveReferralRelation={handleRemoveReferralRelation}
           onAddAdmin={handleAddAdmin}
           onRemoveAdmin={handleRemoveAdmin}
+          onFetchBroadcastStats={handleFetchBroadcastStats}
+          onSyncBotSubscribers={handleSyncBotSubscribers}
           onSendBroadcast={handleSendBroadcast}
         />
       );
@@ -2709,8 +2932,6 @@ export default function App() {
         <YourFarmView
           profile={profile}
           pendingEggs={pendingEggs}
-          notificationsEnabled={notificationsEnabled}
-          notificationPermission={notificationPermission}
           telegramRemindersEnabled={profile.telegramRemindersEnabled !== false}
           onBack={() => setSubView('none')}
           onUpgradeBasket={handleUpgradeBasket}
@@ -2719,7 +2940,6 @@ export default function App() {
             setActiveTab('packs');
           }}
           onOpenWithdraw={() => openSubView('withdraw')}
-          onToggleNotifications={() => void handleToggleNotifications()}
           onToggleTelegramReminders={handleToggleTelegramReminders}
           onActivateBooster={handleActivateBooster}
           onPurchaseAutoHarvestDrone={handlePurchaseAutoHarvestDrone}
@@ -2809,6 +3029,7 @@ export default function App() {
           channelsGateEnabled={channelsGateEnabled}
           checkingChannels={checkingChannels}
           onCheckChannels={() => handleCheckChannels()}
+          onVerifyTaskChannel={handleVerifyTaskChannel}
           onTabTap={() => playTabTapSound(soundsEnabled)}
           onClaimPromo={handleClaimPromo}
           onClaimDaily={handleClaimDaily}
@@ -3332,14 +3553,11 @@ export default function App() {
           currentLanguage={profile.language}
           musicEnabled={musicEnabled}
           soundsEnabled={soundsEnabled}
-          notificationsEnabled={notificationsEnabled}
-          notificationPermission={notificationPermission}
           telegramRemindersEnabled={profile.telegramRemindersEnabled !== false}
           themeMode={themeMode}
           onChangeLanguage={handleChangeLanguage}
           onToggleMusic={handleToggleMusic}
           onToggleSounds={handleToggleSounds}
-          onToggleNotifications={() => void handleToggleNotifications()}
           onToggleTelegramReminders={handleToggleTelegramReminders}
           onToggleTheme={handleToggleTheme}
           onClose={() => setShowSettings(false)}
