@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Award, Package, Sparkles, Trees, X, Zap } from 'lucide-react';
+import { ArrowUpRight, Award, Package, Plus, Sparkles, X, Zap } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import type { ChickenBreedId, UserFarmProfile } from '../types/farm';
 import {
@@ -8,20 +8,17 @@ import {
   calculateTotalChickens,
   CHICKEN_MILESTONES,
   type ChickenMilestoneInfo,
+  eggsToGram,
+  eggsToUsd,
   FEED_BOOSTER_COST_COINS,
   getChickenMilestoneReached,
+  getWithdrawAdGateStatus,
   GOLDEN_EGG_REWARD_COINS,
   isFeedBoosterActive,
   isGoldenEggReady,
 } from '../game/economy';
-import {
-  countEnabledFarmArtifacts,
-  FARM_ARTIFACTS,
-  type FarmArtifactId,
-  type FarmArtifactLayout,
-} from '../game/farmArtifacts';
 import { ChickenSprite, EggIcon } from './GameIcons';
-import farmMeadowBg from '../assets/images/realistic_farm_meadow_1794853103805.jpg';
+import farmMeadowBg from '../assets/images/poultry_farm_meadow_1794853573543.jpg';
 
 interface FarmMeadowProps {
   profile: UserFarmProfile;
@@ -29,11 +26,9 @@ interface FarmMeadowProps {
   collectLabel: string;
   isVisible?: boolean;
   isProfileSynced?: boolean;
-  artifactLayout: FarmArtifactLayout;
   onCollect: () => void;
   onOpenYourFarm: () => void;
-  onOpenArtifactsDrawer?: () => void;
-  onArtifactTap?: () => void;
+  onOpenWithdraw?: () => void;
   onChickenTap: () => void;
   onGoldenEggDrop?: () => void;
   onActivateBooster?: () => void;
@@ -63,22 +58,22 @@ interface FlyingEggParticle {
 }
 
 const SPAWN_SPOTS = [
-  { x: 46, y: 58 },
-  { x: 34, y: 65 },
-  { x: 55, y: 70 },
-  { x: 66, y: 56 },
-  { x: 41, y: 50 },
-  { x: 70, y: 68 },
-  { x: 28, y: 57 },
-  { x: 50, y: 64 },
-  { x: 38, y: 73 },
+  { x: 46, y: 55 },
+  { x: 34, y: 61 },
+  { x: 55, y: 65 },
+  { x: 66, y: 54 },
+  { x: 41, y: 49 },
+  { x: 70, y: 63 },
+  { x: 28, y: 56 },
+  { x: 50, y: 60 },
+  { x: 38, y: 67 },
   { x: 60, y: 49 },
-  { x: 23, y: 63 },
-  { x: 60, y: 74 },
-  { x: 75, y: 61 },
+  { x: 23, y: 61 },
+  { x: 60, y: 68 },
+  { x: 75, y: 59 },
   { x: 33, y: 49 },
-  { x: 47, y: 75 },
-  { x: 56, y: 54 },
+  { x: 47, y: 69 },
+  { x: 56, y: 52 },
 ];
 
 function getStoredMilestone(uid: string): number {
@@ -121,11 +116,9 @@ export function FarmMeadow({
   collectLabel,
   isVisible = true,
   isProfileSynced = true,
-  artifactLayout,
   onCollect,
   onOpenYourFarm,
-  onOpenArtifactsDrawer,
-  onArtifactTap,
+  onOpenWithdraw,
   onChickenTap,
   onGoldenEggDrop,
   onActivateBooster,
@@ -142,7 +135,6 @@ export function FarmMeadow({
   const [collectRippleSeq, setCollectRippleSeq] = useState(0);
   const [flyingEggs, setFlyingEggs] = useState<FlyingEggParticle[]>([]);
   const [poppedHen, setPoppedHen] = useState<{ id: string; seq: number } | null>(null);
-  const [poppedArtifact, setPoppedArtifact] = useState<{ id: FarmArtifactId; seq: number; label: string } | null>(null);
   const [activeMilestone, setActiveMilestone] = useState<ChickenMilestoneInfo | null>(null);
 
   const prevUidRef = useRef<string>(profile.uid);
@@ -153,7 +145,6 @@ export function FarmMeadow({
   const collectBtnRef = useRef<HTMLButtonElement | null>(null);
   const popTimerRef = useRef<number | null>(null);
   const collectPopTimerRef = useRef<number | null>(null);
-  const artifactPopTimerRef = useRef<number | null>(null);
   const harvestTimerRef = useRef<number | null>(null);
   const effectTimersRef = useRef<number[]>([]);
 
@@ -169,6 +160,11 @@ export function FarmMeadow({
   const goldenReady = isGoldenEggReady(profile, liveNowMs);
   const productionRate = calculateProductionRate(profile, liveNowMs);
   const totalChickens = calculateTotalChickens(profile);
+  const gramPerHour = eggsToGram(productionRate);
+  const totalMinedEggs = profile.eggs + pendingEggs;
+  const totalMinedGram = eggsToGram(totalMinedEggs);
+  const totalMinedUsd = eggsToUsd(totalMinedEggs);
+  const adGate = getWithdrawAdGateStatus(profile);
 
   useEffect(() => {
     if (prevUidRef.current !== profile.uid) {
@@ -236,7 +232,6 @@ export function FarmMeadow({
       window.clearInterval(id);
       if (popTimerRef.current) window.clearTimeout(popTimerRef.current);
       if (collectPopTimerRef.current) window.clearTimeout(collectPopTimerRef.current);
-      if (artifactPopTimerRef.current) window.clearTimeout(artifactPopTimerRef.current);
       if (harvestTimerRef.current) window.clearTimeout(harvestTimerRef.current);
       for (const timerId of effectTimersRef.current) {
         window.clearTimeout(timerId);
@@ -312,38 +307,17 @@ export function FarmMeadow({
     effectTimersRef.current.push(arrivalTimer, cleanupTimer);
   };
 
-  const placedArtifacts = useMemo(() => {
-    return FARM_ARTIFACTS.flatMap((def) => {
-      const state = artifactLayout.items[def.id];
-      if (!state?.enabled) return [];
-      const spot = def.spots[state.spot];
-      const flip = state.flipped ? !spot.defaultFlipX : Boolean(spot.defaultFlipX);
-      return [{ def, spot, flip }];
-    });
-  }, [artifactLayout]);
-
-  const activeArtifactCount = countEnabledFarmArtifacts(artifactLayout);
-
-  const handleTapArtifact = (id: FarmArtifactId, label: string) => {
-    onArtifactTap?.();
-    setPoppedArtifact((prev) => ({ id, seq: (prev?.seq ?? 0) + 1, label }));
-    if (artifactPopTimerRef.current) window.clearTimeout(artifactPopTimerRef.current);
-    artifactPopTimerRef.current = window.setTimeout(() => {
-      setPoppedArtifact((cur) => (cur?.id === id ? null : cur));
-    }, 1500);
-  };
-
   const roamingHens: RoamingHen[] = useMemo(() => {
     return baseHens.map((breed, idx) => {
       const spot = SPAWN_SPOTS[idx % SPAWN_SPOTS.length];
       const phase = (stepTick + idx) % 4;
       const dx = phase === 0 ? 0 : phase === 1 ? 4.5 : phase === 2 ? 2 : -4;
-      const dy = phase === 0 ? 0 : phase === 1 ? -2.5 : phase === 2 ? 3 : -1;
+      const dy = phase === 0 ? 0 : phase === 1 ? -2.2 : phase === 2 ? 2.5 : -1;
       return {
         id: `${breed}-${idx}`,
         breed,
         x: Math.max(14, Math.min(86, spot.x + dx)),
-        y: Math.max(46, Math.min(77, spot.y + dy)),
+        y: Math.max(46, Math.min(71, spot.y + dy)),
         facingLeft: phase >= 2,
         delayMs: (idx % 5) * 200,
       };
@@ -354,13 +328,13 @@ export function FarmMeadow({
 
   return (
     <section
-      aria-label="Interactive Chicken Farm Meadow"
+      aria-label="Interactive GRAM Mining Poultry Farm"
       className="animate-clay-enter relative w-full flex-1 lg:flex-none overflow-hidden rounded-none lg:rounded-[2rem] lg:clay-card bg-gradient-to-b from-sky-300 via-emerald-700 to-stone-900 min-h-[540px] h-full lg:h-auto lg:aspect-[9/14] lg:min-h-[600px] lg:max-h-[760px]"
     >
       {!bgFailed && (
         <img
           src={farmMeadowBg}
-          alt="Realistic sunlit country poultry farm meadow with rolling green hills, bright summer sky, grass pasture, and packed-earth courtyard"
+          alt="Realistic outdoor free-range poultry farm with weathered wooden chicken coop, red timber barn, sunlit green meadow, and packed-earth path"
           referrerPolicy="no-referrer"
           onError={() => setBgFailed(true)}
           className="absolute inset-0 w-full h-full object-cover object-center select-none pointer-events-none"
@@ -370,11 +344,11 @@ export function FarmMeadow({
       {/* Natural golden morning sunlight & subtle floating pollen motes */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden" aria-hidden="true">
         <div
-          className="animate-sunbeam absolute -top-20 -left-16 w-72 h-[125%] bg-gradient-to-b from-amber-100/30 via-yellow-50/10 to-transparent blur-2xl"
+          className="animate-sunbeam absolute -top-20 -left-16 w-72 h-[125%] bg-gradient-to-b from-amber-100/25 via-yellow-50/10 to-transparent blur-2xl"
         />
         <div
           style={{ animationDelay: '2.4s' }}
-          className="animate-sunbeam absolute -top-24 left-1/3 w-52 h-[125%] bg-gradient-to-b from-white/25 via-amber-100/8 to-transparent blur-2xl"
+          className="animate-sunbeam absolute -top-24 left-1/3 w-52 h-[125%] bg-gradient-to-b from-white/20 via-amber-100/8 to-transparent blur-2xl"
         />
         {POLLEN_MOTES.map((mote, idx) => (
           <span
@@ -398,19 +372,19 @@ export function FarmMeadow({
       )}
 
       {/* Top sky & bottom earth scrims for natural outdoor readability */}
-      <div className="absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-sky-950/35 via-sky-950/10 to-transparent pointer-events-none" />
-      <div className="absolute inset-x-0 bottom-0 h-44 bg-gradient-to-t from-stone-950/70 via-stone-950/25 to-transparent pointer-events-none" />
+      <div className="absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-stone-950/45 via-stone-950/15 to-transparent pointer-events-none" />
+      <div className="absolute inset-x-0 bottom-0 h-52 bg-gradient-to-t from-stone-950/80 via-stone-950/35 to-transparent pointer-events-none" />
 
-      {/* Top Meadow HUD: 2x Booster Status + Golden Egg Ready Sparkle + Props Studio */}
+      {/* Top Mining HUD: 2x Feed Booster + Golden Egg Alert + GRAM Payout Status */}
       {!activeMilestone && (
         <div className="absolute top-3 inset-x-3 z-20 flex items-center justify-between gap-2 pointer-events-none">
           {totalChickens <= 0 ? (
-            <div className="clay-card pointer-events-auto !rounded-2xl min-h-[44px] px-3 py-2 text-[11px] font-extrabold text-stone-700 dark:text-stone-200 inline-flex items-center gap-1.5 shadow-md">
-              <EggIcon className="w-3.5 h-3.5 opacity-60 shrink-0" />
-              <span>Mining Inactive · 0 Hens</span>
+            <div className="pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/70 backdrop-blur-md border border-white/15 px-3 py-2 text-[11px] font-extrabold text-stone-100 inline-flex items-center gap-1.5 shadow-lg">
+              <EggIcon className="w-3.5 h-3.5 opacity-75 shrink-0" />
+              <span>Mining Idle · 0 Hens</span>
             </div>
           ) : boosterActive ? (
-            <div className="clay-btn-emerald pointer-events-auto min-h-[44px] px-3 py-2 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-md">
+            <div className="clay-btn-emerald pointer-events-auto min-h-[44px] px-3 py-2 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg">
               <Zap className="w-3.5 h-3.5 fill-current shrink-0" />
               <span className="font-mono-num">2× Feed · {formatCountdownMs(boostRemainingMs)}</span>
             </div>
@@ -419,10 +393,10 @@ export function FarmMeadow({
               type="button"
               onClick={onActivateBooster}
               aria-label={`Activate 2x Laying Feed booster for ${FEED_BOOSTER_COST_COINS} coins`}
-              className="clay-btn clay-card pointer-events-auto !rounded-2xl min-h-[44px] px-3 py-2 text-[11px] font-extrabold text-stone-800 dark:text-stone-100 inline-flex items-center gap-1.5 shadow-md"
+              className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/75 hover:bg-stone-900/85 backdrop-blur-md border border-amber-300/35 px-3 py-2 text-[11px] font-extrabold text-amber-100 inline-flex items-center gap-1.5 shadow-lg"
             >
-              <Zap className="w-3.5 h-3.5 text-amber-500 fill-amber-400 shrink-0" />
-              <span>2× Feed ({FEED_BOOSTER_COST_COINS})</span>
+              <Zap className="w-3.5 h-3.5 text-amber-400 fill-amber-400 shrink-0" />
+              <span>2× Boost ({FEED_BOOSTER_COST_COINS})</span>
             </button>
           ) : (
             <span />
@@ -430,24 +404,30 @@ export function FarmMeadow({
 
           <div className="flex items-center gap-1.5">
             {totalChickens > 0 && goldenReady && onGoldenEggDrop && (
-              <div className="animate-clay-badge clay-btn-amber pointer-events-none min-h-[44px] px-2.5 py-2 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1 shadow-md">
+              <div className="animate-clay-badge clay-btn-amber pointer-events-none min-h-[44px] px-2.5 py-2 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1 shadow-lg">
                 <Sparkles className="w-3.5 h-3.5 shrink-0" />
-                <span className="hidden sm:inline">Tap Hen for Gold Egg!</span>
-                <span className="sm:hidden">Gold Egg!</span>
+                <span className="hidden sm:inline">Tap Hen Gold!</span>
+                <span className="sm:hidden">Gold!</span>
               </div>
             )}
-            {onOpenArtifactsDrawer && (
+            {onOpenWithdraw && (
               <button
                 type="button"
-                onClick={onOpenArtifactsDrawer}
-                aria-label="Customize farm artifacts and meadow props"
-                className="clay-btn clay-card pointer-events-auto !rounded-2xl min-h-[44px] px-3 py-2 text-[11px] font-extrabold text-stone-800 dark:text-stone-100 inline-flex items-center gap-1.5 shadow-md"
+                onClick={onOpenWithdraw}
+                aria-label="Open GRAM Token withdrawal and payout status"
+                className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/75 hover:bg-stone-900/85 backdrop-blur-md border border-emerald-400/35 px-3 py-2 text-[11px] font-extrabold text-white inline-flex items-center gap-1.5 shadow-lg"
               >
-                <Trees className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                <span>Props</span>
-                <span className="font-mono-num text-[10px] px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-800 dark:text-emerald-300">
-                  {activeArtifactCount}
+                <span
+                  aria-hidden="true"
+                  className={`w-2 h-2 rounded-full shrink-0 ${
+                    adGate.unlocked ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+                  }`}
+                />
+                <span>Withdraw</span>
+                <span className="font-mono-num text-[10px] px-1.5 py-0.5 rounded-md bg-white/10 text-emerald-300">
+                  {adGate.unlocked ? 'Ready' : `${adGate.watched}/${adGate.required}`}
                 </span>
+                <ArrowUpRight className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
               </button>
             )}
           </div>
@@ -491,69 +471,27 @@ export function FarmMeadow({
         </div>
       )}
 
-      {/* Back Pasture Farm Artifacts Layer (behind roaming hens) */}
-      <div className="absolute inset-0 z-[5] pointer-events-none">
-        {placedArtifacts
-          .filter((item) => item.spot.zLayer === 'back')
-          .map(({ def, spot, flip }) => {
-            const isPopping = poppedArtifact?.id === def.id;
-            return (
-              <button
-                key={def.id}
-                type="button"
-                onClick={() => handleTapArtifact(def.id, `${def.name} · ${def.tagline}`)}
-                aria-label={`${def.name}: ${def.tagline}`}
-                style={{
-                  left: `${spot.x}%`,
-                  top: `${spot.y}%`,
-                  width: `${spot.widthPct}%`,
-                }}
-                className="group pointer-events-auto absolute -translate-x-1/2 -translate-y-1/2 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 rounded-2xl transition-all duration-300"
-              >
-                {isPopping && (
-                  <span className="animate-clay-enter pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 z-30 rounded-xl bg-stone-950/90 text-amber-100 border border-amber-300/35 px-2.5 py-0.5 text-[10px] font-extrabold whitespace-nowrap shadow-lg">
-                    {poppedArtifact.label}
-                  </span>
-                )}
-                <div
-                  key={isPopping ? `art-pop-${poppedArtifact.seq}` : 'art-idle'}
-                  className={isPopping ? 'animate-artifact-pop' : def.sway ? 'animate-artifact-sway' : ''}
-                >
-                  <img
-                    src={def.sprite}
-                    alt={def.name}
-                    referrerPolicy="no-referrer"
-                    className={`w-full h-auto object-contain select-none transition-transform duration-200 group-hover:scale-[1.03] drop-shadow-[0_6px_8px_rgba(20,30,15,0.34)] ${
-                      flip ? '-scale-x-100' : ''
-                    }`}
-                  />
-                </div>
-              </button>
-            );
-          })}
-      </div>
-
       {/* Animated Roaming Chickens (or Buy First Miner Prompt when 0 hens owned) */}
       <div className="absolute inset-0 z-10 pointer-events-none">
         {totalChickens <= 0 && (
-          <div className="pointer-events-auto absolute inset-x-4 top-1/2 -translate-y-1/2 flex justify-center z-20">
-            <div className="animate-clay-enter clay-card-warm !rounded-3xl max-w-[290px] w-full p-4 text-center space-y-2.5 shadow-xl">
+          <div className="pointer-events-auto absolute inset-x-4 top-[44%] -translate-y-1/2 flex justify-center z-20">
+            <div className="animate-clay-enter clay-card-warm !rounded-3xl max-w-[295px] w-full p-4 text-center space-y-2.5 shadow-2xl">
               <div className="w-12 h-12 rounded-2xl clay-icon-well mx-auto flex items-center justify-center">
                 <ChickenSprite breed="leghorn" className="w-9 h-9" />
               </div>
               <div className="space-y-1">
                 <h3 className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
-                  Buy a Chicken to Start Mining
+                  Buy a Chicken to Mine GRAM
                 </h3>
                 <p className="text-[11px] font-medium text-stone-600 dark:text-stone-300 leading-relaxed">
-                  Egg mining stays paused until you purchase your first chicken in Packs.
+                  Hens lay eggs automatically every second so you can harvest and withdraw GRAM tokens.
                 </p>
               </div>
               {onBuyChickens && (
                 <button
                   type="button"
                   onClick={onBuyChickens}
-                  className="clay-btn clay-btn-emerald w-full min-h-[42px] rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5"
+                  className="clay-btn clay-btn-emerald w-full min-h-[44px] rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5"
                 >
                   <Package className="w-4 h-4" />
                   <span>Buy First Chicken</span>
@@ -565,7 +503,7 @@ export function FarmMeadow({
         {roamingHens.map((hen, idx) => {
           const isPopping = poppedHen?.id === hen.id;
           const isGoldenTarget = goldenReady && Boolean(onGoldenEggDrop) && idx === 0;
-          const depthScale = Number((0.86 + ((hen.y - 46) / 31) * 0.28).toFixed(3));
+          const depthScale = Number((0.86 + ((hen.y - 46) / 25) * 0.28).toFixed(3));
           return (
             <button
               key={hen.id}
@@ -654,7 +592,7 @@ export function FarmMeadow({
               <div className="relative transition-transform duration-200 ease-out group-hover:scale-110 group-hover:-translate-y-1 group-active:scale-95">
                 <span
                   aria-hidden="true"
-                  className="pointer-events-none absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-3 rounded-full bg-stone-950/40 blur-[3px]"
+                  className="pointer-events-none absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-3 rounded-full bg-stone-950/45 blur-[3px]"
                 />
                 <div
                   key={isPopping ? `pop-${poppedHen.seq}` : 'idle'}
@@ -677,158 +615,150 @@ export function FarmMeadow({
         })}
       </div>
 
-      {/* Meadow Foreground Artifacts Layer (pond, corner fence, wildflowers, front hay) */}
-      <div className="absolute inset-0 z-[12] pointer-events-none">
-        {placedArtifacts
-          .filter((item) => item.spot.zLayer === 'front')
-          .map(({ def, spot, flip }) => {
-            const isPopping = poppedArtifact?.id === def.id;
-            return (
-              <button
-                key={def.id}
-                type="button"
-                onClick={() => handleTapArtifact(def.id, `${def.name} · ${def.tagline}`)}
-                aria-label={`${def.name}: ${def.tagline}`}
-                style={{
-                  left: `${spot.x}%`,
-                  top: `${spot.y}%`,
-                  width: `${spot.widthPct}%`,
-                }}
-                className="group pointer-events-auto absolute -translate-x-1/2 -translate-y-1/2 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 rounded-2xl transition-all duration-300"
+      {/* Bottom GRAM Mining Telemetry + Action Dock (floats cleanly above mobile BottomNav) */}
+      <div className="absolute inset-x-3 bottom-[4.85rem] lg:bottom-3 z-20 flex flex-col gap-2">
+        {/* Live GRAM Mining Telemetry Strip */}
+        <div className="rounded-2xl bg-stone-950/72 backdrop-blur-md border border-white/15 px-3 py-1.5 flex items-center justify-between gap-2 text-white shadow-lg">
+          <div className="flex items-center gap-2 min-w-0">
+            <span
+              aria-hidden="true"
+              className={`w-2 h-2 rounded-full shrink-0 ${
+                totalChickens > 0 ? 'bg-emerald-400 animate-pulse' : 'bg-stone-500'
+              }`}
+            />
+            <div className="min-w-0 flex items-center gap-2 flex-wrap">
+              <span className="text-[11px] font-extrabold font-mono-num text-emerald-300 whitespace-nowrap">
+                +{gramPerHour.toFixed(4)} GRAM/h
+              </span>
+              <span className="text-[10px] font-semibold text-stone-300 font-mono-num whitespace-nowrap">
+                Mined: {totalMinedGram.toFixed(4)} GRAM (${totalMinedUsd.toFixed(2)})
+              </span>
+            </div>
+          </div>
+          {onBuyChickens && (
+            <button
+              type="button"
+              onClick={onBuyChickens}
+              aria-label="Buy more hens to increase GRAM mining speed"
+              className="clay-btn shrink-0 min-h-[32px] px-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-amber-950 text-[11px] font-extrabold inline-flex items-center gap-1 shadow-sm"
+            >
+              <Plus className="w-3 h-3 stroke-[2.75]" />
+              <span>Add Hens</span>
+            </button>
+          )}
+        </div>
+
+        {/* Primary Farm & Collect Dock */}
+        <div className="flex items-end gap-2.5">
+          <button
+            type="button"
+            onClick={onOpenYourFarm}
+            className="clay-btn clay-card !rounded-2xl flex-1 min-h-[56px] px-3 py-2 flex items-center gap-2.5 text-left"
+          >
+            <div className="w-9 h-9 rounded-xl clay-icon-well flex items-center justify-center shrink-0">
+              <EggIcon className="w-5 h-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100 font-mono-num whitespace-nowrap">
+                {productionRate} eggs/h
+              </div>
+              <div className="text-[11px] font-semibold text-stone-500 dark:text-stone-400 truncate font-mono-num">
+                Lv.{profile.level} · {totalChickens} Hens · {profile.basketTierHours}h Cap
+              </div>
+            </div>
+          </button>
+
+          <div className="relative flex-1">
+            {harvestBurst && (
+              <div
+                key={`harvest-${harvestBurst.seq}`}
+                aria-hidden="true"
+                className="animate-harvest-rise pointer-events-none absolute -top-9 left-1/2 z-30 flex items-center gap-1 rounded-full bg-gradient-to-r from-emerald-500 to-amber-400 text-stone-950 border border-white/70 px-3 py-1 text-xs font-extrabold shadow-xl whitespace-nowrap"
               >
-                {isPopping && (
-                  <span className="animate-clay-enter pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 z-30 rounded-xl bg-stone-950/90 text-amber-100 border border-amber-300/35 px-2.5 py-0.5 text-[10px] font-extrabold whitespace-nowrap shadow-lg">
-                    {poppedArtifact.label}
-                  </span>
-                )}
+                <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                <span className="font-mono-num">+{harvestBurst.amount.toLocaleString()} Eggs!</span>
+              </div>
+            )}
+
+            {pendingEggs > 0 && (
+              <>
                 <div
-                  key={isPopping ? `art-pop-${poppedArtifact.seq}` : 'art-idle'}
-                  className={isPopping ? 'animate-artifact-pop' : def.sway ? 'animate-artifact-sway' : ''}
-                >
-                  <img
-                    src={def.sprite}
-                    alt={def.name}
-                    referrerPolicy="no-referrer"
-                    className={`w-full h-auto object-contain select-none transition-transform duration-200 group-hover:scale-[1.03] drop-shadow-[0_7px_9px_rgba(16,24,12,0.36)] ${
-                      flip ? '-scale-x-100' : ''
+                  aria-hidden="true"
+                  className="animate-collect-halo pointer-events-none absolute -inset-1 rounded-2xl bg-amber-300/45 blur-sm"
+                />
+                <div className="animate-clay-badge absolute -top-7 left-1/2 -translate-x-1/2 flex items-center gap-1 rounded-full bg-amber-950/90 text-amber-200 border border-amber-400/40 px-2.5 py-0.5 text-xs font-extrabold shadow-lg whitespace-nowrap pointer-events-none">
+                  <EggIcon className="w-3.5 h-3.5" />
+                  <span className="font-mono-num">+{pendingEggs.toLocaleString()}</span>
+                </div>
+              </>
+            )}
+
+            <AnimatePresence>
+              {collectRippleSeq > 0 && !prefersReducedMotion && (
+                <motion.span
+                  key={`collect-ripple-${collectRippleSeq}`}
+                  aria-hidden="true"
+                  initial={{ opacity: 0.72, scale: 0.92 }}
+                  animate={{ opacity: 0, scale: 1.3 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
+                  className="pointer-events-none absolute inset-0 rounded-2xl border-2 border-amber-300 shadow-[0_0_20px_rgba(251,191,36,0.65)]"
+                />
+              )}
+            </AnimatePresence>
+
+            <motion.button
+              ref={collectBtnRef}
+              type="button"
+              animate={
+                isCollectPopping && !prefersReducedMotion
+                  ? {
+                      scale: [1, 1.15, 0.94, 1.04, 1],
+                      y: [0, -5, 1, 0],
+                    }
+                  : { scale: 1, y: 0 }
+              }
+              transition={{ duration: 0.44, ease: [0.16, 1, 0.3, 1] }}
+              whileHover={pendingEggs > 0 && !prefersReducedMotion ? { scale: 1.025 } : undefined}
+              whileTap={pendingEggs > 0 ? { scale: 0.92 } : undefined}
+              onClick={() => {
+                if (pendingEggs > 0) {
+                  const nextSeq = ++harvestSeqRef.current;
+                  setHarvestBurst({ seq: nextSeq, amount: pendingEggs });
+                  if (harvestTimerRef.current) window.clearTimeout(harvestTimerRef.current);
+                  harvestTimerRef.current = window.setTimeout(() => {
+                    setHarvestBurst((cur) => (cur?.seq === nextSeq ? null : cur));
+                  }, 1350);
+                  triggerCollectEffects();
+                }
+                onCollect();
+              }}
+              disabled={pendingEggs <= 0}
+              className={`clay-btn relative w-full min-h-[56px] rounded-2xl px-4 py-2 font-extrabold flex items-center justify-between gap-2 ${
+                pendingEggs > 0
+                  ? 'clay-btn-amber clay-cta-sheen'
+                  : 'clay-btn-neutral opacity-85 cursor-not-allowed text-stone-500 dark:text-stone-400'
+              }`}
+            >
+              <div className="flex items-center gap-1.5">
+                <EggIcon className={`w-5 h-5 shrink-0 ${pendingEggs > 0 ? 'animate-egg-wiggle' : ''}`} />
+                <span className="text-sm sm:text-base">{collectLabel}</span>
+              </div>
+              <div className="flex flex-col items-end">
+                <span className="text-xs font-bold font-mono-num leading-none">
+                  {pendingEggs}/{profile.basketCapacity}
+                </span>
+                <div className="w-12 h-2 rounded-full bg-black/15 mt-1 overflow-hidden p-[1px]">
+                  <div
+                    className={`h-full bg-emerald-500 rounded-full transition-all duration-300 ${
+                      pendingEggs > 0 ? 'clay-shimmer-bar' : ''
                     }`}
+                    style={{ width: `${fillPct}%` }}
                   />
                 </div>
-              </button>
-            );
-          })}
-      </div>
-
-      {/* Bottom HUD Dock (floats above fixed mobile BottomNav) */}
-      <div className="absolute inset-x-3 bottom-[4.85rem] lg:bottom-3 z-20 flex items-end gap-2.5">
-        <button
-          type="button"
-          onClick={onOpenYourFarm}
-          className="clay-btn clay-card !rounded-2xl flex-1 min-h-[56px] px-3 py-2 flex items-center gap-2.5 text-left"
-        >
-          <div className="w-9 h-9 rounded-xl clay-icon-well flex items-center justify-center shrink-0">
-            <EggIcon className="w-5 h-5" />
-          </div>
-          <div className="min-w-0">
-            <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100 font-mono-num whitespace-nowrap">
-              {productionRate} eggs/h
-            </div>
-            <div className="text-[11px] font-semibold text-stone-500 dark:text-stone-400 truncate">
-              Your Farm · {profile.basketTierHours}h basket
-            </div>
-          </div>
-        </button>
-
-        <div className="relative flex-1">
-          {harvestBurst && (
-            <div
-              key={`harvest-${harvestBurst.seq}`}
-              aria-hidden="true"
-              className="animate-harvest-rise pointer-events-none absolute -top-9 left-1/2 z-30 flex items-center gap-1 rounded-full bg-gradient-to-r from-emerald-500 to-amber-400 text-stone-950 border border-white/70 px-3 py-1 text-xs font-extrabold shadow-xl whitespace-nowrap"
-            >
-              <Sparkles className="w-3.5 h-3.5 shrink-0" />
-              <span className="font-mono-num">+{harvestBurst.amount.toLocaleString()} Eggs!</span>
-            </div>
-          )}
-
-          {pendingEggs > 0 && (
-            <>
-              <div
-                aria-hidden="true"
-                className="animate-collect-halo pointer-events-none absolute -inset-1 rounded-2xl bg-amber-300/45 blur-sm"
-              />
-              <div className="animate-clay-badge absolute -top-7 left-1/2 -translate-x-1/2 flex items-center gap-1 rounded-full bg-amber-950/90 text-amber-200 border border-amber-400/40 px-2.5 py-0.5 text-xs font-extrabold shadow-lg whitespace-nowrap pointer-events-none">
-                <EggIcon className="w-3.5 h-3.5" />
-                <span className="font-mono-num">+{pendingEggs.toLocaleString()}</span>
               </div>
-            </>
-          )}
-
-          <AnimatePresence>
-            {collectRippleSeq > 0 && !prefersReducedMotion && (
-              <motion.span
-                key={`collect-ripple-${collectRippleSeq}`}
-                aria-hidden="true"
-                initial={{ opacity: 0.72, scale: 0.92 }}
-                animate={{ opacity: 0, scale: 1.3 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
-                className="pointer-events-none absolute inset-0 rounded-2xl border-2 border-amber-300 shadow-[0_0_20px_rgba(251,191,36,0.65)]"
-              />
-            )}
-          </AnimatePresence>
-
-          <motion.button
-            ref={collectBtnRef}
-            type="button"
-            animate={
-              isCollectPopping && !prefersReducedMotion
-                ? {
-                    scale: [1, 1.15, 0.94, 1.04, 1],
-                    y: [0, -5, 1, 0],
-                  }
-                : { scale: 1, y: 0 }
-            }
-            transition={{ duration: 0.44, ease: [0.16, 1, 0.3, 1] }}
-            whileHover={pendingEggs > 0 && !prefersReducedMotion ? { scale: 1.025 } : undefined}
-            whileTap={pendingEggs > 0 ? { scale: 0.92 } : undefined}
-            onClick={() => {
-              if (pendingEggs > 0) {
-                const nextSeq = ++harvestSeqRef.current;
-                setHarvestBurst({ seq: nextSeq, amount: pendingEggs });
-                if (harvestTimerRef.current) window.clearTimeout(harvestTimerRef.current);
-                harvestTimerRef.current = window.setTimeout(() => {
-                  setHarvestBurst((cur) => (cur?.seq === nextSeq ? null : cur));
-                }, 1350);
-                triggerCollectEffects();
-              }
-              onCollect();
-            }}
-            disabled={pendingEggs <= 0}
-            className={`clay-btn relative w-full min-h-[56px] rounded-2xl px-4 py-2 font-extrabold flex items-center justify-between gap-2 ${
-              pendingEggs > 0
-                ? 'clay-btn-amber clay-cta-sheen'
-                : 'clay-btn-neutral opacity-85 cursor-not-allowed text-stone-500 dark:text-stone-400'
-            }`}
-          >
-            <div className="flex items-center gap-1.5">
-              <EggIcon className={`w-5 h-5 shrink-0 ${pendingEggs > 0 ? 'animate-egg-wiggle' : ''}`} />
-              <span className="text-sm sm:text-base">{collectLabel}</span>
-            </div>
-            <div className="flex flex-col items-end">
-              <span className="text-xs font-bold font-mono-num leading-none">
-                {pendingEggs}/{profile.basketCapacity}
-              </span>
-              <div className="w-12 h-2 rounded-full bg-black/15 mt-1 overflow-hidden p-[1px]">
-                <div
-                  className={`h-full bg-emerald-500 rounded-full transition-all duration-300 ${
-                    pendingEggs > 0 ? 'clay-shimmer-bar' : ''
-                  }`}
-                  style={{ width: `${fillPct}%` }}
-                />
-              </div>
-            </div>
-          </motion.button>
+            </motion.button>
+          </div>
         </div>
       </div>
 

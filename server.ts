@@ -19,10 +19,12 @@ import {
   runTransaction,
   serverTimestamp,
   setDoc,
+  startAfter,
   type DocumentData,
   type DocumentReference,
   type DocumentSnapshot,
   type Firestore,
+  type QueryDocumentSnapshot,
 } from 'firebase/firestore';
 import {
   ADMIN_PASSCODE_VAULT_UID,
@@ -98,6 +100,86 @@ function escapeHtml(text: string): string {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+function redactBotToken(message: string): string {
+  if (!TELEGRAM_BOT_TOKEN) return message;
+  return String(message || '').replaceAll(TELEGRAM_BOT_TOKEN, '[redacted]');
+}
+
+function isValidSafeId(id: unknown): id is string {
+  return typeof id === 'string' && /^[a-zA-Z0-9_-]{3,64}$/.test(id.trim());
+}
+
+function isSafePublicHttpsUrl(rawUrl: string): boolean {
+  const trimmed = rawUrl.trim();
+  if (!trimmed || trimmed.length > 512) return false;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'https:') return false;
+    if (parsed.username || parsed.password) return false;
+    const host = parsed.hostname.toLowerCase();
+    if (!host || !host.includes('.')) return false;
+    if (
+      host === 'localhost' ||
+      host.endsWith('.local') ||
+      host.endsWith('.internal') ||
+      host.endsWith('.localhost') ||
+      host === '0.0.0.0' ||
+      host === '::1' ||
+      host.startsWith('127.') ||
+      host.startsWith('10.') ||
+      host.startsWith('192.168.') ||
+      host.startsWith('169.254.') ||
+      host.startsWith('[fc') ||
+      host.startsWith('[fd') ||
+      host.startsWith('[fe80')
+    ) {
+      return false;
+    }
+    const m172 = host.match(/^172\.(\d+)\./);
+    if (m172) {
+      const oct2 = Number(m172[1]);
+      if (oct2 >= 16 && oct2 <= 31) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getClientIp(req: express.Request): string {
+  const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0]?.trim();
+  if (fwd) return fwd.slice(0, 64);
+  return String(req.socket?.remoteAddress || 'unknown').slice(0, 64);
+}
+
+const rateLimitBuckets = new Map<string, number[]>();
+
+function checkRateLimit(
+  key: string,
+  maxRequests: number,
+  windowMs: number,
+): { allowed: boolean; retryAfterSec: number } {
+  const now = Date.now();
+  const cutoff = now - windowMs;
+  const recent = (rateLimitBuckets.get(key) || []).filter((ts) => ts > cutoff);
+  if (recent.length >= maxRequests) {
+    const oldest = recent[0] ?? now;
+    const retryAfterSec = Math.max(1, Math.ceil((oldest + windowMs - now) / 1000));
+    rateLimitBuckets.set(key, recent);
+    return { allowed: false, retryAfterSec };
+  }
+  recent.push(now);
+  rateLimitBuckets.set(key, recent);
+  if (rateLimitBuckets.size > 5000) {
+    for (const [k, list] of rateLimitBuckets.entries()) {
+      if (list.every((ts) => ts <= cutoff)) {
+        rateLimitBuckets.delete(k);
+      }
+    }
+  }
+  return { allowed: true, retryAfterSec: 0 };
 }
 
 const PORT = Number(process.env.PORT || 3000);
@@ -512,10 +594,33 @@ async function verifyAdminPasscodeAsync(provided: string): Promise<{
   };
 }
 
-const SESSION_SIGNING_SECRET = crypto
-  .createHash('sha256')
-  .update(`chickenland_session_v2:${PRIMARY_ADMIN_TELEGRAM_ID}:${TELEGRAM_BOT_TOKEN}:${FALLBACK_ADMIN_PASSCODE}`)
-  .digest('hex');
+const SESSION_SECRET_FILE = path.resolve(__dirname, '.data', 'session_secret.key');
+
+function resolveSessionSigningSecret(): string {
+  const envSecret = (process.env.SESSION_SECRET || '').trim();
+  if (envSecret.length >= 32) {
+    return envSecret;
+  }
+  try {
+    if (fs.existsSync(SESSION_SECRET_FILE)) {
+      const existing = fs.readFileSync(SESSION_SECRET_FILE, 'utf8').trim();
+      if (existing.length >= 32) {
+        return existing;
+      }
+    }
+    const fresh = crypto.randomBytes(32).toString('hex');
+    const dir = path.dirname(SESSION_SECRET_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(SESSION_SECRET_FILE, fresh, { encoding: 'utf8', mode: 0o600 });
+    return fresh;
+  } catch {
+    return crypto.randomBytes(32).toString('hex');
+  }
+}
+
+const SESSION_SIGNING_SECRET = resolveSessionSigningSecret();
 
 let cachedBotUsername = TELEGRAM_BOT_USERNAME_ENV || '';
 let lastBotLookupAttemptMs = 0;
@@ -600,8 +705,14 @@ function verifyTelegramInitData(
   }
 
   const authDateSec = Number(params.get('auth_date') || 0);
-  if (authDateSec > 0 && Math.floor(Date.now() / 1000) - authDateSec > 86_400) {
-    return { valid: false, reason: 'expired_auth_date' };
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (
+    !Number.isFinite(authDateSec) ||
+    authDateSec <= 0 ||
+    nowSec - authDateSec > 86_400 ||
+    authDateSec > nowSec + 300
+  ) {
+    return { valid: false, reason: 'expired_or_invalid_auth_date' };
   }
 
   const entries: string[] = [];
@@ -643,6 +754,199 @@ function verifyTelegramInitData(
     playerId: rawId ? `tg_${rawId}` : undefined,
     user: parsedUser,
   };
+}
+
+function resolveVerifiedAdminActor(params: {
+  req: express.Request;
+  token?: string;
+  initData?: string;
+  extraAdminIds: readonly string[];
+}): string | null {
+  const authHeader = String(params.req.headers.authorization || '')
+    .replace(/^Bearer\s+/i, '')
+    .trim();
+  const candidateToken = String(params.token || authHeader || '').trim();
+  if (candidateToken) {
+    const verified = verifySessionToken(candidateToken);
+    if (
+      verified?.role === 'admin' &&
+      typeof verified.playerId === 'string' &&
+      isAdminPlayerId(verified.playerId, params.extraAdminIds)
+    ) {
+      return verified.playerId;
+    }
+  }
+
+  const rawInitData = String(params.initData || '').trim();
+  if (rawInitData && TELEGRAM_BOT_TOKEN) {
+    const verifiedInit = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN);
+    if (
+      verifiedInit.valid &&
+      verifiedInit.playerId &&
+      isAdminPlayerId(verifiedInit.playerId, params.extraAdminIds)
+    ) {
+      return verifiedInit.playerId;
+    }
+  }
+
+  return null;
+}
+
+const REMINDERS_FILE = path.resolve(__dirname, '.data', 'reminders.json');
+
+interface PlayerReminderRecord {
+  playerId: string;
+  telegramChatId: string;
+  enabled: boolean;
+  basketFullAtMs: number;
+  feedBoostUntilMs: number;
+  coopFeverUntilMs: number;
+  autoHarvestUntilMs: number;
+  lastBasketSentForAt: number;
+  lastFeedSentForAt: number;
+  lastFeverSentForAt: number;
+  lastDroneSentForAt: number;
+  updatedAtMs: number;
+}
+
+const reminderStore = new Map<string, PlayerReminderRecord>();
+
+function loadRemindersFromDisk(): void {
+  try {
+    if (!fs.existsSync(REMINDERS_FILE)) return;
+    const raw = fs.readFileSync(REMINDERS_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        if (item && typeof item === 'object' && isValidSafeId(item.playerId)) {
+          const rec = item as PlayerReminderRecord;
+          if (rec.telegramChatId) {
+            reminderStore.set(rec.playerId, rec);
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore read errors
+  }
+}
+
+function persistRemindersToDisk(): void {
+  try {
+    const dir = path.dirname(REMINDERS_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const items = Array.from(reminderStore.values()).slice(-2000);
+    fs.writeFileSync(REMINDERS_FILE, JSON.stringify(items), 'utf8');
+  } catch {
+    // Ignore filesystem errors on read-only containers
+  }
+}
+
+loadRemindersFromDisk();
+
+let reminderSweepRunning = false;
+async function processDueReminders(): Promise<void> {
+  if (!TELEGRAM_BOT_TOKEN || reminderSweepRunning || reminderStore.size === 0) return;
+  reminderSweepRunning = true;
+  const now = Date.now();
+  const maxStaleMs = 4 * 3_600_000;
+  let dirty = false;
+
+  try {
+    const botUsername = await resolveTelegramBotUsername();
+    const miniAppUrl = `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}`;
+
+    const sendReminderDm = async (chatId: string, text: string) => {
+      try {
+        await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text,
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [[{ text: '🐔 Open Alpha Gram Farm', url: miniAppUrl }]],
+            },
+          }),
+          signal: AbortSignal.timeout(7000),
+        });
+      } catch {
+        // Ignore transient Telegram failures
+      }
+    };
+
+    for (const rec of reminderStore.values()) {
+      if (!rec.enabled || !rec.telegramChatId) continue;
+
+      const droneActiveAtBasketFull =
+        rec.autoHarvestUntilMs > 0 &&
+        rec.basketFullAtMs > 0 &&
+        rec.autoHarvestUntilMs >= rec.basketFullAtMs;
+
+      if (
+        !droneActiveAtBasketFull &&
+        rec.basketFullAtMs > 0 &&
+        now >= rec.basketFullAtMs &&
+        now - rec.basketFullAtMs <= maxStaleMs &&
+        rec.lastBasketSentForAt !== rec.basketFullAtMs
+      ) {
+        rec.lastBasketSentForAt = rec.basketFullAtMs;
+        dirty = true;
+        await sendReminderDm(
+          rec.telegramChatId,
+          '🥚 <b>Your Egg Basket is 100% Full!</b>\n\nTap <b>Collect Eggs</b> inside Alpha Gram so your hens keep producing non-stop.',
+        );
+      }
+
+      if (
+        rec.feedBoostUntilMs > 0 &&
+        now >= rec.feedBoostUntilMs &&
+        now - rec.feedBoostUntilMs <= maxStaleMs &&
+        rec.lastFeedSentForAt !== rec.feedBoostUntilMs
+      ) {
+        rec.lastFeedSentForAt = rec.feedBoostUntilMs;
+        dirty = true;
+        await sendReminderDm(
+          rec.telegramChatId,
+          '⚡ <b>2× Laying Feed Boost Expired!</b>\n\nActivate 2× Feed again to double your egg laying rate.',
+        );
+      }
+
+      if (
+        rec.coopFeverUntilMs > 0 &&
+        now >= rec.coopFeverUntilMs &&
+        now - rec.coopFeverUntilMs <= maxStaleMs &&
+        rec.lastFeverSentForAt !== rec.coopFeverUntilMs
+      ) {
+        rec.lastFeverSentForAt = rec.coopFeverUntilMs;
+        dirty = true;
+        await sendReminderDm(
+          rec.telegramChatId,
+          '🔥 <b>Coop Fever 3× Rush Ended!</b>\n\nCollect your boosted harvest and charge up another 25 ads for 3× Golden Rush.',
+        );
+      }
+
+      if (
+        rec.autoHarvestUntilMs > 0 &&
+        now >= rec.autoHarvestUntilMs &&
+        now - rec.autoHarvestUntilMs <= maxStaleMs &&
+        rec.lastDroneSentForAt !== rec.autoHarvestUntilMs
+      ) {
+        rec.lastDroneSentForAt = rec.autoHarvestUntilMs;
+        dirty = true;
+        await sendReminderDm(
+          rec.telegramChatId,
+          '🤖 <b>Auto-Harvest Drone Pass Expired!</b>\n\nRenew your Farm Drone pass to keep auto-harvesting with zero basket cap loss.',
+        );
+      }
+    }
+  } finally {
+    if (dirty) persistRemindersToDisk();
+    reminderSweepRunning = false;
+  }
 }
 
 function buildTxLedgerId(txHash: string): string {
@@ -823,9 +1127,73 @@ async function fetchTelegramChatMember(chatId: string, userId: string): Promise<
   };
 }
 
+const referralNotifyDedup = new Map<string, number>();
+const withdrawNotifyDedup = new Map<string, number>();
+
+async function collectBroadcastRecipients(excludeBanned: boolean): Promise<string[]> {
+  if (!serverDb) return [];
+  const uniqueChatIds = new Set<string>();
+  const bannedSet = new Set<string>();
+
+  if (excludeBanned) {
+    try {
+      const banSnap = await getDocs(query(collection(serverDb, 'banned_users'), limit(100)));
+      for (const d of banSnap.docs) {
+        const uid = String(d.data()?.uid || d.id || '').trim();
+        const num = extractTelegramNumericUserId(uid);
+        if (num) bannedSet.add(num);
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  try {
+    let lastDoc: QueryDocumentSnapshot<DocumentData> | null = null;
+    for (let page = 0; page < 40; page += 1) {
+      const q = lastDoc
+        ? query(collection(serverDb, 'players'), orderBy('createdAtMs', 'asc'), startAfter(lastDoc), limit(50))
+        : query(collection(serverDb, 'players'), orderBy('createdAtMs', 'asc'), limit(50));
+      const snap = await getDocs(q);
+      if (snap.empty) break;
+      for (const docSnap of snap.docs) {
+        const uid = String(docSnap.data()?.uid || docSnap.id || '').trim();
+        const tgId = extractTelegramNumericUserId(uid);
+        if (tgId && !bannedSet.has(tgId)) {
+          uniqueChatIds.add(tgId);
+        }
+      }
+      if (snap.docs.length < 50) break;
+      lastDoc = snap.docs[snap.docs.length - 1];
+    }
+  } catch {
+    // Fallback to leaderboard collection
+  }
+
+  try {
+    const lbSnap = await getDocs(query(collection(serverDb, 'leaderboard'), orderBy('buyerPoints', 'desc'), limit(50)));
+    for (const d of lbSnap.docs) {
+      const tgId = extractTelegramNumericUserId(String(d.data()?.uid || d.id || ''));
+      if (tgId && !bannedSet.has(tgId)) {
+        uniqueChatIds.add(tgId);
+      }
+    }
+  } catch {
+    // Non-fatal
+  }
+
+  return Array.from(uniqueChatIds);
+}
+
 async function startServer() {
   const app = express();
-  app.use(express.json());
+  app.disable('x-powered-by');
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+  });
+  app.use(express.json({ limit: '100kb' }));
 
   app.get('/api/config', async (_req, res) => {
     const [channelsCfg, telegramBotUsername, adminSecurity] = await Promise.all([
@@ -852,6 +1220,12 @@ async function startServer() {
   });
 
   app.post('/api/telegram/check-channels', async (req, res) => {
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`chk_ch:${ip}`, 45, 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({ ok: false, error: `Too many requests. Retry in ${rl.retryAfterSec}s.` });
+      return;
+    }
     const body = req.body as {
       initData?: string;
       playerId?: string;
@@ -969,38 +1343,32 @@ async function startServer() {
   });
 
   app.post('/api/telegram/test-channels', async (req, res) => {
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`test_ch:${ip}`, 25, 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({ ok: false, error: `Too many requests. Retry in ${rl.retryAfterSec}s.` });
+      return;
+    }
+
     const body = req.body as {
-      playerId?: string;
       initData?: string;
       token?: string;
       requiredChannels?: Array<Partial<RequiredTelegramChannel>>;
     };
-    const rawPlayerId = String(body.playerId || '').trim();
-    const rawInitData = String(body.initData || '').trim();
-    const authHeader = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
-    const candidateToken = String(body.token || authHeader || '').trim();
 
     const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
     const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
+    const resolvedPlayerId = resolveVerifiedAdminActor({
+      req,
+      token: body.token,
+      initData: body.initData,
+      extraAdminIds: effectiveExtraAdmins,
+    });
 
-    let resolvedPlayerId = rawPlayerId;
-    if (candidateToken) {
-      const verified = verifySessionToken(candidateToken);
-      if (verified?.role === 'admin' && typeof verified.playerId === 'string') {
-        resolvedPlayerId = verified.playerId;
-      }
-    }
-    if (rawInitData && TELEGRAM_BOT_TOKEN) {
-      const verifiedInit = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN);
-      if (verifiedInit.valid && verifiedInit.playerId) {
-        resolvedPlayerId = verifiedInit.playerId;
-      }
-    }
-
-    if (!isAdminPlayerId(resolvedPlayerId, effectiveExtraAdmins)) {
+    if (!resolvedPlayerId) {
       res.status(403).json({
         ok: false,
-        error: 'Restricted to authorized Admin IDs.',
+        error: 'Admin session token or verified Telegram Admin session required.',
       });
       return;
     }
@@ -1155,6 +1523,7 @@ async function startServer() {
   });
 
   app.post('/api/admin/auth', async (req, res) => {
+    const ip = getClientIp(req);
     const body = req.body as {
       playerId?: string;
       initData?: string;
@@ -1178,15 +1547,30 @@ async function startServer() {
       }
     }
 
+    const rl = checkRateLimit(`admin_auth:${ip}`, 8, 15 * 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({
+        ok: false,
+        requiresPasscode: true,
+        error: `Too many login attempts. Wait ${rl.retryAfterSec}s before trying again.`,
+      });
+      return;
+    }
+
     let resolvedPlayerId = rawPlayerId;
     if (rawInitData && TELEGRAM_BOT_TOKEN) {
       const verifiedInit = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN);
-      if (verifiedInit.valid && verifiedInit.playerId) {
-        resolvedPlayerId = verifiedInit.playerId;
+      if (!verifiedInit.valid || !verifiedInit.playerId) {
+        res.status(401).json({
+          ok: false,
+          error: 'Invalid or expired Telegram session signature.',
+        });
+        return;
       }
+      resolvedPlayerId = verifiedInit.playerId;
     }
 
-    if (!isAdminPlayerId(resolvedPlayerId, effectiveExtraAdmins)) {
+    if (!isValidSafeId(resolvedPlayerId) || !isAdminPlayerId(resolvedPlayerId, effectiveExtraAdmins)) {
       res.status(403).json({
         ok: false,
         error: `Restricted to authorized Admin IDs (Primary: ${PRIMARY_ADMIN_TELEGRAM_ID}).`,
@@ -1229,41 +1613,38 @@ async function startServer() {
   });
 
   app.post('/api/admin/change-passcode', async (req, res) => {
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`admin_chpass:${ip}`, 6, 15 * 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({
+        ok: false,
+        error: `Too many passcode change attempts. Wait ${rl.retryAfterSec}s.`,
+      });
+      return;
+    }
+
     const body = req.body as {
-      playerId?: string;
       initData?: string;
       token?: string;
       currentPasscode?: string;
       newPasscode?: string;
     };
-    const rawPlayerId = String(body.playerId || '').trim();
-    const rawInitData = String(body.initData || '').trim();
-    const authHeader = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
-    const candidateToken = String(body.token || authHeader || '').trim();
     const currentPasscode = String(body.currentPasscode || '').trim();
     const newPasscode = String(body.newPasscode || '').trim();
 
     const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
     const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
+    const resolvedPlayerId = resolveVerifiedAdminActor({
+      req,
+      token: body.token,
+      initData: body.initData,
+      extraAdminIds: effectiveExtraAdmins,
+    });
 
-    let resolvedPlayerId = rawPlayerId;
-    if (candidateToken) {
-      const verified = verifySessionToken(candidateToken);
-      if (verified?.role === 'admin' && typeof verified.playerId === 'string') {
-        resolvedPlayerId = verified.playerId;
-      }
-    }
-    if (rawInitData && TELEGRAM_BOT_TOKEN) {
-      const verifiedInit = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN);
-      if (verifiedInit.valid && verifiedInit.playerId) {
-        resolvedPlayerId = verifiedInit.playerId;
-      }
-    }
-
-    if (!isAdminPlayerId(resolvedPlayerId, effectiveExtraAdmins)) {
+    if (!resolvedPlayerId) {
       res.status(403).json({
         ok: false,
-        error: 'Restricted to authorized Admin IDs.',
+        error: 'Verified Admin session required to update Admin Passcode.',
       });
       return;
     }
@@ -1308,26 +1689,306 @@ async function startServer() {
     });
   });
 
+  app.post('/api/admin/broadcast', async (req, res) => {
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`admin_bcast:${ip}`, 10, 15 * 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({
+        ok: false,
+        error: `Broadcast rate limit reached. Retry in ${rl.retryAfterSec}s.`,
+      });
+      return;
+    }
+
+    const body = req.body as {
+      token?: string;
+      initData?: string;
+      title?: string;
+      message?: string;
+      mediaType?: 'none' | 'photo' | 'video' | 'animation';
+      mediaUrl?: string;
+      buttonText?: string;
+      buttonUrl?: string;
+      excludeBanned?: boolean;
+      testOnlyToAdmin?: boolean;
+    };
+
+    const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
+    const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
+    const resolvedPlayerId = resolveVerifiedAdminActor({
+      req,
+      token: body.token,
+      initData: body.initData,
+      extraAdminIds: effectiveExtraAdmins,
+    });
+
+    if (!resolvedPlayerId) {
+      res.status(403).json({ ok: false, error: 'Verified Admin session required to send broadcasts.' });
+      return;
+    }
+
+    if (!TELEGRAM_BOT_TOKEN) {
+      res.status(400).json({ ok: false, error: 'TELEGRAM_BOT_TOKEN is not configured on server.' });
+      return;
+    }
+
+    const rawTitle = String(body.title || '').trim().slice(0, 100);
+    const rawMessage = String(body.message || '').trim().slice(0, 2000);
+    if (!rawTitle && !rawMessage) {
+      res.status(400).json({ ok: false, error: 'Enter a broadcast title or message.' });
+      return;
+    }
+
+    const mediaType =
+      body.mediaType === 'photo' || body.mediaType === 'video' || body.mediaType === 'animation'
+        ? body.mediaType
+        : 'none';
+    const mediaUrl = String(body.mediaUrl || '').trim();
+    if (mediaType !== 'none' && !isSafePublicHttpsUrl(mediaUrl)) {
+      res.status(400).json({
+        ok: false,
+        error: 'Enter a valid public HTTPS media URL (http:// or local network URLs are blocked).',
+      });
+      return;
+    }
+
+    const buttonText = String(body.buttonText || '').trim().slice(0, 32);
+    const buttonUrl = String(body.buttonUrl || '').trim();
+    if (buttonText && !isSafePublicHttpsUrl(buttonUrl)) {
+      res.status(400).json({
+        ok: false,
+        error: 'CTA button URL must be a valid public HTTPS URL.',
+      });
+      return;
+    }
+
+    const htmlParts: string[] = [];
+    if (rawTitle) htmlParts.push(`📢 <b>${escapeHtml(rawTitle)}</b>`);
+    if (rawMessage) htmlParts.push(escapeHtml(rawMessage));
+    const formattedText = htmlParts.join('\n\n').slice(0, mediaType === 'none' ? 4096 : 1024);
+
+    const botUsername = await resolveTelegramBotUsername();
+    const defaultMiniAppUrl = `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}`;
+    const replyMarkup =
+      buttonText && buttonUrl
+        ? { inline_keyboard: [[{ text: buttonText, url: buttonUrl }]] }
+        : { inline_keyboard: [[{ text: '🐔 Open Alpha Gram', url: defaultMiniAppUrl }]] };
+
+    const adminNumericId = extractTelegramNumericUserId(resolvedPlayerId);
+    const targetChatIds = body.testOnlyToAdmin
+      ? (adminNumericId ? [adminNumericId] : [])
+      : await collectBroadcastRecipients(body.excludeBanned !== false);
+
+    if (targetChatIds.length === 0) {
+      res.json({
+        ok: true,
+        totalTargets: 0,
+        sentCount: 0,
+        failedCount: 0,
+        blockedCount: 0,
+        testOnlyToAdmin: Boolean(body.testOnlyToAdmin),
+        sampleError: body.testOnlyToAdmin
+          ? 'Your active Admin ID is not a numeric Telegram chat ID.'
+          : 'No Telegram user chat IDs found in database yet.',
+      });
+      return;
+    }
+
+    let sentCount = 0;
+    let failedCount = 0;
+    let blockedCount = 0;
+    let sampleError = '';
+
+    const endpoint =
+      mediaType === 'photo'
+        ? 'sendPhoto'
+        : mediaType === 'video'
+          ? 'sendVideo'
+          : mediaType === 'animation'
+            ? 'sendAnimation'
+            : 'sendMessage';
+
+    const mediaField =
+      mediaType === 'photo'
+        ? 'photo'
+        : mediaType === 'video'
+          ? 'video'
+          : 'animation';
+
+    for (const chatId of targetChatIds) {
+      const payload: Record<string, unknown> =
+        mediaType === 'none'
+          ? {
+              chat_id: chatId,
+              text: formattedText,
+              parse_mode: 'HTML',
+              reply_markup: replyMarkup,
+            }
+          : {
+              chat_id: chatId,
+              [mediaField]: mediaUrl,
+              caption: formattedText,
+              parse_mode: 'HTML',
+              reply_markup: replyMarkup,
+            };
+
+      try {
+        let tgRes = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${endpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(8000),
+        });
+        let tgData = (await tgRes.json()) as {
+          ok?: boolean;
+          error_code?: number;
+          description?: string;
+          parameters?: { retry_after?: number };
+        };
+
+        if (tgData.error_code === 429 && tgData.parameters?.retry_after) {
+          const waitMs = Math.min(5000, Math.max(500, tgData.parameters.retry_after * 1000));
+          await new Promise((r) => setTimeout(r, waitMs));
+          tgRes = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${endpoint}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(8000),
+          });
+          tgData = (await tgRes.json()) as typeof tgData;
+        }
+
+        if (tgData.ok) {
+          sentCount += 1;
+        } else {
+          failedCount += 1;
+          const desc = String(tgData.description || '');
+          if (desc.toLowerCase().includes('blocked') || desc.toLowerCase().includes('chat not found')) {
+            blockedCount += 1;
+          }
+          if (!sampleError && desc) {
+            sampleError = redactBotToken(desc);
+          }
+        }
+      } catch (err) {
+        failedCount += 1;
+        if (!sampleError) {
+          sampleError = redactBotToken(err instanceof Error ? err.message : 'Telegram API error');
+        }
+      }
+
+      if (targetChatIds.length > 1) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+
+    res.json({
+      ok: true,
+      totalTargets: targetChatIds.length,
+      sentCount,
+      failedCount,
+      blockedCount,
+      testOnlyToAdmin: Boolean(body.testOnlyToAdmin),
+      ...(sampleError ? { sampleError } : {}),
+    });
+  });
+
+  app.post('/api/reminders/sync', (req, res) => {
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`rem_sync:${ip}`, 40, 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({ ok: false, error: 'Too many reminder sync requests.' });
+      return;
+    }
+
+    const body = req.body as {
+      playerId?: string;
+      initData?: string;
+      enabled?: boolean;
+      basketFullAtMs?: number;
+      feedBoostUntilMs?: number;
+      coopFeverUntilMs?: number;
+      autoHarvestUntilMs?: number;
+    };
+
+    let playerId = String(body.playerId || '').trim();
+    const rawInitData = String(body.initData || '').trim();
+    if (rawInitData && TELEGRAM_BOT_TOKEN) {
+      const check = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN);
+      if (!check.valid || !check.playerId) {
+        res.status(401).json({ ok: false, error: 'Invalid Telegram session.' });
+        return;
+      }
+      playerId = check.playerId;
+    }
+
+    if (!isValidSafeId(playerId)) {
+      res.status(400).json({ ok: false, error: 'Valid playerId required.' });
+      return;
+    }
+
+    const telegramChatId = extractTelegramNumericUserId(playerId);
+    if (!telegramChatId) {
+      res.json({ ok: true, registered: false, reason: 'no_telegram_chat_id' });
+      return;
+    }
+
+    const prev = reminderStore.get(playerId);
+    const clampMs = (v: unknown) => {
+      const n = Math.floor(Number(v) || 0);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    };
+
+    const next: PlayerReminderRecord = {
+      playerId,
+      telegramChatId,
+      enabled: body.enabled !== false,
+      basketFullAtMs: clampMs(body.basketFullAtMs),
+      feedBoostUntilMs: clampMs(body.feedBoostUntilMs),
+      coopFeverUntilMs: clampMs(body.coopFeverUntilMs),
+      autoHarvestUntilMs: clampMs(body.autoHarvestUntilMs),
+      lastBasketSentForAt: prev?.lastBasketSentForAt ?? 0,
+      lastFeedSentForAt: prev?.lastFeedSentForAt ?? 0,
+      lastFeverSentForAt: prev?.lastFeverSentForAt ?? 0,
+      lastDroneSentForAt: prev?.lastDroneSentForAt ?? 0,
+      updatedAtMs: Date.now(),
+    };
+
+    reminderStore.set(playerId, next);
+    persistRemindersToDisk();
+    res.json({ ok: true, registered: true, enabled: next.enabled });
+  });
+
   app.post('/api/referrals/notify', async (req, res) => {
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`ref_notify:${ip}`, 30, 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({ ok: false, sent: false, reason: 'Rate limit exceeded' });
+      return;
+    }
+
     const body = req.body as {
       event?: 'referral_joined' | 'deposit_commission';
       referrerUid?: string;
+      referredUid?: string;
       referredName?: string;
       referredHandle?: string;
       rewardCoins?: number;
       depositGram?: string;
       depositUsd?: number;
+      initData?: string;
     };
 
     const referrerUid = String(body.referrerUid || '').trim();
+    const referredUid = String(body.referredUid || '').trim();
     const numericReferrerId = extractTelegramNumericUserId(referrerUid);
     const event = body.event === 'deposit_commission' ? 'deposit_commission' : 'referral_joined';
-    const rewardCoins = Math.max(
-      0,
-      Math.round(Number(body.rewardCoins ?? (event === 'referral_joined' ? REFERRER_SIGNUP_BONUS_COINS : 0))),
+    const rewardCoins = Math.min(
+      10_000,
+      Math.max(0, Math.round(Number(body.rewardCoins ?? (event === 'referral_joined' ? REFERRER_SIGNUP_BONUS_COINS : 0)))),
     );
 
-    if (!numericReferrerId) {
+    if (!isValidSafeId(referrerUid) || !numericReferrerId) {
       res.json({
         ok: true,
         sent: false,
@@ -1335,6 +1996,37 @@ async function startServer() {
       });
       return;
     }
+
+    if (serverDb && isValidSafeId(referredUid)) {
+      try {
+        const refSnap = await getFreshDoc(doc(serverDb, 'players', referrerUid, 'referrals', referredUid));
+        if (!refSnap.exists()) {
+          const referredSnap = await getFreshDoc(doc(serverDb, 'players', referredUid));
+          const linkedReferrer = referredSnap.exists() ? String(referredSnap.data()?.referredBy || '') : '';
+          if (linkedReferrer !== referrerUid) {
+            res.status(403).json({ ok: false, sent: false, reason: 'Unverified referral relationship' });
+            return;
+          }
+        }
+      } catch {
+        // Proceed if Firestore offline check is inconclusive
+      }
+    } else if (body.initData && TELEGRAM_BOT_TOKEN) {
+      const check = verifyTelegramInitData(String(body.initData), TELEGRAM_BOT_TOKEN);
+      if (!check.valid) {
+        res.status(401).json({ ok: false, sent: false, reason: 'Invalid session' });
+        return;
+      }
+    }
+
+    const dedupKey = `${event}:${referrerUid}:${referredUid || rewardCoins}:${String(body.depositGram || '')}`;
+    const prevSentAt = referralNotifyDedup.get(dedupKey);
+    if (prevSentAt && Date.now() - prevSentAt < 60_000) {
+      res.json({ ok: true, sent: false, reason: 'Duplicate notification suppressed' });
+      return;
+    }
+    referralNotifyDedup.set(dedupKey, Date.now());
+    if (referralNotifyDedup.size > 1000) referralNotifyDedup.clear();
 
     if (!TELEGRAM_BOT_TOKEN) {
       res.json({
@@ -1372,13 +2064,13 @@ async function startServer() {
       res.json({
         ok: true,
         sent: Boolean(tgData.ok),
-        reason: tgData.ok ? undefined : tgData.description || 'Telegram API error',
+        reason: tgData.ok ? undefined : redactBotToken(tgData.description || 'Telegram API error'),
       });
     } catch (err) {
       res.json({
         ok: true,
         sent: false,
-        reason: err instanceof Error ? err.message : 'Telegram request failed',
+        reason: redactBotToken(err instanceof Error ? err.message : 'Telegram request failed'),
       });
     }
   });
@@ -1441,21 +2133,32 @@ async function startServer() {
   });
 
   app.post('/api/deposits/check-gram', async (req, res) => {
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`dep_chk:${ip}`, 35, 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({ error: `Too many deposit checks. Retry in ${rl.retryAfterSec}s.` });
+      return;
+    }
+
     const body = req.body as {
       playerId?: string;
       claimedTxHashes?: string[];
     };
 
     const playerId = String(body.playerId || '').trim();
-    const memo = playerId ? getPrimaryDepositMemo(playerId) : '';
-    const acceptedMemos = playerId ? buildAcceptedDepositMemos(playerId) : [];
+    if (!isValidSafeId(playerId)) {
+      res.status(400).json({ error: 'Valid User ID is required.' });
+      return;
+    }
+    const memo = getPrimaryDepositMemo(playerId);
+    const acceptedMemos = buildAcceptedDepositMemos(playerId);
     const clientClaimed = Array.isArray(body.claimedTxHashes)
-      ? body.claimedTxHashes.map((s) => String(s))
+      ? body.claimedTxHashes.slice(0, 100).map((s) => String(s).slice(0, 128))
       : [];
     const dbClaimed = await loadFirestoreClaimedTxHashes();
     const allClaimed = [...clientClaimed, ...dbClaimed, ...Array.from(processedServerTxHashes)];
 
-    if (!playerId || acceptedMemos.length === 0) {
+    if (acceptedMemos.length === 0) {
       res.status(400).json({ error: 'Valid User ID memo is required for automatic deposit detection.' });
       return;
     }
@@ -1567,7 +2270,17 @@ async function startServer() {
   });
 
   app.post('/api/withdraw/notify', async (req, res) => {
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`wd_notify:${ip}`, 25, 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({ ok: false, sent: false, reason: 'Too many requests' });
+      return;
+    }
+
     const body = req.body as {
+      withdrawalId?: string;
+      token?: string;
+      initData?: string;
       displayName?: string;
       handle?: string;
       playerId?: string;
@@ -1580,15 +2293,83 @@ async function startServer() {
       adminNote?: string;
     };
 
-    const displayName = escapeHtml(String(body.displayName || 'Farmer').slice(0, 60));
-    const handle = escapeHtml(String(body.handle || '@farmer').slice(0, 40));
-    const eggsAmount = Number(body.eggsAmount || 0);
-    const gramAmount = escapeHtml(String(body.gramAmount || '0'));
-    const usdValue = Number(body.usdValue || 0).toFixed(4);
-    const walletAddress = escapeHtml(String(body.walletAddress || '').slice(0, 128));
-    const memo = escapeHtml(String(body.memo || '').slice(0, 64));
-    const adminNote = escapeHtml(String(body.adminNote || '').slice(0, 120));
     const status = body.status === 'approved' || body.status === 'rejected' ? body.status : 'pending';
+    const withdrawalId = String(body.withdrawalId || '').trim();
+
+    if (status === 'approved' || status === 'rejected') {
+      const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
+      const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
+      const verifiedAdmin = resolveVerifiedAdminActor({
+        req,
+        token: body.token,
+        initData: body.initData,
+        extraAdminIds: effectiveExtraAdmins,
+      });
+      if (!verifiedAdmin) {
+        res.status(403).json({
+          ok: false,
+          sent: false,
+          reason: 'Admin authorization required for payout approval notifications.',
+        });
+        return;
+      }
+    }
+
+    let authDisplayName = String(body.displayName || 'Farmer').slice(0, 60);
+    let authHandle = String(body.handle || '@farmer').slice(0, 40);
+    let authEggs = Number(body.eggsAmount || 0);
+    let authGram = String(body.gramAmount || '0');
+    let authUsd = Number(body.usdValue || 0);
+    let authWallet = String(body.walletAddress || '').slice(0, 128);
+    let authMemo = String(body.memo || '').slice(0, 64);
+
+    if (serverDb && isValidSafeId(withdrawalId)) {
+      try {
+        const wdSnap = await getFreshDoc(doc(serverDb, 'withdraw_requests', withdrawalId));
+        if (!wdSnap.exists()) {
+          res.status(403).json({ ok: false, sent: false, reason: 'Withdrawal record not found in database.' });
+          return;
+        }
+        const d = wdSnap.data();
+        if (String(d.status || '') !== status) {
+          res.status(403).json({ ok: false, sent: false, reason: 'Withdrawal status mismatch.' });
+          return;
+        }
+        authDisplayName = String(d.displayName || authDisplayName);
+        authHandle = String(d.handle || authHandle);
+        authEggs = Number(d.eggsAmount ?? authEggs);
+        authGram = String(d.gramAmount || authGram);
+        authUsd = Number(d.usdValue ?? authUsd);
+        authWallet = String(d.walletAddress || authWallet);
+        authMemo = String(d.memo || authMemo);
+      } catch {
+        // Fallback when Firestore offline check fails
+      }
+    } else if (status === 'pending' && body.initData && TELEGRAM_BOT_TOKEN) {
+      const check = verifyTelegramInitData(String(body.initData), TELEGRAM_BOT_TOKEN);
+      if (!check.valid) {
+        res.status(401).json({ ok: false, sent: false, reason: 'Invalid session' });
+        return;
+      }
+    }
+
+    const dedupKey = `${withdrawalId || authWallet}:${status}`;
+    const prevWd = withdrawNotifyDedup.get(dedupKey);
+    if (prevWd && Date.now() - prevWd < 60_000) {
+      res.json({ ok: true, sent: false, channel: TELEGRAM_PAYOUT_CHANNEL, reason: 'Duplicate suppressed' });
+      return;
+    }
+    withdrawNotifyDedup.set(dedupKey, Date.now());
+    if (withdrawNotifyDedup.size > 1000) withdrawNotifyDedup.clear();
+
+    const displayName = escapeHtml(authDisplayName);
+    const handle = escapeHtml(authHandle);
+    const eggsAmount = Math.max(0, Math.floor(authEggs));
+    const gramAmount = escapeHtml(authGram);
+    const usdValue = Math.max(0, authUsd).toFixed(4);
+    const walletAddress = escapeHtml(authWallet);
+    const memo = escapeHtml(authMemo);
+    const adminNote = escapeHtml(String(body.adminNote || '').slice(0, 120));
 
     if (!TELEGRAM_BOT_TOKEN) {
       res.json({
@@ -1642,19 +2423,25 @@ async function startServer() {
         ok: true,
         sent: Boolean(tgData.ok),
         channel: TELEGRAM_PAYOUT_CHANNEL,
-        reason: tgData.ok ? undefined : tgData.description || 'Telegram API error',
+        reason: tgData.ok ? undefined : redactBotToken(tgData.description || 'Telegram API error'),
       });
     } catch (err) {
       res.json({
         ok: true,
         sent: false,
         channel: TELEGRAM_PAYOUT_CHANNEL,
-        reason: err instanceof Error ? err.message : 'Telegram request failed',
+        reason: redactBotToken(err instanceof Error ? err.message : 'Telegram request failed'),
       });
     }
   });
 
   void ensureAdminPasscodeSeededInDatabase();
+  const reminderInterval = setInterval(() => {
+    void processDueReminders();
+  }, 30_000);
+  if (typeof reminderInterval.unref === 'function') {
+    reminderInterval.unref();
+  }
 
   if (process.env.NODE_ENV !== 'production') {
     const httpServer = http.createServer(app);

@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  activateCoopFever,
   activateFeedBooster,
   AD_EXEMPT_ACTIONS,
   AD_GATED_ACTIONS,
   AD_NETWORK_TASKS,
   ADMIN_PASSCODE_VAULT_UID,
   ADSGRAM_BOT_JOIN_TASK,
+  applyAutoHarvestIfDue,
+  AUTO_HARVEST_DRONE_TIERS,
   buildDeterministicDepositIds,
   buildEarningsChartSeries,
   buildInvitedFriendsList,
@@ -17,10 +20,13 @@ import {
   calculateBuyerPoints,
   calculateLevelYieldMultiplier,
   calculatePaidTaskCost,
+  calculatePaidTaskFromBudget,
+  calculatePaidTaskTopUp,
   calculatePendingEggs,
   calculateProductionRate,
   calculateReferralBonusEggs,
   calculateReferralEggCommission,
+  calculateTaskRefundAmount,
   canAddAdminPlayerId,
   canBanPlayerId,
   canRemoveAdminPlayerId,
@@ -35,10 +41,15 @@ import {
   completeTask,
   computeAdminCoinAdjustment,
   computeAdminReferralCountAdjustment,
+  COOP_FEVER_DURATION_MS,
+  COOP_FEVER_MULTIPLIER,
+  COOP_FEVER_REQUIRED_ADS,
   createDefaultProfile,
   createDefaultSeasonConfig,
   createDepositQuote,
   createPaidTaskOrder,
+  createRefundPaidTaskOrder,
+  createTopUpPaidTaskOrder,
   decodeAchievementsAndAds,
   decodePromoLabelMeta,
   decodeTaskSubtitleMeta,
@@ -57,6 +68,11 @@ import {
   FEED_BOOSTER_COST_COINS,
   FEED_BOOSTER_DURATION_MS,
   filterPlayersBySearchQuery,
+  getCoopFeverProgress,
+  isAutoHarvestDroneActive,
+  isCoopFeverActive,
+  purchaseAutoHarvestDrone,
+  USER_TASK_MIN_REWARD_COINS,
   filterWithdrawalsByTab,
   formatAdConfigTemplate,
   formatChannelsHandleSummary,
@@ -1835,11 +1851,12 @@ test('paid user task creation enforces 5k min (30 joins, 150/join, 10% fee min 5
   assert.equal(scaledCost.platformFeeCoins, 800);
   assert.equal(scaledCost.totalCostCoins, 8800);
 
-  // Inputs below minimums clamp safely to 150 reward / 30 slots / 5,000 total
-  const clampedCost = calculatePaidTaskCost(50, 10);
-  assert.equal(clampedCost.rewardCoins, 150);
+  // Inputs below minimums clamp safely to 50 reward / 30 slots
+  const clampedCost = calculatePaidTaskCost(20, 10);
+  assert.equal(clampedCost.rewardCoins, USER_TASK_MIN_REWARD_COINS);
+  assert.equal(clampedCost.rewardCoins, 50);
   assert.equal(clampedCost.totalSlots, 30);
-  assert.equal(clampedCost.totalCostCoins, 5000);
+  assert.equal(clampedCost.totalCostCoins, 2000);
 
   const { profile } = createDefaultProfile('player_creator1', 'Aarav', '@aarav', NOW);
   assert.equal(profile.coins, 1000);
@@ -1861,14 +1878,14 @@ test('paid user task creation enforces 5k min (30 joins, 150/join, 10% fee min 5
 
   const fundedCreator = { ...profile, coins: 6000 };
 
-  // Below min reward (< 150) rejected
+  // Below min reward (< 50) rejected
   const lowReward = createPaidTaskOrder(
     fundedCreator,
     {
       title: 'Low Reward Task',
       category: 'social',
-      rewardCoins: 100,
-      totalSlots: 30,
+      rewardCoins: 49,
+      totalSlots: 120,
       icon: 'send',
       actionUrl: '',
     },
@@ -2794,3 +2811,179 @@ test('normalizeTelegramChannelHandle parses telegram.me URLs, private t.me/c lin
     url: '',
   });
 });
+
+test('calculatePaidTaskFromBudget computes exact slots, posting fee, and total coins deducted from coin budget', () => {
+  // Exact minimum 5,000 coins at 150 coins/join -> 30 slots (4,500) + 500 fee = 5,000 deducted
+  const minBudget = calculatePaidTaskFromBudget(5000, 150);
+  assert.equal(minBudget.valid, true);
+  assert.equal(minBudget.totalSlots, 30);
+  assert.equal(minBudget.rewardPoolCoins, 4500);
+  assert.equal(minBudget.platformFeeCoins, 500);
+  assert.equal(minBudget.totalCostCoins, 5000);
+  assert.equal(minBudget.unspentCoins, 0);
+
+  // 11,000 coins at 200 coins/join -> 50 slots (10,000) + 1,000 fee = 11,000 deducted
+  const larger = calculatePaidTaskFromBudget(11000, 200);
+  assert.equal(larger.valid, true);
+  assert.equal(larger.totalSlots, 50);
+  assert.equal(larger.rewardPoolCoins, 10000);
+  assert.equal(larger.platformFeeCoins, 1000);
+  assert.equal(larger.totalCostCoins, 11000);
+  assert.equal(larger.unspentCoins, 0);
+
+  // 10,000 coins at 150 coins/join -> 60 slots (9,000) + 900 fee = 9,900 deducted, 100 left unspent
+  const partial = calculatePaidTaskFromBudget(10000, 150);
+  assert.equal(partial.valid, true);
+  assert.equal(partial.totalSlots, 60);
+  assert.equal(partial.platformFeeCoins, 900);
+  assert.equal(partial.totalCostCoins, 9900);
+  assert.equal(partial.unspentCoins, 100);
+
+  // Below 5,000 coins rejected
+  const tooLow = calculatePaidTaskFromBudget(4999, 150);
+  assert.equal(tooLow.valid, false);
+  assert.ok(tooLow.error?.includes('5,000'));
+
+  // High reward per join requiring > 5,000 for 30 slots surfaces minimum required coins
+  const highReward = calculatePaidTaskFromBudget(5000, 500);
+  assert.equal(highReward.valid, false);
+  assert.equal(highReward.minBudgetForReward, 16500);
+  assert.ok(highReward.error?.includes('16,500'));
+
+  // 50 coins/click with 5,000 coin budget yields 90 slots (4,500 pool + 500 fee = 5,000)
+  const min50Budget = calculatePaidTaskFromBudget(5000, 50);
+  assert.equal(min50Budget.valid, true);
+  assert.equal(min50Budget.rewardCoins, 50);
+  assert.equal(min50Budget.totalSlots, 90);
+  assert.equal(min50Budget.rewardPoolCoins, 4500);
+  assert.equal(min50Budget.platformFeeCoins, 500);
+  assert.equal(min50Budget.totalCostCoins, 5000);
+});
+
+test('paid task top-up and refund calculate added slots, fees, and unused pool refunds cleanly', () => {
+  const { profile } = createDefaultProfile('player_sponsor', 'Karan', '@karan', NOW);
+  const richSponsor = { ...profile, coins: 20000 };
+  const task = {
+    id: 'task_sponsor_1',
+    title: 'Join VIP Channel',
+    rewardCoins: 50,
+    totalSlots: 90,
+    claimedCount: 30,
+    creatorUid: 'player_sponsor',
+  };
+
+  // Top-up 1,100 coins at 50/click -> 20 slots (1,000 pool + 100 fee = 1,100)
+  const topUpPreview = calculatePaidTaskTopUp(50, 1100, 90);
+  assert.equal(topUpPreview.valid, true);
+  assert.equal(topUpPreview.additionalSlots, 20);
+  assert.equal(topUpPreview.totalCostCoins, 1100);
+
+  const topUpOrder = createTopUpPaidTaskOrder(richSponsor, task, 1100, NOW);
+  assert.ok(!('error' in topUpOrder));
+  assert.equal(topUpOrder.profile.coins, 18900);
+  assert.equal(topUpOrder.transaction.type, 'task_topup');
+  assert.equal(topUpOrder.transaction.amount, -1100);
+
+  // Refund unused slots (90 - 30 = 60 slots * 50 coins = 3,000 coins)
+  const refundCalc = calculateTaskRefundAmount(task);
+  assert.equal(refundCalc.remainingSlots, 60);
+  assert.equal(refundCalc.refundCoins, 3000);
+
+  const refundOrder = createRefundPaidTaskOrder(topUpOrder.profile, task, NOW + 1000);
+  assert.ok(!('error' in refundOrder));
+  assert.equal(refundOrder.refundCoins, 3000);
+  assert.equal(refundOrder.profile.coins, 21900);
+  assert.equal(refundOrder.transaction.type, 'task_refund');
+});
+
+test('Coop Fever unlocks after 25 ads watched, grants 3x production multiplier, and resets cleanly', () => {
+  let { profile } = createDefaultProfile('player_fever', 'Riya', '@riya', NOW);
+  const bought = buyChickens({ ...profile, coins: 5000 }, 'leghorn', 2, NOW);
+  assert.ok(!('error' in bought));
+  profile = { ...bought.profile, totalAdsWatched: 24, watchedAdsCount: 4 };
+
+  const progress24 = getCoopFeverProgress(profile, NOW);
+  assert.equal(progress24.adsCollected, 24);
+  assert.equal(progress24.adsRemaining, 1);
+  assert.equal(progress24.ready, false);
+
+  const blocked = activateCoopFever(profile, NOW);
+  assert.ok('error' in blocked);
+
+  // Reach 27 ads -> 2 excess carry over after consuming 25
+  profile = { ...profile, totalAdsWatched: 27 };
+  const readyProg = getCoopFeverProgress(profile, NOW);
+  assert.equal(readyProg.ready, true);
+  assert.equal(readyProg.adsCollected, COOP_FEVER_REQUIRED_ADS);
+
+  const baseRate = calculateProductionRate(profile, NOW);
+  assert.equal(baseRate, 16);
+
+  const activated = activateCoopFever(profile, NOW);
+  assert.ok(!('error' in activated));
+  assert.equal(activated.multiplier, COOP_FEVER_MULTIPLIER);
+  assert.equal(isCoopFeverActive(activated.profile, NOW + 1000), true);
+  assert.equal(activated.profile.coopFeverUntilMs, NOW + COOP_FEVER_DURATION_MS);
+  assert.equal(activated.profile.coopFeverBaselineAds, 25);
+
+  const feverRate = calculateProductionRate(activated.profile, NOW + 1000);
+  assert.equal(feverRate, 16 * 3);
+
+  // Check next cycle progress carries over remaining 2 ads
+  const nextCycle = getCoopFeverProgress(activated.profile, NOW + COOP_FEVER_DURATION_MS + 1000);
+  assert.equal(nextCycle.active, false);
+  assert.equal(nextCycle.adsCollected, 2);
+  assert.equal(nextCycle.adsRemaining, 23);
+});
+
+test('Auto-Harvest Drone supports 5h/10h/15h/20h/24h/7d in coins or eggs and harvests without basket cap loss', () => {
+  assert.deepEqual(
+    AUTO_HARVEST_DRONE_TIERS.map((t) => t.id),
+    ['5h', '10h', '15h', '20h', '24h', '7d'],
+  );
+
+  const { profile: raw } = createDefaultProfile('player_drone', 'Dev', '@dev', NOW);
+  const bought = buyChickens({ ...raw, coins: 35000, eggs: 100_000 }, 'orpington', 1, NOW);
+  assert.ok(!('error' in bought));
+  const farmer = bought.profile; // 75 eggs/hr, basketCapacity = 300
+
+  // Purchase 5h with coins (250 coins)
+  const coinBuy = purchaseAutoHarvestDrone(farmer, '5h', 'coins', NOW);
+  assert.ok(!('error' in coinBuy));
+  assert.equal(coinBuy.profile.coins, farmer.coins - 250);
+  assert.equal(isAutoHarvestDroneActive(coinBuy.profile, NOW + 1000), true);
+
+  // Stack 10h with eggs (27,000 eggs) -> total 15h window
+  const eggBuy = purchaseAutoHarvestDrone(coinBuy.profile, '10h', 'eggs', NOW);
+  assert.ok(!('error' in eggBuy));
+  assert.equal(eggBuy.profile.eggs, farmer.eggs - 27_000);
+  assert.equal(eggBuy.profile.autoHarvestUntilMs, NOW + 15 * 3_600_000);
+
+  // Simulate 10 hours passing -> level 2 Orpington rate (77/hr) * 10 = 770 eggs (> 300 basketCapacity!) auto-harvested cleanly
+  const expected10h = calculateProductionRate(eggBuy.profile, NOW + 1000) * 10;
+  const after10h = applyAutoHarvestIfDue(eggBuy.profile, NOW + 10 * 3_600_000);
+  assert.equal(after10h.autoHarvestedEggs, expected10h);
+  assert.equal(after10h.profile.eggs, eggBuy.profile.eggs + expected10h);
+  assert.equal(after10h.profile.totalEggsCollected, eggBuy.profile.totalEggsCollected + expected10h);
+});
+
+test('compact achievement tokens round-trip ads, Coop Fever, Auto-Harvest Drone, and reminder preference under 50-item cap', () => {
+  const encoded = encodeAchievementsWithAds(['first_harvest', 'flock_5'], 42, {
+    coopFeverUntilMs: 1794800000000,
+    coopFeverBaselineAds: 25,
+    autoHarvestUntilMs: 1794900000000,
+    telegramRemindersEnabled: false,
+  });
+  assert.ok(encoded.length <= 50);
+  assert.ok(encoded.every((item) => item.length <= 64));
+
+  const decoded = decodeAchievementsAndAds(encoded);
+  assert.deepEqual(decoded.claimedAchievementIds, ['first_harvest', 'flock_5']);
+  assert.equal(decoded.totalAdsWatched, 42);
+  assert.equal(decoded.coopFeverUntilMs, 1794800000000);
+  assert.equal(decoded.coopFeverBaselineAds, 25);
+  assert.equal(decoded.autoHarvestUntilMs, 1794900000000);
+  assert.equal(decoded.telegramRemindersEnabled, false);
+});
+
+

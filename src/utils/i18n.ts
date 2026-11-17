@@ -13,6 +13,7 @@ export const LANGUAGE_OPTIONS: { code: LanguageCode; label: string }[] = [
 const DICTIONARY: Record<LanguageCode, {
   farm: string;
   packs: string;
+  ranks: string;
   tasks: string;
   friends: string;
   wallet: string;
@@ -36,6 +37,7 @@ const DICTIONARY: Record<LanguageCode, {
   en: {
     farm: 'Farm',
     packs: 'Packs',
+    ranks: 'Ranks',
     tasks: 'Tasks',
     friends: 'Friends',
     wallet: 'Wallet',
@@ -59,6 +61,7 @@ const DICTIONARY: Record<LanguageCode, {
   hi: {
     farm: 'फ़ार्म',
     packs: 'पैक',
+    ranks: 'रैंक',
     tasks: 'टास्क',
     friends: 'दोस्त',
     wallet: 'वॉलेट',
@@ -82,6 +85,7 @@ const DICTIONARY: Record<LanguageCode, {
   es: {
     farm: 'Granja',
     packs: 'Packs',
+    ranks: 'Ranking',
     tasks: 'Tareas',
     friends: 'Amigos',
     wallet: 'Billetera',
@@ -105,6 +109,7 @@ const DICTIONARY: Record<LanguageCode, {
   ru: {
     farm: 'Ферма',
     packs: 'Куры',
+    ranks: 'Топ',
     tasks: 'Задания',
     friends: 'Друзья',
     wallet: 'Кошелёк',
@@ -128,6 +133,7 @@ const DICTIONARY: Record<LanguageCode, {
   fr: {
     farm: 'Ferme',
     packs: 'Packs',
+    ranks: 'Classement',
     tasks: 'Tâches',
     friends: 'Amis',
     wallet: 'Portefeuille',
@@ -151,6 +157,7 @@ const DICTIONARY: Record<LanguageCode, {
   pt: {
     farm: 'Fazenda',
     packs: 'Pacotes',
+    ranks: 'Ranking',
     tasks: 'Tarefas',
     friends: 'Amigos',
     wallet: 'Carteira',
@@ -174,6 +181,7 @@ const DICTIONARY: Record<LanguageCode, {
   ar: {
     farm: 'المزرعة',
     packs: 'الباقات',
+    ranks: 'الترتيب',
     tasks: 'المهام',
     friends: 'الأصدقاء',
     wallet: 'المحفظة',

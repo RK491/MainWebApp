@@ -68,37 +68,37 @@ service cloud.firestore {
         && data.photoUrl is string && data.photoUrl.size() <= 512
         && data.avatarColor is string && data.avatarColor.size() >= 4 && data.avatarColor.size() <= 20
         && data.level is number && data.level >= 1 && data.level <= 999
-        && data.xp is number && data.xp >= 0
-        && data.coins is number && data.coins >= 0
-        && data.eggs is number && data.eggs >= 0
-        && data.totalEggsCollected is number && data.totalEggsCollected >= 0
-        && data.totalCashEarnedUsd is number && data.totalCashEarnedUsd >= 0
-        && data.totalWithdrawnUsd is number && data.totalWithdrawnUsd >= 0
-        && data.basketCapacity is number && data.basketCapacity >= 300
+        && data.xp is number && data.xp >= 0 && data.xp <= 100000000
+        && data.coins is number && data.coins >= 0 && data.coins <= 100000000
+        && data.eggs is number && data.eggs >= 0 && data.eggs <= 100000000
+        && data.totalEggsCollected is number && data.totalEggsCollected >= 0 && data.totalEggsCollected <= 500000000
+        && data.totalCashEarnedUsd is number && data.totalCashEarnedUsd >= 0 && data.totalCashEarnedUsd <= 10000000
+        && data.totalWithdrawnUsd is number && data.totalWithdrawnUsd >= 0 && data.totalWithdrawnUsd <= 10000000
+        && data.basketCapacity is number && data.basketCapacity >= 300 && data.basketCapacity <= 1000000
         && data.basketTierHours is number && data.basketTierHours >= 8 && data.basketTierHours <= 72
-        && data.leghornCount is number && data.leghornCount >= 0
-        && data.rhodeCount is number && data.rhodeCount >= 0
-        && data.orpingtonCount is number && data.orpingtonCount >= 0
-        && data.australorpCount is number && data.australorpCount >= 0
-        && data.boughtThisWeek is number && data.boughtThisWeek >= 0
+        && data.leghornCount is number && data.leghornCount >= 0 && data.leghornCount <= 100000
+        && data.rhodeCount is number && data.rhodeCount >= 0 && data.rhodeCount <= 100000
+        && data.orpingtonCount is number && data.orpingtonCount >= 0 && data.orpingtonCount <= 100000
+        && data.australorpCount is number && data.australorpCount >= 0 && data.australorpCount <= 100000
+        && data.boughtThisWeek is number && data.boughtThisWeek >= 0 && data.boughtThisWeek <= 100000
         && data.dailyStreak is number && data.dailyStreak >= 0 && data.dailyStreak <= 7
         && data.lastDailyClaimDate is string && data.lastDailyClaimDate.size() <= 20
         && isBoundedStringList(data.completedTaskIds, 50)
         && isBoundedStringList(data.claimedPromoCodes, 50)
         && data.watchedAdsCount is number && data.watchedAdsCount >= 0 && data.watchedAdsCount <= 10
-        && (!('totalAdsWatched' in data) || (data.totalAdsWatched is number && data.totalAdsWatched >= 0))
+        && (!('totalAdsWatched' in data) || (data.totalAdsWatched is number && data.totalAdsWatched >= 0 && data.totalAdsWatched <= 10000000))
         && data.referralCode is string && data.referralCode.size() >= 3 && data.referralCode.size() <= 32
         && data.referredBy is string && data.referredBy.size() <= 64
         && data.referralActivated is bool
-        && data.referralCount is number && data.referralCount >= 0
-        && data.referralCoinsEarned is number && data.referralCoinsEarned >= 0
+        && data.referralCount is number && data.referralCount >= 0 && data.referralCount <= 1000000
+        && data.referralCoinsEarned is number && data.referralCoinsEarned >= 0 && data.referralCoinsEarned <= 100000000
         && data.firstDepositBonusUsed is bool
         && data.language is string && data.language.size() >= 2 && data.language.size() <= 16
         && data.lastCollectedAt is number && data.lastCollectedAt >= 0
         && data.createdAtMs is number && data.createdAtMs >= 0
         && data.feedBoostUntilMs is number && data.feedBoostUntilMs >= 0
         && data.lastGoldenEggAtMs is number && data.lastGoldenEggAtMs >= 0
-        && data.goldenEggsFound is number && data.goldenEggsFound >= 0
+        && data.goldenEggsFound is number && data.goldenEggsFound >= 0 && data.goldenEggsFound <= 10000000
         && isBoundedStringList(data.claimedAchievementIds, 50)
         && isBoundedNumberList(data.claimedReferralMilestones, 20)
         && data.createdAt is timestamp
@@ -116,7 +116,7 @@ service cloud.firestore {
         ])
         && isValidId(data.userId)
         && data.userId == playerId
-        && data.type in ['collect', 'task', 'deposit', 'withdraw', 'reinvest', 'buy_chicken', 'upgrade_basket', 'promo', 'referral', 'booster', 'golden_egg', 'achievement', 'season_prize', 'admin_adjustment']
+        && data.type in ['collect', 'task', 'task_topup', 'task_refund', 'deposit', 'withdraw', 'reinvest', 'buy_chicken', 'upgrade_basket', 'promo', 'referral', 'booster', 'coop_fever', 'auto_harvest', 'golden_egg', 'achievement', 'season_prize', 'admin_adjustment']
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 80
         && data.amount is number
         && data.currency in ['eggs', 'coins']
@@ -231,7 +231,7 @@ service cloud.firestore {
         && (!('creatorUid' in data) || isValidId(data.creatorUid))
         && (!('paidCoins' in data) || (data.paidCoins is number && data.paidCoins >= 0 && data.paidCoins <= 100000000))
         && (!('creatorUid' in data) || (
-          data.rewardCoins >= 150
+          data.rewardCoins >= 50
           && 'totalSlots' in data && data.totalSlots >= 30
           && 'paidCoins' in data && data.paidCoins >= 5000
         ))
@@ -419,11 +419,11 @@ service cloud.firestore {
         && data.photoUrl is string && data.photoUrl.size() <= 512
         && data.avatarColor is string && data.avatarColor.size() >= 4 && data.avatarColor.size() <= 20
         && data.referralCode is string && data.referralCode.size() >= 3 && data.referralCode.size() <= 32
-        && data.buyerPoints is number && data.buyerPoints >= 0
-        && data.inviterCount is number && data.inviterCount >= 0
-        && data.eggs is number && data.eggs >= 0
-        && data.totalEggsCollected is number && data.totalEggsCollected >= 0
-        && data.chickensCount is number && data.chickensCount >= 0
+        && data.buyerPoints is number && data.buyerPoints >= 0 && data.buyerPoints <= 10000000
+        && data.inviterCount is number && data.inviterCount >= 0 && data.inviterCount <= 1000000
+        && data.eggs is number && data.eggs >= 0 && data.eggs <= 100000000
+        && data.totalEggsCollected is number && data.totalEggsCollected >= 0 && data.totalEggsCollected <= 500000000
+        && data.chickensCount is number && data.chickensCount >= 0 && data.chickensCount <= 1000000
         && data.updatedAt is timestamp;
     }
 

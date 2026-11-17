@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import {
   ArrowLeft,
+  ArrowUpRight,
   Award,
   Bell,
   Check,
   CheckCircle2,
   ChevronDown,
+  Coins,
   Copy,
   Globe,
   HelpCircle,
@@ -15,7 +17,6 @@ import {
   ShieldCheck,
   Sparkles,
   Sun,
-  Trees,
   Volume2,
   X,
   Zap,
@@ -26,19 +27,16 @@ import {
   calculateProductionRate,
   calculateTotalChickens,
   CHICKEN_PACKS,
+  eggsToGram,
+  eggsToUsd,
   FEED_BOOSTER_COST_COINS,
   getAchievementsProgress,
+  getWithdrawAdGateStatus,
   getXpForLevel,
   isAdminPlayerId,
   isFeedBoosterActive,
   PRIMARY_ADMIN_TELEGRAM_ID,
 } from '../game/economy';
-import {
-  countEnabledFarmArtifacts,
-  FARM_ARTIFACT_PRESETS,
-  FARM_ARTIFACTS,
-  type FarmArtifactLayout,
-} from '../game/farmArtifacts';
 import { getPrimaryDepositMemo } from '../game/tonGram';
 import type { LanguageCode, UserFarmProfile } from '../types/farm';
 import { LANGUAGE_OPTIONS, t } from '../utils/i18n';
@@ -364,13 +362,12 @@ interface YourFarmViewProps {
   pendingEggs: number;
   notificationsEnabled: boolean;
   notificationPermission: BrowserNotificationPermission;
-  artifactLayout?: FarmArtifactLayout;
   onBack: () => void;
   onUpgradeBasket: () => void;
   onGoPacks: () => void;
+  onOpenWithdraw?: () => void;
   onToggleNotifications: () => void;
   onActivateBooster?: () => void;
-  onOpenArtifactsDrawer?: () => void;
 }
 
 export function YourFarmView({
@@ -378,13 +375,12 @@ export function YourFarmView({
   pendingEggs,
   notificationsEnabled,
   notificationPermission,
-  artifactLayout,
   onBack,
   onUpgradeBasket,
   onGoPacks,
+  onOpenWithdraw,
   onToggleNotifications,
   onActivateBooster,
-  onOpenArtifactsDrawer,
 }: YourFarmViewProps) {
   const prefersReducedMotion = useReducedMotion();
   const [liveNowMs, setLiveNowMs] = useState(() => Date.now());
@@ -519,69 +515,85 @@ export function YourFarmView({
         </div>
       )}
 
-      {/* Farm Artifacts Showcase */}
-      {artifactLayout && onOpenArtifactsDrawer && (() => {
-        const activeProps = FARM_ARTIFACTS.filter((a) => artifactLayout.items[a.id]?.enabled);
-        const activeCount = countEnabledFarmArtifacts(artifactLayout);
-        const presetMeta = FARM_ARTIFACT_PRESETS.find((p) => p.id === artifactLayout.preset);
+      {/* GRAM Token Mining Output & Payout Telemetry */}
+      {(() => {
+        const gramHourly = eggsToGram(productionRate);
+        const gramDaily = eggsToGram(productionRate * 24);
+        const eggsGramVal = eggsToGram(profile.eggs);
+        const eggsUsdVal = eggsToUsd(profile.eggs);
+        const adGate = getWithdrawAdGateStatus(profile);
+        const adPct = Math.min(100, Math.round((adGate.watched / Math.max(1, adGate.required)) * 100));
         return (
           <div className="clay-card p-4 space-y-3">
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-3 min-w-0">
                 <div className="w-11 h-11 rounded-2xl clay-icon-well flex items-center justify-center text-emerald-600 dark:text-emerald-400 shrink-0">
-                  <Trees className="w-5 h-5" />
+                  <Coins className="w-5 h-5" />
                 </div>
                 <div className="min-w-0">
                   <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-1.5">
-                    <span>Farm Artifacts</span>
+                    <span>GRAM Mining Output</span>
                     <span className="px-2 py-0.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-extrabold font-mono-num text-emerald-800 dark:text-emerald-300">
-                      {activeCount}/{FARM_ARTIFACTS.length}
+                      TON
                     </span>
                   </div>
                   <div className="text-xs text-stone-500 dark:text-stone-400 truncate">
-                    {presetMeta ? presetMeta.name : 'Custom Meadow'} · Barn, fences, hay, pond &amp; flowers
+                    Real-time egg yield converted to GRAM tokens
                   </div>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={onOpenArtifactsDrawer}
-                className="clay-btn clay-btn-emerald px-3.5 min-h-[40px] rounded-xl text-xs font-extrabold shrink-0"
-              >
-                Customize Props
-              </button>
+              {onOpenWithdraw && (
+                <button
+                  type="button"
+                  onClick={onOpenWithdraw}
+                  className="clay-btn clay-btn-emerald px-3 min-h-[40px] rounded-xl text-xs font-extrabold inline-flex items-center gap-1 shrink-0"
+                >
+                  <span>Withdraw</span>
+                  <ArrowUpRight className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
 
-            {activeProps.length > 0 && (
-              <div className="flex items-center gap-2 overflow-x-auto pb-0.5">
-                {activeProps.slice(0, 6).map((prop) => (
-                  <button
-                    key={prop.id}
-                    type="button"
-                    onClick={onOpenArtifactsDrawer}
-                    title={prop.name}
-                    aria-label={`${prop.name} artifact`}
-                    className="clay-icon-well w-12 h-12 rounded-xl p-1.5 flex items-center justify-center shrink-0 hover:scale-105 transition-transform cursor-pointer"
-                  >
-                    <img
-                      src={prop.sprite}
-                      alt={prop.name}
-                      referrerPolicy="no-referrer"
-                      className="max-w-full max-h-full object-contain"
-                    />
-                  </button>
-                ))}
-                {activeProps.length > 6 && (
-                  <button
-                    type="button"
-                    onClick={onOpenArtifactsDrawer}
-                    className="clay-inset w-12 h-12 rounded-xl flex items-center justify-center text-xs font-extrabold font-mono-num text-stone-600 dark:text-stone-300 shrink-0 cursor-pointer"
-                  >
-                    +{activeProps.length - 6}
-                  </button>
-                )}
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div className="clay-inset !rounded-xl p-2.5">
+                <div className="text-[10px] font-bold text-stone-500 dark:text-stone-400">Hourly</div>
+                <div className="text-xs font-extrabold font-mono-num text-emerald-700 dark:text-emerald-300 mt-0.5">
+                  +{gramHourly.toFixed(4)}
+                </div>
+                <div className="text-[10px] font-semibold text-stone-500 dark:text-stone-400">GRAM/h</div>
               </div>
-            )}
+              <div className="clay-inset !rounded-xl p-2.5">
+                <div className="text-[10px] font-bold text-stone-500 dark:text-stone-400">24h Est.</div>
+                <div className="text-xs font-extrabold font-mono-num text-stone-900 dark:text-stone-100 mt-0.5">
+                  +{gramDaily.toFixed(3)}
+                </div>
+                <div className="text-[10px] font-semibold text-stone-500 dark:text-stone-400">GRAM/d</div>
+              </div>
+              <div className="clay-inset !rounded-xl p-2.5">
+                <div className="text-[10px] font-bold text-stone-500 dark:text-stone-400">Mined Bal</div>
+                <div className="text-xs font-extrabold font-mono-num text-amber-700 dark:text-amber-300 mt-0.5">
+                  {eggsGramVal.toFixed(4)}
+                </div>
+                <div className="text-[10px] font-semibold text-stone-500 dark:text-stone-400">
+                  ${eggsUsdVal.toFixed(2)} USD
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-[11px] font-bold">
+                <span className="text-stone-600 dark:text-stone-300">Payout Ad Unlock</span>
+                <span className="font-mono-num text-stone-900 dark:text-stone-100">
+                  {adGate.unlocked ? 'Unlocked ✓' : `${adGate.watched}/${adGate.required} Ads`}
+                </span>
+              </div>
+              <div className="w-full h-2 rounded-full bg-stone-200 dark:bg-stone-800 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-teal-400 transition-all duration-300"
+                  style={{ width: `${adPct}%` }}
+                />
+              </div>
+            </div>
           </div>
         );
       })()}

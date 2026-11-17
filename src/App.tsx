@@ -58,11 +58,6 @@ import {
   type DetectedGramTransfer,
 } from './game/tonGram';
 import {
-  type FarmArtifactLayout,
-  loadFarmArtifactLayout,
-  saveFarmArtifactLayout,
-} from './game/farmArtifacts';
-import {
   addAdminInFirestore,
   adjustPlayerCoinsInFirestore,
   adjustPlayerReferralCountInFirestore,
@@ -180,7 +175,6 @@ import { AdminPanelView } from './components/AdminPanelView';
 import { BottomNav } from './components/BottomNav';
 import { ChannelCheckModal } from './components/ChannelCheckPanel';
 import { DepositView } from './components/DepositView';
-import { FarmArtifactsDrawer } from './components/FarmArtifactsDrawer';
 import { FarmMeadow } from './components/FarmMeadow';
 import { FriendsView } from './components/FriendsView';
 import { CoinIcon, EggIcon } from './components/GameIcons';
@@ -276,10 +270,6 @@ export default function App() {
     return 'none';
   });
   const [showSettings, setShowSettings] = useState(false);
-  const [showArtifactsDrawer, setShowArtifactsDrawer] = useState(false);
-  const [artifactLayout, setArtifactLayout] = useState<FarmArtifactLayout>(() =>
-    loadFarmArtifactLayout(activePlayerId),
-  );
   const [watchingAdLoading, setWatchingAdLoading] = useState(false);
   const [activeAdNetwork, setActiveAdNetwork] = useState<AdNetworkId | null>(null);
   const [activeAdAction, setActiveAdAction] = useState<
@@ -399,18 +389,6 @@ export default function App() {
     applyThemeToDocument(themeMode);
   }, [themeMode]);
 
-  useEffect(() => {
-    setArtifactLayout(loadFarmArtifactLayout(profile.uid));
-  }, [profile.uid]);
-
-  const handleChangeArtifactLayout = useCallback(
-    (next: FarmArtifactLayout) => {
-      setArtifactLayout(next);
-      saveFarmArtifactLayout(latestProfileRef.current.uid, next);
-    },
-    [],
-  );
-
   const handleToggleTheme = useCallback(() => {
     playTabTapSound(soundsEnabled);
     setThemeMode((prev) => {
@@ -425,7 +403,6 @@ export default function App() {
       stopAmbientMusic();
       setAdModalState({ open: false, kind: 'watch_ad', notice: null, network: null });
       setShowSettings(false);
-      setShowArtifactsDrawer(false);
       setShowWelcomeModal(false);
       setShowSignUpBonusModal(false);
       setShowChannelGateModal(false);
@@ -1482,10 +1459,11 @@ export default function App() {
 
       latestProfileRef.current = committed.profile;
       setProfile(committed.profile);
+      setCustomTasks((prev) => [committed.task, ...prev.filter((t) => t.id !== committed.task.id)]);
       setTransactions((prev) => [order.transaction, ...prev].slice(0, 60));
       playCoinChimeSound(soundsEnabled);
       triggerHapticFeedback('success');
-      showToast(`Task published! -${order.cost.totalCostCoins.toLocaleString()} coins`);
+      showToast(`Task live in Sponsors! -${order.cost.totalCostCoins.toLocaleString()} coins`);
       return true;
     } catch {
       showToast('Failed to publish paid task.');
@@ -2376,19 +2354,15 @@ export default function App() {
           pendingEggs={pendingEggs}
           notificationsEnabled={notificationsEnabled}
           notificationPermission={notificationPermission}
-          artifactLayout={artifactLayout}
           onBack={() => setSubView('none')}
           onUpgradeBasket={handleUpgradeBasket}
           onGoPacks={() => {
             setSubView('none');
             setActiveTab('packs');
           }}
+          onOpenWithdraw={() => openSubView('withdraw')}
           onToggleNotifications={() => void handleToggleNotifications()}
           onActivateBooster={handleActivateBooster}
-          onOpenArtifactsDrawer={() => {
-            playTabTapSound(soundsEnabled);
-            setShowArtifactsDrawer(true);
-          }}
         />
       );
     }
@@ -2813,17 +2787,9 @@ export default function App() {
               collectLabel={strings.collect}
               isVisible={showFarmOnMobile}
               isProfileSynced={isPlayerSynced}
-              artifactLayout={artifactLayout}
               onCollect={handleCollectEggs}
               onOpenYourFarm={() => openSubView('your_farm')}
-              onOpenArtifactsDrawer={() => {
-                playTabTapSound(soundsEnabled);
-                setShowArtifactsDrawer(true);
-              }}
-              onArtifactTap={() => {
-                playSoftTapSound(soundsEnabled);
-                triggerHapticFeedback('light');
-              }}
+              onOpenWithdraw={() => openSubView('withdraw')}
               onChickenTap={() => {
                 playSoftTapSound(soundsEnabled);
                 triggerHapticFeedback('light');
@@ -2993,17 +2959,6 @@ export default function App() {
           onToggleNotifications={() => void handleToggleNotifications()}
           onToggleTheme={handleToggleTheme}
           onClose={() => setShowSettings(false)}
-        />
-      )}
-      {showArtifactsDrawer && (
-        <FarmArtifactsDrawer
-          layout={artifactLayout}
-          onChangeLayout={handleChangeArtifactLayout}
-          onSoftTap={() => {
-            playSoftTapSound(soundsEnabled);
-            triggerHapticFeedback('selection');
-          }}
-          onClose={() => setShowArtifactsDrawer(false)}
         />
       )}
       <OfflineIndicator />

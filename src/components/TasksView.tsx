@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowDown,
+  ArrowLeft,
   ArrowUpDown,
   Check,
+  ChevronRight,
   Clock,
   Crown,
   ExternalLink,
@@ -29,7 +31,7 @@ import { motion, useReducedMotion } from 'motion/react';
 import {
   AD_NETWORK_TASKS,
   ADSGRAM_BOT_JOIN_TASK,
-  calculatePaidTaskCost,
+  calculatePaidTaskFromBudget,
   calculateProductionRate,
   CHICKEN_PACKS,
   DAILY_STREAK_REWARDS,
@@ -43,10 +45,7 @@ import {
   REQUIRED_TELEGRAM_CHANNELS,
   sortTasks,
   USER_TASK_MAX_REWARD_COINS,
-  USER_TASK_MAX_SLOTS,
-  USER_TASK_MIN_FEE_COINS,
   USER_TASK_MIN_REWARD_COINS,
-  USER_TASK_MIN_SLOTS,
   USER_TASK_MIN_TOTAL_COST_COINS,
 } from '../game/economy';
 import type {
@@ -156,13 +155,13 @@ export function TasksView({
   const lastRefreshAtRef = useRef<number>(Date.now());
   const refreshingRef = useRef(false);
 
-  // + Add paid task modal state
+  // + Add paid task modal state (Step 1: form -> Step 2: preview & OK)
   const [showAddModal, setShowAddModal] = useState(false);
+  const [addModalStep, setAddModalStep] = useState<'form' | 'preview'>('form');
   const [newTitle, setNewTitle] = useState('');
   const [newSubtitle, setNewSubtitle] = useState('');
-  const [newCategory, setNewCategory] = useState<FilterTab>('partner');
+  const [newBudgetCoins, setNewBudgetCoins] = useState(String(USER_TASK_MIN_TOTAL_COST_COINS));
   const [newRewardCoins, setNewRewardCoins] = useState(String(USER_TASK_MIN_REWARD_COINS));
-  const [newTotalSlots, setNewTotalSlots] = useState(String(USER_TASK_MIN_SLOTS));
   const [newIcon, setNewIcon] = useState('send');
   const [newActionUrl, setNewActionUrl] = useState('');
   const [creatingTask, setCreatingTask] = useState(false);
@@ -695,38 +694,52 @@ export function TasksView({
     );
   };
 
+  const parsedBudgetCoins = Math.floor(Number(newBudgetCoins) || 0);
   const parsedRewardCoins = Math.floor(Number(newRewardCoins) || 0);
-  const parsedTotalSlots = Math.floor(Number(newTotalSlots) || 0);
-  const taskCost = calculatePaidTaskCost(parsedRewardCoins, parsedTotalSlots);
-  const hasValidPaidInputs =
-    parsedRewardCoins >= USER_TASK_MIN_REWARD_COINS &&
-    parsedRewardCoins <= USER_TASK_MAX_REWARD_COINS &&
-    parsedTotalSlots >= USER_TASK_MIN_SLOTS &&
-    parsedTotalSlots <= USER_TASK_MAX_SLOTS;
+  const budgetPreview = calculatePaidTaskFromBudget(parsedBudgetCoins, parsedRewardCoins);
+  const requiredCoins = Math.max(
+    USER_TASK_MIN_TOTAL_COST_COINS,
+    budgetPreview.valid ? budgetPreview.totalCostCoins : parsedBudgetCoins || USER_TASK_MIN_TOTAL_COST_COINS,
+  );
   const canAffordTask =
-    profile.coins >= USER_TASK_MIN_TOTAL_COST_COINS && profile.coins >= taskCost.totalCostCoins;
-  const requiredCoins = Math.max(USER_TASK_MIN_TOTAL_COST_COINS, taskCost.totalCostCoins);
+    budgetPreview.valid &&
+    profile.coins >= USER_TASK_MIN_TOTAL_COST_COINS &&
+    profile.coins >= budgetPreview.totalCostCoins;
   const coinsShort = Math.max(0, requiredCoins - profile.coins);
+  const canProceedToPreview = newTitle.trim().length >= 2 && budgetPreview.valid;
+
+  const closeAddModal = () => {
+    setShowAddModal(false);
+    setAddModalStep('form');
+  };
 
   const handleCreateTaskSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (newTitle.trim().length < 2 || creatingTask || !hasValidPaidInputs || !canAffordTask) return;
+    if (addModalStep === 'form') {
+      if (!canProceedToPreview) return;
+      setAddModalStep('preview');
+      return;
+    }
+    if (newTitle.trim().length < 2 || creatingTask || !budgetPreview.valid || !canAffordTask) return;
     setCreatingTask(true);
     try {
       const ok = await onCreateTask({
         title: newTitle.trim(),
         subtitle: newSubtitle.trim() || undefined,
-        category: newCategory,
-        rewardCoins: taskCost.rewardCoins,
+        category: 'partner',
+        rewardCoins: budgetPreview.rewardCoins,
         icon: newIcon,
         actionUrl: newActionUrl.trim(),
-        totalSlots: taskCost.totalSlots,
+        totalSlots: budgetPreview.totalSlots,
       });
       if (ok) {
-        setFilterTab(newCategory);
+        setFilterTab('partner');
         setNewTitle('');
         setNewSubtitle('');
         setNewActionUrl('');
+        setNewBudgetCoins(String(USER_TASK_MIN_TOTAL_COST_COINS));
+        setNewRewardCoins(String(USER_TASK_MIN_REWARD_COINS));
+        setAddModalStep('form');
         setShowAddModal(false);
       }
     } finally {
@@ -738,7 +751,7 @@ export function TasksView({
     { id: 'social', label: 'Social' },
     { id: 'daily', label: 'Daily' },
     { id: 'exclusive', label: 'Exclusive' },
-    { id: 'partner', label: 'Partner' },
+    { id: 'partner', label: 'Sponsors' },
   ];
 
   return (
@@ -806,7 +819,7 @@ export function TasksView({
             type="button"
             onClick={() => {
               onTabTap?.();
-              setNewCategory(filterTab);
+              setAddModalStep('form');
               setShowAddModal(true);
             }}
             className="clay-btn clay-btn-amber min-h-[40px] px-3.5 rounded-2xl text-xs font-extrabold inline-flex items-center gap-1.5 shrink-0"
@@ -868,12 +881,7 @@ export function TasksView({
             <div className="w-10 h-10 rounded-2xl clay-icon-well flex items-center justify-center text-amber-600 dark:text-amber-400">
               <Ticket className="w-5 h-5" />
             </div>
-            <div>
-              <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100">Gift &amp; Promo Code</div>
-              <div className="text-xs text-stone-500 dark:text-stone-400">
-                Redeem coins, eggs &amp; free hens · Watch 1 short ad to unlock claim
-              </div>
-            </div>
+            <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100">Gift &amp; Promo Code</div>
           </div>
           <a
             href={resolvedGetCodeUrl}
@@ -917,7 +925,7 @@ export function TasksView({
         </form>
       </div>
 
-      {/* 4 Filter Categories: Social | Daily | Exclusive | Partner */}
+      {/* 4 Filter Categories: Social | Daily | Exclusive | Sponsors */}
       <div
         role="tablist"
         aria-label="Task categories"
@@ -1474,12 +1482,12 @@ export function TasksView({
         </div>
       )}
 
-      {/* PARTNER TAB */}
+      {/* SPONSORS TAB */}
       {filterTab === 'partner' && (
         <div key="tasks-tab-partner" className="animate-clay-enter space-y-3">
           <div className="flex items-center justify-between px-1">
             <h3 className="text-sm font-extrabold text-stone-700 dark:text-stone-300">
-              Partner Quests
+              Sponsors Tasks
             </h3>
             <span className="text-[11px] font-bold text-stone-500 dark:text-stone-400">
               Checking → Claim
@@ -1487,7 +1495,7 @@ export function TasksView({
           </div>
           {partnerTasks.length === 0 ? (
             <div className="clay-card p-6 text-center text-xs text-stone-500 dark:text-stone-400">
-              No partner tasks yet. Tap + Add task above to create one.
+              No sponsors tasks yet. Tap + Add task above to create one.
             </div>
           ) : (
             <div className="space-y-2.5">
@@ -1497,7 +1505,7 @@ export function TasksView({
         </div>
       )}
 
-      {/* + Add Paid Task Modal */}
+      {/* + Add Paid Task Modal (Step 1: Details + Coins -> Next | Step 2: Fee & Slots Preview -> OK) */}
       {showAddModal && (
         <div
           className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto"
@@ -1512,15 +1520,17 @@ export function TasksView({
             <div className="flex items-center justify-between gap-2">
               <div>
                 <h2 id="add-task-modal-title" className="text-base font-extrabold text-stone-900 dark:text-stone-100">
-                  Post a Paid Task
+                  {addModalStep === 'form' ? 'Post a Paid Task' : 'Task Preview'}
                 </h2>
                 <p className="text-xs text-stone-500 dark:text-stone-400">
-                  Min {USER_TASK_MIN_TOTAL_COST_COINS.toLocaleString()} coins · {USER_TASK_MIN_SLOTS}+ joins · {USER_TASK_MIN_REWARD_COINS}+ coins/join · 10% fee
+                  {addModalStep === 'form'
+                    ? `Min ${USER_TASK_MIN_TOTAL_COST_COINS.toLocaleString()} coins`
+                    : 'Review deducted fee, unlocked slots & Sponsors listing'}
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => setShowAddModal(false)}
+                onClick={closeAddModal}
                 aria-label="Close add task modal"
                 className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center text-stone-600 dark:text-stone-300"
               >
@@ -1536,192 +1546,269 @@ export function TasksView({
               </span>
             </div>
 
-            <div className="space-y-1">
-              <label htmlFor="new-task-title" className="text-xs font-bold text-stone-700 dark:text-stone-300">
-                Task Title
-              </label>
-              <input
-                id="new-task-title"
-                type="text"
-                required
-                minLength={2}
-                maxLength={80}
-                value={newTitle}
-                onChange={(e) => setNewTitle(e.target.value)}
-                placeholder="Join Partner TON Channel"
-                className="clay-inset w-full min-h-[42px] px-3 text-sm font-semibold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-400"
-              />
-            </div>
+            {addModalStep === 'form' ? (
+              <>
+                <div className="space-y-1">
+                  <label htmlFor="new-task-title" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                    Task Title
+                  </label>
+                  <input
+                    id="new-task-title"
+                    type="text"
+                    required
+                    minLength={2}
+                    maxLength={80}
+                    value={newTitle}
+                    onChange={(e) => setNewTitle(e.target.value)}
+                    placeholder="Join Sponsors TON Channel"
+                    className="clay-inset w-full min-h-[42px] px-3 text-sm font-semibold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
 
-            <div className="space-y-1">
-              <label htmlFor="new-task-subtitle" className="text-xs font-bold text-stone-700 dark:text-stone-300">
-                Short Description (optional)
-              </label>
-              <input
-                id="new-task-subtitle"
-                type="text"
-                maxLength={120}
-                value={newSubtitle}
-                onChange={(e) => setNewSubtitle(e.target.value)}
-                placeholder="Complete check to unlock instant coin reward"
-                className="clay-inset w-full min-h-[40px] px-3 text-xs font-medium text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-400"
-              />
-            </div>
+                <div className="space-y-1">
+                  <label htmlFor="new-task-subtitle" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                    Short Description (optional)
+                  </label>
+                  <input
+                    id="new-task-subtitle"
+                    type="text"
+                    maxLength={120}
+                    value={newSubtitle}
+                    onChange={(e) => setNewSubtitle(e.target.value)}
+                    placeholder="Complete check to unlock instant coin reward"
+                    className="clay-inset w-full min-h-[40px] px-3 text-xs font-medium text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
 
-            <div className="grid grid-cols-2 gap-2.5">
-              <div className="space-y-1">
-                <label htmlFor="new-task-category" className="text-xs font-bold text-stone-700 dark:text-stone-300">
-                  Category
-                </label>
-                <select
-                  id="new-task-category"
-                  value={newCategory}
-                  onChange={(e) => setNewCategory(e.target.value as FilterTab)}
-                  className="clay-inset w-full min-h-[42px] px-2.5 text-xs font-bold text-stone-900 dark:text-stone-100"
-                >
-                  <option value="social">Social</option>
-                  <option value="daily">Daily</option>
-                  <option value="exclusive">Exclusive</option>
-                  <option value="partner">Partner</option>
-                </select>
-              </div>
+                <div className="space-y-1">
+                  <label htmlFor="new-task-url" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                    Action URL (optional)
+                  </label>
+                  <input
+                    id="new-task-url"
+                    type="url"
+                    maxLength={256}
+                    value={newActionUrl}
+                    onChange={(e) => setNewActionUrl(e.target.value)}
+                    placeholder="https://t.me/..."
+                    className="clay-inset w-full min-h-[42px] px-3 text-xs font-medium text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
 
-              <div className="space-y-1">
-                <label htmlFor="new-task-icon" className="text-xs font-bold text-stone-700 dark:text-stone-300">
-                  Icon
-                </label>
-                <select
-                  id="new-task-icon"
-                  value={newIcon}
-                  onChange={(e) => setNewIcon(e.target.value)}
-                  className="clay-inset w-full min-h-[42px] px-2.5 text-xs font-bold text-stone-900 dark:text-stone-100"
-                >
-                  <option value="send">Telegram</option>
-                  <option value="megaphone">Channel</option>
-                  <option value="gift">Exclusive Gift</option>
-                  <option value="flame">Hot Quest</option>
-                  <option value="link">Partner Link</option>
-                  <option value="users">Social / Community</option>
-                  <option value="shield">Verified</option>
-                </select>
-              </div>
-            </div>
+                <div className="space-y-1">
+                  <label htmlFor="new-task-budget" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                    Coins Budget (min {USER_TASK_MIN_TOTAL_COST_COINS.toLocaleString()})
+                  </label>
+                  <input
+                    id="new-task-budget"
+                    type="number"
+                    min={USER_TASK_MIN_TOTAL_COST_COINS}
+                    step={50}
+                    required
+                    value={newBudgetCoins}
+                    onChange={(e) => setNewBudgetCoins(e.target.value)}
+                    placeholder="5000"
+                    className="clay-inset w-full min-h-[42px] px-3 text-sm font-mono-num font-bold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
 
-            <div className="grid grid-cols-2 gap-2.5">
-              <div className="space-y-1">
-                <label htmlFor="new-task-reward" className="text-xs font-bold text-stone-700 dark:text-stone-300">
-                  Reward / User (min {USER_TASK_MIN_REWARD_COINS})
-                </label>
-                <input
-                  id="new-task-reward"
-                  type="number"
-                  min={USER_TASK_MIN_REWARD_COINS}
-                  max={USER_TASK_MAX_REWARD_COINS}
-                  required
-                  value={newRewardCoins}
-                  onChange={(e) => setNewRewardCoins(e.target.value)}
-                  className="clay-inset w-full min-h-[42px] px-3 text-sm font-mono-num font-bold text-stone-900 dark:text-stone-100"
-                />
-              </div>
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div className="space-y-1">
+                    <label htmlFor="new-task-reward" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                      Reward / User (min {USER_TASK_MIN_REWARD_COINS})
+                    </label>
+                    <input
+                      id="new-task-reward"
+                      type="number"
+                      min={USER_TASK_MIN_REWARD_COINS}
+                      max={USER_TASK_MAX_REWARD_COINS}
+                      required
+                      value={newRewardCoins}
+                      onChange={(e) => setNewRewardCoins(e.target.value)}
+                      className="clay-inset w-full min-h-[42px] px-3 text-sm font-mono-num font-bold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                    />
+                  </div>
 
-              <div className="space-y-1">
-                <label htmlFor="new-task-slots" className="text-xs font-bold text-stone-700 dark:text-stone-300">
-                  Slots (min {USER_TASK_MIN_SLOTS})
-                </label>
-                <input
-                  id="new-task-slots"
-                  type="number"
-                  min={USER_TASK_MIN_SLOTS}
-                  max={USER_TASK_MAX_SLOTS}
-                  required
-                  value={newTotalSlots}
-                  onChange={(e) => setNewTotalSlots(e.target.value)}
-                  className="clay-inset w-full min-h-[42px] px-3 text-sm font-mono-num font-bold text-stone-900 dark:text-stone-100"
-                />
-              </div>
-            </div>
+                  <div className="space-y-1">
+                    <label htmlFor="new-task-icon" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                      Icon
+                    </label>
+                    <select
+                      id="new-task-icon"
+                      value={newIcon}
+                      onChange={(e) => setNewIcon(e.target.value)}
+                      className="clay-inset w-full min-h-[42px] px-2.5 text-xs font-bold text-stone-900 dark:text-stone-100"
+                    >
+                      <option value="send">Telegram</option>
+                      <option value="megaphone">Channel</option>
+                      <option value="gift">Exclusive Gift</option>
+                      <option value="flame">Hot Quest</option>
+                      <option value="link">Sponsor Link</option>
+                      <option value="users">Social / Community</option>
+                      <option value="shield">Verified</option>
+                    </select>
+                  </div>
+                </div>
 
-            <div className="space-y-1">
-              <label htmlFor="new-task-url" className="text-xs font-bold text-stone-700 dark:text-stone-300">
-                Action URL (optional)
-              </label>
-              <input
-                id="new-task-url"
-                type="url"
-                maxLength={256}
-                value={newActionUrl}
-                onChange={(e) => setNewActionUrl(e.target.value)}
-                placeholder="https://t.me/..."
-                className="clay-inset w-full min-h-[42px] px-3 text-xs font-medium text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-400"
-              />
-            </div>
+                {!budgetPreview.valid && budgetPreview.error && (
+                  <div className="rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 px-3 py-2 text-xs font-bold text-amber-800 dark:text-amber-300">
+                    {budgetPreview.error}
+                  </div>
+                )}
 
-            {/* Live Cost Breakdown */}
-            <div className="clay-card-warm !rounded-2xl p-3 space-y-1.5 text-xs">
-              <div className="flex items-center justify-between text-stone-600 dark:text-stone-300">
-                <span>
-                  Reward Pool ({taskCost.rewardCoins.toLocaleString()} × {taskCost.totalSlots.toLocaleString()})
-                </span>
-                <span className="font-mono-num font-bold">{taskCost.rewardPoolCoins.toLocaleString()} coins</span>
-              </div>
-              <div className="flex items-center justify-between text-stone-600 dark:text-stone-300">
-                <span>Posting Fee (10%, min {USER_TASK_MIN_FEE_COINS.toLocaleString()})</span>
-                <span className="font-mono-num font-bold">+{taskCost.platformFeeCoins.toLocaleString()} coins</span>
-              </div>
-              <div className="border-t border-amber-300/60 dark:border-amber-800/50 pt-1.5 flex items-center justify-between font-extrabold text-stone-900 dark:text-stone-100">
-                <span>Total Cost</span>
-                <span className="inline-flex items-center gap-1 font-mono-num text-amber-800 dark:text-amber-300">
-                  <CoinIcon className="w-4 h-4" />
-                  <span>{taskCost.totalCostCoins.toLocaleString()} coins</span>
-                </span>
-              </div>
-            </div>
-
-            {!canAffordTask && (
-              <div className="rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 px-3 py-2 flex items-center justify-between gap-2 text-xs font-bold text-rose-700 dark:text-rose-300">
-                <span>
-                  {profile.coins < USER_TASK_MIN_TOTAL_COST_COINS
-                    ? `Minimum ${USER_TASK_MIN_TOTAL_COST_COINS.toLocaleString()} coins required (${coinsShort.toLocaleString()} short).`
-                    : `Need ${coinsShort.toLocaleString()} more coins to publish.`}
-                </span>
-                {onOpenDeposit && (
+                <div className="grid grid-cols-2 gap-2 pt-1">
                   <button
                     type="button"
-                    onClick={() => {
-                      setShowAddModal(false);
-                      onOpenDeposit();
-                    }}
-                    className="clay-btn clay-btn-amber px-2.5 py-1 rounded-lg text-[11px] font-extrabold shrink-0"
+                    onClick={closeAddModal}
+                    className="clay-btn clay-btn-neutral min-h-[44px] rounded-2xl text-xs font-extrabold text-stone-700 dark:text-stone-200"
                   >
-                    Deposit
+                    Cancel
                   </button>
-                )}
-              </div>
-            )}
+                  <button
+                    type="submit"
+                    disabled={!canProceedToPreview}
+                    className="clay-btn clay-btn-emerald min-h-[44px] rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1 disabled:opacity-50"
+                  >
+                    <span>Next</span>
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                {/* Live Sponsors Tab Task Card Preview */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px] font-extrabold uppercase tracking-wider text-stone-500 dark:text-stone-400">
+                    <span>Sponsors Tab Preview</span>
+                    <span className="rounded-md bg-amber-100 dark:bg-amber-950/60 px-2 py-0.5 text-[10px] text-amber-800 dark:text-amber-300">
+                      Sponsors
+                    </span>
+                  </div>
+                  <div className="clay-inset !rounded-2xl p-3 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-10 h-10 rounded-xl clay-icon-well flex items-center justify-center shrink-0">
+                        {renderTaskIcon(newIcon)}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-sm font-bold text-stone-900 dark:text-stone-100 truncate">
+                            {newTitle.trim()}
+                          </span>
+                          <span className="rounded-md bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800/60 px-1.5 py-0.5 text-[10px] font-extrabold text-indigo-700 dark:text-indigo-300 shrink-0">
+                            Yours
+                          </span>
+                        </div>
+                        {newSubtitle.trim() && (
+                          <div className="text-[11px] text-stone-500 dark:text-stone-400 truncate">
+                            {newSubtitle.trim()}
+                          </div>
+                        )}
+                        <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                          <span className="inline-flex items-center gap-1 rounded-lg bg-amber-50 dark:bg-amber-950/50 border border-amber-200/80 dark:border-amber-800/60 px-2 py-0.5 text-xs font-extrabold text-amber-700 dark:text-amber-300">
+                            <CoinIcon className="w-3.5 h-3.5" />
+                            <span className="font-mono-num">+{budgetPreview.rewardCoins.toLocaleString()}</span>
+                          </span>
+                          <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800/60 px-2 py-0.5 text-[11px] font-extrabold font-mono-num text-emerald-700 dark:text-emerald-300">
+                            <Clock className="w-3 h-3 shrink-0" />
+                            <span>
+                              {budgetPreview.totalSlots.toLocaleString()}/{budgetPreview.totalSlots.toLocaleString()} spots left
+                            </span>
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
 
-            <div className="grid grid-cols-2 gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => setShowAddModal(false)}
-                className="clay-btn clay-btn-neutral min-h-[44px] rounded-2xl text-xs font-extrabold text-stone-700 dark:text-stone-200"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={creatingTask || newTitle.trim().length < 2 || !hasValidPaidInputs || !canAffordTask}
-                className="clay-btn clay-btn-emerald min-h-[44px] rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1 disabled:opacity-50"
-              >
-                {creatingTask ? (
-                  <span>Publishing...</span>
-                ) : (
-                  <>
-                    <CoinIcon className="w-3.5 h-3.5" />
-                    <span>Pay {taskCost.totalCostCoins.toLocaleString()}</span>
-                  </>
+                {/* Slots & Deducted Fee Summary */}
+                <div className="clay-card-warm !rounded-2xl p-3.5 space-y-2 text-xs">
+                  <div className="flex items-center justify-between text-stone-600 dark:text-stone-300">
+                    <span>Entered Coins Budget</span>
+                    <span className="font-mono-num font-bold">
+                      {budgetPreview.budgetCoins.toLocaleString()} coins
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-stone-600 dark:text-stone-300">
+                    <span>Task Posting Fee Deducted</span>
+                    <span className="font-mono-num font-bold text-rose-600 dark:text-rose-400">
+                      -{budgetPreview.platformFeeCoins.toLocaleString()} coins
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-stone-700 dark:text-stone-200 font-bold">
+                    <span>Slots Unlocked ({budgetPreview.rewardCoins.toLocaleString()}/user)</span>
+                    <span className="font-mono-num font-extrabold text-emerald-700 dark:text-emerald-300">
+                      {budgetPreview.totalSlots.toLocaleString()} slots ({budgetPreview.rewardPoolCoins.toLocaleString()} coins)
+                    </span>
+                  </div>
+                  <div className="border-t border-amber-300/60 dark:border-amber-800/50 pt-2 flex items-center justify-between font-extrabold text-stone-900 dark:text-stone-100">
+                    <span>Total Coins Deducted (Slots + Fee)</span>
+                    <span className="inline-flex items-center gap-1 font-mono-num text-amber-800 dark:text-amber-300">
+                      <CoinIcon className="w-4 h-4" />
+                      <span>-{budgetPreview.totalCostCoins.toLocaleString()} coins</span>
+                    </span>
+                  </div>
+                  {budgetPreview.unspentCoins > 0 && (
+                    <div className="flex items-center justify-between text-[11px] text-stone-500 dark:text-stone-400">
+                      <span>Unused Budget Kept in Wallet</span>
+                      <span className="font-mono-num font-bold">+{budgetPreview.unspentCoins.toLocaleString()} coins</span>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between text-[11px] text-stone-500 dark:text-stone-400">
+                    <span>Balance After Post</span>
+                    <span className="font-mono-num font-bold">
+                      {Math.max(0, profile.coins - budgetPreview.totalCostCoins).toLocaleString()} coins
+                    </span>
+                  </div>
+                </div>
+
+                {!canAffordTask && (
+                  <div className="rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 px-3 py-2 flex items-center justify-between gap-2 text-xs font-bold text-rose-700 dark:text-rose-300">
+                    <span>Need {coinsShort.toLocaleString()} more coins to post this task.</span>
+                    {onOpenDeposit && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          closeAddModal();
+                          onOpenDeposit();
+                        }}
+                        className="clay-btn clay-btn-amber px-2.5 py-1 rounded-lg text-[11px] font-extrabold shrink-0"
+                      >
+                        Deposit
+                      </button>
+                    )}
+                  </div>
                 )}
-              </button>
-            </div>
+
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <button
+                    type="button"
+                    disabled={creatingTask}
+                    onClick={() => setAddModalStep('form')}
+                    className="clay-btn clay-btn-neutral min-h-[44px] rounded-2xl text-xs font-extrabold text-stone-700 dark:text-stone-200 inline-flex items-center justify-center gap-1"
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                    <span>Back</span>
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={creatingTask || !canAffordTask}
+                    className="clay-btn clay-btn-emerald min-h-[44px] rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1 disabled:opacity-50"
+                  >
+                    {creatingTask ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Publishing...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Check className="w-4 h-4" />
+                        <span>OK</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </>
+            )}
           </form>
         </div>
       )}

@@ -67,7 +67,7 @@
       "type": "object",
       "properties": {
         "userId": { "type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "type": { "type": "string", "enum": ["collect", "task", "deposit", "withdraw", "reinvest", "buy_chicken", "upgrade_basket", "promo", "referral", "booster", "golden_egg", "achievement", "season_prize", "admin_adjustment"] },
+        "type": { "type": "string", "enum": ["collect", "task", "task_topup", "task_refund", "deposit", "withdraw", "reinvest", "buy_chicken", "upgrade_basket", "promo", "referral", "booster", "coop_fever", "auto_harvest", "golden_egg", "achievement", "season_prize", "admin_adjustment"] },
         "title": { "type": "string", "minLength": 1, "maxLength": 80 },
         "amount": { "type": "number" },
         "currency": { "type": "string", "enum": ["eggs", "coins"] },

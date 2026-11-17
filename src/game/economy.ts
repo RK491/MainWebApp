@@ -4,6 +4,8 @@ import type {
   AdNetworkId,
   AdminRoleEntry,
   AdminsConfig,
+  AutoHarvestCurrency,
+  AutoHarvestDurationId,
   BannedUserRecord,
   ChannelsConfig,
   ChickenBreedId,
@@ -631,12 +633,59 @@ export function isFeedBoosterActive(
   return Number(profile.feedBoostUntilMs ?? 0) > nowMs;
 }
 
+export const COOP_FEVER_REQUIRED_ADS = 25;
+export const COOP_FEVER_DURATION_MS = 10 * 60 * 1000; // 10 minutes
+export const COOP_FEVER_MULTIPLIER = 3;
+
+export function isCoopFeverActive(
+  profile: Partial<Pick<UserFarmProfile, 'coopFeverUntilMs'>>,
+  nowMs = Date.now(),
+): boolean {
+  return Number(profile.coopFeverUntilMs ?? 0) > nowMs;
+}
+
+export interface CoopFeverProgress {
+  adsCollected: number;
+  adsRequired: number;
+  adsRemaining: number;
+  progressPct: number;
+  active: boolean;
+  ready: boolean;
+  remainingMs: number;
+}
+
+export function getCoopFeverProgress(
+  profile: Pick<UserFarmProfile, 'watchedAdsCount'> &
+    Partial<Pick<UserFarmProfile, 'totalAdsWatched' | 'coopFeverUntilMs' | 'coopFeverBaselineAds'>>,
+  nowMs = Date.now(),
+): CoopFeverProgress {
+  const totalAds = getTotalAdsWatched(profile);
+  const rawBaseline = Math.max(0, Math.floor(Number(profile.coopFeverBaselineAds ?? 0) || 0));
+  const baseline = Math.min(totalAds, rawBaseline);
+  const adsSinceBaseline = Math.max(0, totalAds - baseline);
+  const adsCollected = Math.min(COOP_FEVER_REQUIRED_ADS, adsSinceBaseline);
+  const adsRemaining = Math.max(0, COOP_FEVER_REQUIRED_ADS - adsSinceBaseline);
+  const active = isCoopFeverActive(profile, nowMs);
+  const ready = !active && adsSinceBaseline >= COOP_FEVER_REQUIRED_ADS;
+  const remainingMs = active ? Math.max(0, Number(profile.coopFeverUntilMs ?? 0) - nowMs) : 0;
+  const progressPct = Math.round((adsCollected / COOP_FEVER_REQUIRED_ADS) * 100);
+  return {
+    adsCollected,
+    adsRequired: COOP_FEVER_REQUIRED_ADS,
+    adsRemaining,
+    progressPct,
+    active,
+    ready,
+    remainingMs,
+  };
+}
+
 export function calculateProductionRate(
   profile: Pick<
     UserFarmProfile,
     'leghornCount' | 'rhodeCount' | 'orpingtonCount' | 'australorpCount'
   > &
-    Partial<Pick<UserFarmProfile, 'level' | 'feedBoostUntilMs'>>,
+    Partial<Pick<UserFarmProfile, 'level' | 'feedBoostUntilMs' | 'coopFeverUntilMs'>>,
   nowMs?: number,
 ): number {
   const baseRate =
@@ -650,8 +699,12 @@ export function calculateProductionRate(
     nowMs !== undefined && isFeedBoosterActive({ feedBoostUntilMs: profile.feedBoostUntilMs }, nowMs)
       ? 2
       : 1;
+  const coopMult =
+    nowMs !== undefined && isCoopFeverActive({ coopFeverUntilMs: profile.coopFeverUntilMs }, nowMs)
+      ? COOP_FEVER_MULTIPLIER
+      : 1;
 
-  return Math.round(baseRate * levelMult * feedMult);
+  return Math.round(baseRate * levelMult * feedMult * coopMult);
 }
 
 export function calculateTotalChickens(
@@ -776,7 +829,7 @@ export function calculatePendingEggs(
     | 'lastCollectedAt'
     | 'basketCapacity'
   > &
-    Partial<Pick<UserFarmProfile, 'level' | 'feedBoostUntilMs'>>,
+    Partial<Pick<UserFarmProfile, 'level' | 'feedBoostUntilMs' | 'coopFeverUntilMs'>>,
   nowMs: number,
 ): number {
   const ratePerHour = calculateProductionRate(profile, nowMs);
@@ -1424,7 +1477,7 @@ export function completeTask(
   };
 }
 
-export const USER_TASK_MIN_REWARD_COINS = 150;
+export const USER_TASK_MIN_REWARD_COINS = 50;
 export const USER_TASK_MAX_REWARD_COINS = 100_000;
 export const USER_TASK_MIN_SLOTS = 30;
 export const USER_TASK_MAX_SLOTS = 10_000;
@@ -1463,6 +1516,111 @@ export function calculatePaidTaskCost(
     rewardPoolCoins,
     platformFeeCoins,
     totalCostCoins: rewardPoolCoins + platformFeeCoins,
+  };
+}
+
+export interface PaidTaskBudgetPreview extends PaidTaskCostBreakdown {
+  budgetCoins: number;
+  unspentCoins: number;
+  minBudgetForReward: number;
+  valid: boolean;
+  error?: string;
+}
+
+export function calculatePaidTaskFromBudget(
+  budgetCoins: number,
+  rewardCoinsInput: number = USER_TASK_MIN_REWARD_COINS,
+): PaidTaskBudgetPreview {
+  const safeBudget = Math.max(0, Math.floor(Number(budgetCoins) || 0));
+  const rawReward = Math.floor(Number(rewardCoinsInput) || 0);
+  const rewardValid =
+    rawReward >= USER_TASK_MIN_REWARD_COINS && rawReward <= USER_TASK_MAX_REWARD_COINS;
+  const safeReward = Math.max(
+    USER_TASK_MIN_REWARD_COINS,
+    Math.min(USER_TASK_MAX_REWARD_COINS, rawReward || USER_TASK_MIN_REWARD_COINS),
+  );
+  const minBudgetForReward = Math.max(
+    USER_TASK_MIN_TOTAL_COST_COINS,
+    calculatePaidTaskCost(safeReward, USER_TASK_MIN_SLOTS).totalCostCoins,
+  );
+
+  const computeRaw = (slots: number) => {
+    const rewardPoolCoins = slots * safeReward;
+    const platformFeeCoins = Math.max(
+      USER_TASK_MIN_FEE_COINS,
+      Math.round(rewardPoolCoins * USER_TASK_PLATFORM_FEE_RATE),
+    );
+    return {
+      rewardPoolCoins,
+      platformFeeCoins,
+      totalCostCoins: rewardPoolCoins + platformFeeCoins,
+    };
+  };
+
+  if (!rewardValid) {
+    return {
+      budgetCoins: safeBudget,
+      rewardCoins: safeReward,
+      totalSlots: 0,
+      rewardPoolCoins: 0,
+      platformFeeCoins: USER_TASK_MIN_FEE_COINS,
+      totalCostCoins: 0,
+      unspentCoins: safeBudget,
+      minBudgetForReward,
+      valid: false,
+      error: `Reward per user must be between ${USER_TASK_MIN_REWARD_COINS.toLocaleString()} and ${USER_TASK_MAX_REWARD_COINS.toLocaleString()} coins.`,
+    };
+  }
+
+  if (safeBudget < USER_TASK_MIN_TOTAL_COST_COINS) {
+    return {
+      budgetCoins: safeBudget,
+      rewardCoins: safeReward,
+      totalSlots: 0,
+      rewardPoolCoins: 0,
+      platformFeeCoins: USER_TASK_MIN_FEE_COINS,
+      totalCostCoins: 0,
+      unspentCoins: safeBudget,
+      minBudgetForReward,
+      valid: false,
+      error: `Minimum ${USER_TASK_MIN_TOTAL_COST_COINS.toLocaleString()} coins required.`,
+    };
+  }
+
+  const maxLinear = Math.floor((safeBudget - USER_TASK_MIN_FEE_COINS) / safeReward);
+  const maxRate = Math.floor(safeBudget / (safeReward * (1 + USER_TASK_PLATFORM_FEE_RATE))) + 3;
+  let slots = Math.max(0, Math.min(USER_TASK_MAX_SLOTS, maxLinear, maxRate));
+
+  while (slots > 0 && computeRaw(slots).totalCostCoins > safeBudget) {
+    slots -= 1;
+  }
+
+  if (slots < USER_TASK_MIN_SLOTS) {
+    return {
+      budgetCoins: safeBudget,
+      rewardCoins: safeReward,
+      totalSlots: slots,
+      rewardPoolCoins: slots * safeReward,
+      platformFeeCoins: slots > 0 ? computeRaw(slots).platformFeeCoins : USER_TASK_MIN_FEE_COINS,
+      totalCostCoins: slots > 0 ? computeRaw(slots).totalCostCoins : 0,
+      unspentCoins: safeBudget,
+      minBudgetForReward,
+      valid: false,
+      error: `With ${safeReward.toLocaleString()} coins/join, enter at least ${minBudgetForReward.toLocaleString()} coins (for ${USER_TASK_MIN_SLOTS} slots).`,
+    };
+  }
+
+  const finalized = computeRaw(slots);
+  return {
+    budgetCoins: safeBudget,
+    rewardCoins: safeReward,
+    totalSlots: slots,
+    rewardPoolCoins: finalized.rewardPoolCoins,
+    platformFeeCoins: finalized.platformFeeCoins,
+    totalCostCoins: finalized.totalCostCoins,
+    unspentCoins: Math.max(0, safeBudget - finalized.totalCostCoins),
+    minBudgetForReward,
+    valid: true,
   };
 }
 
@@ -1527,6 +1685,191 @@ export function createPaidTaskOrder(
   };
 
   return { profile: nextProfile, transaction, cost };
+}
+
+export const USER_TASK_MIN_TOPUP_COINS = 500;
+
+export interface PaidTaskTopUpPreview {
+  additionalSlots: number;
+  rewardCoins: number;
+  rewardPoolCoins: number;
+  platformFeeCoins: number;
+  totalCostCoins: number;
+  unspentCoins: number;
+  valid: boolean;
+  error?: string;
+}
+
+export function calculatePaidTaskTopUp(
+  rewardCoins: number,
+  budgetCoins: number,
+  currentTotalSlots = 0,
+): PaidTaskTopUpPreview {
+  const safeReward = Math.max(USER_TASK_MIN_REWARD_COINS, Math.floor(Number(rewardCoins) || 0));
+  const safeBudget = Math.max(0, Math.floor(Number(budgetCoins) || 0));
+  const maxRemainingCapacity = Math.max(0, USER_TASK_MAX_SLOTS - Math.max(0, Math.floor(currentTotalSlots)));
+
+  if (maxRemainingCapacity <= 0) {
+    return {
+      additionalSlots: 0,
+      rewardCoins: safeReward,
+      rewardPoolCoins: 0,
+      platformFeeCoins: 0,
+      totalCostCoins: 0,
+      unspentCoins: safeBudget,
+      valid: false,
+      error: `Campaign already reached max ${USER_TASK_MAX_SLOTS.toLocaleString()} slots.`,
+    };
+  }
+
+  if (safeBudget < USER_TASK_MIN_TOPUP_COINS) {
+    return {
+      additionalSlots: 0,
+      rewardCoins: safeReward,
+      rewardPoolCoins: 0,
+      platformFeeCoins: 0,
+      totalCostCoins: 0,
+      unspentCoins: safeBudget,
+      valid: false,
+      error: `Minimum top-up is ${USER_TASK_MIN_TOPUP_COINS.toLocaleString()} coins.`,
+    };
+  }
+
+  const computeTopUpRaw = (slots: number) => {
+    const rewardPoolCoins = slots * safeReward;
+    const platformFeeCoins = Math.round(rewardPoolCoins * USER_TASK_PLATFORM_FEE_RATE);
+    return {
+      rewardPoolCoins,
+      platformFeeCoins,
+      totalCostCoins: rewardPoolCoins + platformFeeCoins,
+    };
+  };
+
+  let slots = Math.min(
+    maxRemainingCapacity,
+    Math.floor(safeBudget / Math.max(1, safeReward * (1 + USER_TASK_PLATFORM_FEE_RATE))) + 2,
+  );
+  while (slots > 0 && computeTopUpRaw(slots).totalCostCoins > safeBudget) {
+    slots -= 1;
+  }
+
+  if (slots <= 0) {
+    const minOne = computeTopUpRaw(1).totalCostCoins;
+    return {
+      additionalSlots: 0,
+      rewardCoins: safeReward,
+      rewardPoolCoins: 0,
+      platformFeeCoins: 0,
+      totalCostCoins: 0,
+      unspentCoins: safeBudget,
+      valid: false,
+      error: `Need at least ${minOne.toLocaleString()} coins for +1 slot (${safeReward.toLocaleString()} + 10% fee).`,
+    };
+  }
+
+  const finalized = computeTopUpRaw(slots);
+  return {
+    additionalSlots: slots,
+    rewardCoins: safeReward,
+    rewardPoolCoins: finalized.rewardPoolCoins,
+    platformFeeCoins: finalized.platformFeeCoins,
+    totalCostCoins: finalized.totalCostCoins,
+    unspentCoins: Math.max(0, safeBudget - finalized.totalCostCoins),
+    valid: true,
+  };
+}
+
+export function createTopUpPaidTaskOrder(
+  profile: UserFarmProfile,
+  task: Pick<TaskDefinition, 'id' | 'title' | 'rewardCoins' | 'totalSlots' | 'creatorUid'>,
+  budgetCoins: number,
+  nowMs: number,
+):
+  | {
+      profile: UserFarmProfile;
+      transaction: TransactionEntry;
+      preview: PaidTaskTopUpPreview;
+    }
+  | { error: string } {
+  if (task.creatorUid && task.creatorUid !== profile.uid) {
+    return { error: 'Only the campaign owner can top up this task.' };
+  }
+  const preview = calculatePaidTaskTopUp(task.rewardCoins, budgetCoins, task.totalSlots ?? 0);
+  if (!preview.valid) {
+    return { error: preview.error || 'Invalid top-up budget.' };
+  }
+  if (profile.coins < preview.totalCostCoins) {
+    return {
+      error: `Need ${preview.totalCostCoins.toLocaleString()} coins (you have ${profile.coins.toLocaleString()}).`,
+    };
+  }
+
+  const nextProfile: UserFarmProfile = {
+    ...profile,
+    coins: profile.coins - preview.totalCostCoins,
+  };
+  const transaction: TransactionEntry = {
+    id: `tx_topup_${nowMs}`,
+    userId: profile.uid,
+    type: 'task_topup',
+    title: `Topped up +${preview.additionalSlots} slots: ${task.title}`.slice(0, 80),
+    amount: -preview.totalCostCoins,
+    currency: 'coins',
+    usdValue: coinsToUsd(preview.totalCostCoins),
+    status: 'completed',
+    createdAtMs: nowMs,
+  };
+  return { profile: nextProfile, transaction, preview };
+}
+
+export function calculateTaskRefundAmount(
+  task: Pick<TaskDefinition, 'rewardCoins' | 'totalSlots' | 'claimedCount'>,
+): { remainingSlots: number; refundCoins: number } {
+  const totalSlots = Math.max(0, Math.floor(Number(task.totalSlots ?? 0) || 0));
+  const claimedCount = Math.max(0, Math.floor(Number(task.claimedCount ?? 0) || 0));
+  const remainingSlots = Math.max(0, totalSlots - claimedCount);
+  const rewardCoins = Math.max(0, Math.floor(Number(task.rewardCoins ?? 0) || 0));
+  return {
+    remainingSlots,
+    refundCoins: remainingSlots * rewardCoins,
+  };
+}
+
+export function createRefundPaidTaskOrder(
+  profile: UserFarmProfile,
+  task: Pick<TaskDefinition, 'id' | 'title' | 'rewardCoins' | 'totalSlots' | 'claimedCount' | 'creatorUid'>,
+  nowMs: number,
+):
+  | {
+      profile: UserFarmProfile;
+      transaction: TransactionEntry;
+      remainingSlots: number;
+      refundCoins: number;
+    }
+  | { error: string } {
+  if (task.creatorUid && task.creatorUid !== profile.uid) {
+    return { error: 'Only the campaign owner can refund this task.' };
+  }
+  const { remainingSlots, refundCoins } = calculateTaskRefundAmount(task);
+  if (remainingSlots <= 0 || refundCoins <= 0) {
+    return { error: 'No unused reward slots left to refund on this campaign.' };
+  }
+  const nextProfile: UserFarmProfile = {
+    ...profile,
+    coins: profile.coins + refundCoins,
+  };
+  const transaction: TransactionEntry = {
+    id: `tx_refund_${nowMs}`,
+    userId: profile.uid,
+    type: 'task_refund',
+    title: `Refund (${remainingSlots} unused slots): ${task.title}`.slice(0, 80),
+    amount: refundCoins,
+    currency: 'coins',
+    usdValue: coinsToUsd(refundCoins),
+    status: 'completed',
+    createdAtMs: nowMs,
+  };
+  return { profile: nextProfile, transaction, remainingSlots, refundCoins };
 }
 
 export function claimAdNetworkReward(
@@ -1784,6 +2127,10 @@ export function createDefaultProfile(
     lastCollectedAt: nowMs,
     createdAtMs: nowMs,
     feedBoostUntilMs: 0,
+    coopFeverUntilMs: 0,
+    coopFeverBaselineAds: 0,
+    autoHarvestUntilMs: 0,
+    telegramRemindersEnabled: true,
     lastGoldenEggAtMs: 0,
     goldenEggsFound: 0,
     claimedAchievementIds: [],
@@ -1897,6 +2244,197 @@ export function activateFeedBooster(
   };
 
   return { profile: nextProfile, transaction };
+}
+
+export function activateCoopFever(
+  profile: UserFarmProfile,
+  nowMs: number,
+):
+  | {
+      profile: UserFarmProfile;
+      transaction: TransactionEntry;
+      durationMs: number;
+      multiplier: number;
+    }
+  | { error: string } {
+  if (calculateTotalChickens(profile) <= 0) {
+    return { error: 'Buy at least 1 chicken in Packs before activating Coop Fever!' };
+  }
+  if (isCoopFeverActive(profile, nowMs)) {
+    return { error: 'Coop Fever 3× Rush is already active on your farm!' };
+  }
+  const progress = getCoopFeverProgress(profile, nowMs);
+  if (!progress.ready) {
+    return {
+      error: `Watch ${progress.adsRemaining} more ads to unlock Coop Fever 3× Rush (${progress.adsCollected}/${COOP_FEVER_REQUIRED_ADS}).`,
+    };
+  }
+
+  const totalAds = getTotalAdsWatched(profile);
+  const rawBaseline = Math.max(0, Math.floor(Number(profile.coopFeverBaselineAds ?? 0) || 0));
+  const nextBaseline = Math.min(totalAds, rawBaseline + COOP_FEVER_REQUIRED_ADS);
+
+  const nextProfile: UserFarmProfile = {
+    ...profile,
+    coopFeverUntilMs: nowMs + COOP_FEVER_DURATION_MS,
+    coopFeverBaselineAds: nextBaseline,
+  };
+
+  const transaction: TransactionEntry = {
+    id: `tx_fever_${nowMs}`,
+    userId: profile.uid,
+    type: 'coop_fever',
+    title: `Coop Fever ${COOP_FEVER_MULTIPLIER}× Rush (10m · 25 Ads)`,
+    amount: 0,
+    currency: 'coins',
+    usdValue: 0,
+    status: 'completed',
+    createdAtMs: nowMs,
+  };
+
+  return {
+    profile: nextProfile,
+    transaction,
+    durationMs: COOP_FEVER_DURATION_MS,
+    multiplier: COOP_FEVER_MULTIPLIER,
+  };
+}
+
+export interface AutoHarvestDroneTier {
+  id: AutoHarvestDurationId;
+  label: string;
+  shortLabel: string;
+  hours: number;
+  durationMs: number;
+  coinCost: number;
+  eggCost: number;
+  badge?: string;
+}
+
+export const AUTO_HARVEST_DRONE_TIERS: AutoHarvestDroneTier[] = [
+  { id: '5h', label: '5 Hours', shortLabel: '5h', hours: 5, durationMs: 5 * 3_600_000, coinCost: 250, eggCost: 15_000 },
+  { id: '10h', label: '10 Hours', shortLabel: '10h', hours: 10, durationMs: 10 * 3_600_000, coinCost: 450, eggCost: 27_000 },
+  { id: '15h', label: '15 Hours', shortLabel: '15h', hours: 15, durationMs: 15 * 3_600_000, coinCost: 650, eggCost: 39_000 },
+  { id: '20h', label: '20 Hours', shortLabel: '20h', hours: 20, durationMs: 20 * 3_600_000, coinCost: 850, eggCost: 50_000 },
+  { id: '24h', label: '24 Hours', shortLabel: '24h', hours: 24, durationMs: 24 * 3_600_000, coinCost: 1_000, eggCost: 60_000, badge: 'Popular' },
+  { id: '7d', label: '7 Days', shortLabel: '7d', hours: 168, durationMs: 7 * 24 * 3_600_000, coinCost: 5_500, eggCost: 330_000, badge: 'Best Value' },
+];
+
+export function isAutoHarvestDroneActive(
+  profile: Partial<Pick<UserFarmProfile, 'autoHarvestUntilMs'>>,
+  nowMs = Date.now(),
+): boolean {
+  return Number(profile.autoHarvestUntilMs ?? 0) > nowMs;
+}
+
+export function getAutoHarvestDroneTier(durationId: AutoHarvestDurationId): AutoHarvestDroneTier {
+  const found = AUTO_HARVEST_DRONE_TIERS.find((t) => t.id === durationId);
+  if (!found) {
+    throw new Error(`Unknown Auto-Harvest Drone duration: ${durationId}`);
+  }
+  return found;
+}
+
+export function purchaseAutoHarvestDrone(
+  profile: UserFarmProfile,
+  durationId: AutoHarvestDurationId,
+  currency: AutoHarvestCurrency,
+  nowMs: number,
+):
+  | {
+      profile: UserFarmProfile;
+      transaction: TransactionEntry;
+      tier: AutoHarvestDroneTier;
+      paidAmount: number;
+    }
+  | { error: string } {
+  const tier = getAutoHarvestDroneTier(durationId);
+  const cost = currency === 'eggs' ? tier.eggCost : tier.coinCost;
+  const available = currency === 'eggs' ? profile.eggs : profile.coins;
+
+  if (available < cost) {
+    return {
+      error: `Need ${cost.toLocaleString()} ${currency} for ${tier.label} Auto-Harvest Drone (you have ${Math.floor(available).toLocaleString()}).`,
+    };
+  }
+
+  const baseUntil = Math.max(nowMs, Number(profile.autoHarvestUntilMs ?? 0));
+  const nextUntil = baseUntil + tier.durationMs;
+
+  const nextProfile: UserFarmProfile = {
+    ...profile,
+    coins: currency === 'coins' ? profile.coins - cost : profile.coins,
+    eggs: currency === 'eggs' ? profile.eggs - cost : profile.eggs,
+    autoHarvestUntilMs: nextUntil,
+  };
+
+  const transaction: TransactionEntry = {
+    id: `tx_drone_${tier.id}_${nowMs}`,
+    userId: profile.uid,
+    type: 'auto_harvest',
+    title: `Auto-Harvest Drone (${tier.shortLabel} · ${currency === 'eggs' ? 'Eggs' : 'Coins'})`,
+    amount: -cost,
+    currency,
+    usdValue: currency === 'eggs' ? eggsToUsd(cost) : coinsToUsd(cost),
+    status: 'completed',
+    createdAtMs: nowMs,
+  };
+
+  return {
+    profile: nextProfile,
+    transaction,
+    tier,
+    paidAmount: cost,
+  };
+}
+
+export function applyAutoHarvestIfDue(
+  profile: UserFarmProfile,
+  nowMs: number,
+): { profile: UserFarmProfile; autoHarvestedEggs: number } {
+  const droneUntil = Number(profile.autoHarvestUntilMs ?? 0);
+  const lastCollectedAt = Number(profile.lastCollectedAt ?? nowMs);
+  if (droneUntil <= lastCollectedAt || nowMs <= lastCollectedAt) {
+    return { profile, autoHarvestedEggs: 0 };
+  }
+  if (calculateTotalChickens(profile) <= 0) {
+    return { profile, autoHarvestedEggs: 0 };
+  }
+
+  const windowEndMs = Math.min(nowMs, droneUntil);
+  const activeElapsedMs = Math.max(0, windowEndMs - lastCollectedAt);
+  if (activeElapsedMs <= 0) {
+    return { profile, autoHarvestedEggs: 0 };
+  }
+
+  const ratePerHour = calculateProductionRate(profile, Math.min(nowMs, Math.max(lastCollectedAt, windowEndMs - 1)));
+  if (ratePerHour <= 0) {
+    return { profile, autoHarvestedEggs: 0 };
+  }
+
+  const elapsedHours = activeElapsedMs / 3_600_000;
+  const harvestedEggs = Math.floor(ratePerHour * elapsedHours);
+  if (harvestedEggs <= 0) {
+    return { profile, autoHarvestedEggs: 0 };
+  }
+
+  // Advance lastCollectedAt by exact integer egg duration so sub-egg precision isn't lost
+  const consumedMs = Math.min(activeElapsedMs, Math.floor((harvestedEggs / ratePerHour) * 3_600_000));
+  const nextLastCollectedAt = lastCollectedAt + consumedMs;
+  const usdAdded = eggsToUsd(harvestedEggs);
+  const { level, xp } = addXp(profile.level, profile.xp, Math.max(1, Math.floor(harvestedEggs / 15)));
+
+  const nextProfile: UserFarmProfile = {
+    ...profile,
+    eggs: profile.eggs + harvestedEggs,
+    totalEggsCollected: profile.totalEggsCollected + harvestedEggs,
+    totalCashEarnedUsd: Number((profile.totalCashEarnedUsd + usdAdded).toFixed(4)),
+    level,
+    xp,
+    lastCollectedAt: nextLastCollectedAt,
+  };
+
+  return { profile: nextProfile, autoHarvestedEggs: harvestedEggs };
 }
 
 export function isGoldenEggReady(
@@ -2195,39 +2733,92 @@ export function createDefaultSeasonConfig(nowMs = Date.now()): SeasonConfig {
 }
 
 const ADS_TOKEN_PREFIX = '__ads:';
+const COOP_FEVER_UNTIL_PREFIX = '__cf_u:';
+const COOP_FEVER_BASE_PREFIX = '__cf_b:';
+const AUTO_HARVEST_UNTIL_PREFIX = '__ah_u:';
+const TG_REMINDERS_PREFIX = '__tgr:';
 const TASK_META_PREFIX = '__m:';
 const TASK_SUBTITLE_MAX_LEN = 120;
+
+export interface AchievementTokenExtras {
+  coopFeverUntilMs?: number;
+  coopFeverBaselineAds?: number;
+  autoHarvestUntilMs?: number;
+  telegramRemindersEnabled?: boolean;
+}
+
+function isInternalAchievementStateToken(id: string): boolean {
+  return (
+    id.startsWith(ADS_TOKEN_PREFIX) ||
+    id.startsWith(COOP_FEVER_UNTIL_PREFIX) ||
+    id.startsWith(COOP_FEVER_BASE_PREFIX) ||
+    id.startsWith(AUTO_HARVEST_UNTIL_PREFIX) ||
+    id.startsWith(TG_REMINDERS_PREFIX)
+  );
+}
 
 export function encodeAchievementsWithAds(
   claimedAchievementIds: string[] = [],
   totalAdsWatched = 0,
+  extras: AchievementTokenExtras = {},
 ): string[] {
   const safeAds = Math.max(0, Math.floor(Number(totalAdsWatched) || 0));
   const cleanIds: string[] = [];
   const seen = new Set<string>();
   for (const raw of claimedAchievementIds) {
     const id = String(raw || '').trim();
-    if (!id || id.startsWith(ADS_TOKEN_PREFIX) || seen.has(id) || id.length > 64) {
+    if (!id || isInternalAchievementStateToken(id) || seen.has(id) || id.length > 64) {
       continue;
     }
     seen.add(id);
     cleanIds.push(id);
   }
+
+  const stateTokens: string[] = [];
   if (safeAds > 0) {
-    return [...cleanIds.slice(-49), `${ADS_TOKEN_PREFIX}${safeAds}`];
+    stateTokens.push(`${ADS_TOKEN_PREFIX}${safeAds}`);
   }
-  return cleanIds.slice(-50);
+  const cfUntil = Math.max(0, Math.floor(Number(extras.coopFeverUntilMs ?? 0) || 0));
+  if (cfUntil > 0) {
+    stateTokens.push(`${COOP_FEVER_UNTIL_PREFIX}${cfUntil}`);
+  }
+  const cfBase = Math.max(0, Math.floor(Number(extras.coopFeverBaselineAds ?? 0) || 0));
+  if (cfBase > 0) {
+    stateTokens.push(`${COOP_FEVER_BASE_PREFIX}${cfBase}`);
+  }
+  const ahUntil = Math.max(0, Math.floor(Number(extras.autoHarvestUntilMs ?? 0) || 0));
+  if (ahUntil > 0) {
+    stateTokens.push(`${AUTO_HARVEST_UNTIL_PREFIX}${ahUntil}`);
+  }
+  if (extras.telegramRemindersEnabled === false) {
+    stateTokens.push(`${TG_REMINDERS_PREFIX}0`);
+  }
+
+  const maxRealIds = Math.max(0, 50 - stateTokens.length);
+  return [...cleanIds.slice(-maxRealIds), ...stateTokens];
 }
 
 export function decodeAchievementsAndAds(
   rawClaimedIds: unknown,
   explicitTotalAds?: unknown,
   fallbackWatchedAdsCount?: unknown,
-): { claimedAchievementIds: string[]; totalAdsWatched: number } {
+  explicitExtras: AchievementTokenExtras = {},
+): {
+  claimedAchievementIds: string[];
+  totalAdsWatched: number;
+  coopFeverUntilMs: number;
+  coopFeverBaselineAds: number;
+  autoHarvestUntilMs: number;
+  telegramRemindersEnabled: boolean;
+} {
   const arr = Array.isArray(rawClaimedIds) ? rawClaimedIds : [];
   const cleanIds: string[] = [];
   const seen = new Set<string>();
   let tokenAds = 0;
+  let tokenCfUntil = 0;
+  let tokenCfBase = 0;
+  let tokenAhUntil = 0;
+  let tokenTgReminders: boolean | undefined = undefined;
 
   for (const item of arr) {
     const str = String(item || '').trim();
@@ -2239,6 +2830,31 @@ export function decodeAchievementsAndAds(
       }
       continue;
     }
+    if (str.startsWith(COOP_FEVER_UNTIL_PREFIX)) {
+      const parsed = Math.floor(Number(str.slice(COOP_FEVER_UNTIL_PREFIX.length)));
+      if (Number.isFinite(parsed) && parsed > tokenCfUntil) {
+        tokenCfUntil = parsed;
+      }
+      continue;
+    }
+    if (str.startsWith(COOP_FEVER_BASE_PREFIX)) {
+      const parsed = Math.floor(Number(str.slice(COOP_FEVER_BASE_PREFIX.length)));
+      if (Number.isFinite(parsed) && parsed > tokenCfBase) {
+        tokenCfBase = parsed;
+      }
+      continue;
+    }
+    if (str.startsWith(AUTO_HARVEST_UNTIL_PREFIX)) {
+      const parsed = Math.floor(Number(str.slice(AUTO_HARVEST_UNTIL_PREFIX.length)));
+      if (Number.isFinite(parsed) && parsed > tokenAhUntil) {
+        tokenAhUntil = parsed;
+      }
+      continue;
+    }
+    if (str.startsWith(TG_REMINDERS_PREFIX)) {
+      tokenTgReminders = str.slice(TG_REMINDERS_PREFIX.length) !== '0';
+      continue;
+    }
     if (!seen.has(str)) {
       seen.add(str);
       cleanIds.push(str);
@@ -2247,9 +2863,20 @@ export function decodeAchievementsAndAds(
 
   const explicitNum = Math.max(0, Math.floor(Number(explicitTotalAds ?? 0) || 0));
   const fallbackNum = Math.max(0, Math.floor(Number(fallbackWatchedAdsCount ?? 0) || 0));
+  const explicitCfUntil = Math.max(0, Math.floor(Number(explicitExtras.coopFeverUntilMs ?? 0) || 0));
+  const explicitCfBase = Math.max(0, Math.floor(Number(explicitExtras.coopFeverBaselineAds ?? 0) || 0));
+  const explicitAhUntil = Math.max(0, Math.floor(Number(explicitExtras.autoHarvestUntilMs ?? 0) || 0));
+
   return {
     claimedAchievementIds: cleanIds,
     totalAdsWatched: Math.max(tokenAds, explicitNum, fallbackNum),
+    coopFeverUntilMs: Math.max(tokenCfUntil, explicitCfUntil),
+    coopFeverBaselineAds: Math.max(tokenCfBase, explicitCfBase),
+    autoHarvestUntilMs: Math.max(tokenAhUntil, explicitAhUntil),
+    telegramRemindersEnabled:
+      explicitExtras.telegramRemindersEnabled !== undefined
+        ? Boolean(explicitExtras.telegramRemindersEnabled)
+        : (tokenTgReminders ?? true),
   };
 }
 

@@ -1,6 +1,6 @@
 export type ChickenBreedId = 'leghorn' | 'rhode' | 'orpington' | 'australorp';
 
-export type NavTab = 'farm' | 'packs' | 'tasks' | 'friends' | 'wallet';
+export type NavTab = 'farm' | 'packs' | 'leaderboard' | 'tasks' | 'friends' | 'wallet';
 
 export type SubView =
   | 'none'
@@ -17,6 +17,8 @@ export type LanguageCode = 'en' | 'hi' | 'es' | 'ru' | 'fr' | 'pt' | 'ar';
 export type TransactionType =
   | 'collect'
   | 'task'
+  | 'task_topup'
+  | 'task_refund'
   | 'deposit'
   | 'withdraw'
   | 'reinvest'
@@ -25,10 +27,16 @@ export type TransactionType =
   | 'promo'
   | 'referral'
   | 'booster'
+  | 'coop_fever'
+  | 'auto_harvest'
   | 'golden_egg'
   | 'achievement'
   | 'season_prize'
   | 'admin_adjustment';
+
+export type AutoHarvestDurationId = '5h' | '10h' | '15h' | '20h' | '24h' | '7d';
+export type AutoHarvestCurrency = 'coins' | 'eggs';
+export type BroadcastMediaType = 'none' | 'photo' | 'video' | 'animation';
 
 export interface ChickenPack {
   id: ChickenBreedId;
@@ -77,6 +85,10 @@ export interface UserFarmProfile {
   lastCollectedAt: number;
   createdAtMs: number;
   feedBoostUntilMs?: number;
+  coopFeverUntilMs?: number;
+  coopFeverBaselineAds?: number;
+  autoHarvestUntilMs?: number;
+  telegramRemindersEnabled?: boolean;
   lastGoldenEggAtMs?: number;
   goldenEggsFound?: number;
   claimedAchievementIds?: string[];

@@ -377,6 +377,8 @@ export async function ensurePlayerInFirestore(
     if (snap.exists()) {
       const existing = parseProfileDoc(snap.data(), playerId);
       saveCachedPlayerProfile(existing);
+      const lbRef = doc(db, 'leaderboard', playerId);
+      const lbSnap = await getDocFromServer(lbRef).catch(() => null);
       if (detected?.isTelegramDetected) {
         const nextName = (detected.displayName || existing.displayName).slice(0, 60);
         const nextHandle = (detected.handle || existing.handle).slice(0, 40);
@@ -394,11 +396,14 @@ export async function ensurePlayerInFirestore(
           };
           const batch = writeBatch(db);
           batch.update(playerRef, toFirestoreProfilePayload(synced, false));
-          batch.set(doc(db, 'leaderboard', playerId), toLeaderboardPayload(synced));
+          batch.set(lbRef, toLeaderboardPayload(synced));
           await batch.commit();
           saveCachedPlayerProfile(synced);
           return { profile: synced, isNewPlayer: false };
         }
+      }
+      if (!lbSnap?.exists() || Number(lbSnap.data()?.inviterCount ?? -1) !== existing.referralCount) {
+        await setDoc(lbRef, toLeaderboardPayload(existing)).catch(() => {});
       }
       return { profile: existing, isNewPlayer: false };
     }
@@ -623,6 +628,17 @@ export async function applyReferralCodeInFirestore(
             inviterCount: nextRefCount,
             updatedAt: serverTimestamp(),
           });
+        } else {
+          const parsedReferrer = parseProfileDoc(rp, referrerUid);
+          transaction.set(
+            referrerLbRef,
+            toLeaderboardPayload({
+              ...parsedReferrer,
+              coins: nextRefPlayerCoins,
+              referralCount: nextRefCount,
+              referralCoinsEarned: nextRefCoinsEarned,
+            }),
+          );
         }
 
         const refRewardTxId = `tx_ref_earned_${currentProfile.uid.replace(/[^a-zA-Z0-9_-]/g, '').slice(-16)}_${nowMs}`.slice(0, 64);
@@ -726,6 +742,17 @@ export async function commitPlayerMutation(params: {
               inviterCount: nextRefCount,
               updatedAt: serverTimestamp(),
             });
+          } else {
+            const parsedReferrer = parseProfileDoc(rp, refUid);
+            transaction.set(
+              referrerLbRef,
+              toLeaderboardPayload({
+                ...parsedReferrer,
+                coins: nextCoins,
+                referralCount: nextRefCount,
+                referralCoinsEarned: nextRefCoinsEarned,
+              }),
+            );
           }
 
           transaction.set(doc(db, 'players', refUid, 'transactions', `tx_ref_earned_${uid}_${nowMs}`.slice(0, 64)), {
@@ -800,6 +827,16 @@ export async function commitPlayerMutation(params: {
               totalEggsCollected: nextTotalEggs,
               updatedAt: serverTimestamp(),
             });
+          } else {
+            const parsedReferrer = parseProfileDoc(rp, refUid);
+            transaction.set(
+              referrerLbRef,
+              toLeaderboardPayload({
+                ...parsedReferrer,
+                eggs: nextEggs,
+                totalEggsCollected: nextTotalEggs,
+              }),
+            );
           }
 
           const refTxId = `tx_regg_${uid.replace(/[^a-zA-Z0-9_-]/g, '').slice(-12)}_${nowMs}`.slice(0, 64);
@@ -1205,38 +1242,93 @@ export function subscribeToPlayer(
   };
 }
 
+function parseLeaderboardEntryDoc(docSnap: { id: string; data: () => Record<string, unknown> }): LeaderboardEntry {
+  const d = docSnap.data();
+  return {
+    uid: String(d.uid || docSnap.id),
+    displayName: String(d.displayName || 'Farmer'),
+    handle: String(d.handle || '@farmer'),
+    photoUrl: String(d.photoUrl || ''),
+    avatarColor: String(d.avatarColor || '#EF4444'),
+    referralCode: String(d.referralCode || ''),
+    buyerPoints: Number(d.buyerPoints ?? 0),
+    inviterCount: Number(d.inviterCount ?? 0),
+    eggs: Number(d.eggs ?? 0),
+    totalEggsCollected: Number(d.totalEggsCollected ?? 0),
+    chickensCount: Number(d.chickensCount ?? 0),
+  };
+}
+
 export function subscribeToLeaderboard(
   onUpdate: (entries: LeaderboardEntry[]) => void,
 ): () => void {
-  const lbQuery = query(
+  let buyerEntries: LeaderboardEntry[] = [];
+  let inviterEntries: LeaderboardEntry[] = [];
+
+  const emitMerged = () => {
+    const merged = new Map<string, LeaderboardEntry>();
+    for (const entry of buyerEntries) {
+      merged.set(entry.uid, entry);
+    }
+    for (const entry of inviterEntries) {
+      const existing = merged.get(entry.uid);
+      if (!existing || entry.inviterCount > existing.inviterCount) {
+        merged.set(entry.uid, entry);
+      }
+    }
+    onUpdate(Array.from(merged.values()));
+  };
+
+  const buyerQuery = query(
     collection(db, 'leaderboard'),
     orderBy('buyerPoints', 'desc'),
     limit(50),
   );
-  return onSnapshot(
-    lbQuery,
-    (snap) => {
-      onUpdate(
-        snap.docs.map((docSnap) => {
-          const d = docSnap.data();
-          return {
-            uid: String(d.uid),
-            displayName: String(d.displayName || 'Farmer'),
-            handle: String(d.handle || '@farmer'),
-            photoUrl: String(d.photoUrl || ''),
-            avatarColor: String(d.avatarColor || '#EF4444'),
-            referralCode: String(d.referralCode || ''),
-            buyerPoints: Number(d.buyerPoints ?? 0),
-            inviterCount: Number(d.inviterCount ?? 0),
-            eggs: Number(d.eggs ?? 0),
-            totalEggsCollected: Number(d.totalEggsCollected ?? 0),
-            chickensCount: Number(d.chickensCount ?? 0),
-          };
-        }),
-      );
-    },
-    (err) => logSubscriptionError('leaderboard', err),
+  const inviterQuery = query(
+    collection(db, 'leaderboard'),
+    orderBy('inviterCount', 'desc'),
+    limit(50),
   );
+
+  const unsubBuyers = onSnapshot(
+    buyerQuery,
+    (snap) => {
+      buyerEntries = snap.docs.map(parseLeaderboardEntryDoc);
+      emitMerged();
+    },
+    (err) => logSubscriptionError('leaderboard(buyers)', err),
+  );
+
+  const unsubInviters = onSnapshot(
+    inviterQuery,
+    (snap) => {
+      inviterEntries = snap.docs.map(parseLeaderboardEntryDoc);
+      emitMerged();
+    },
+    (err) => logSubscriptionError('leaderboard(inviters)', err),
+  );
+
+  return () => {
+    unsubBuyers();
+    unsubInviters();
+  };
+}
+
+export async function fetchReferralLeaderboardFromFirestore(
+  maxEntries = 50,
+): Promise<LeaderboardEntry[]> {
+  const safeLimit = Math.max(1, Math.min(50, Math.floor(maxEntries)));
+  const q = query(
+    collection(db, 'leaderboard'),
+    orderBy('inviterCount', 'desc'),
+    limit(safeLimit),
+  );
+  try {
+    const snap = await getDocsFromServer(q);
+    return snap.docs.map(parseLeaderboardEntryDoc);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'leaderboard');
+  }
 }
 
 export function subscribeToAllWithdrawRequests(
@@ -2739,6 +2831,8 @@ export async function adjustPlayerReferralCountInFirestore(params: {
           inviterCount: calc.nextCount,
           updatedAt: serverTimestamp(),
         });
+      } else {
+        tx.set(lbRef, toLeaderboardPayload(nextProfile));
       }
 
       return { profile: nextProfile, actualDelta: calc.actualDelta };
@@ -2876,6 +2970,8 @@ export async function adminAddReferralRelationInFirestore(params: {
           inviterCount: nextRefCount,
           updatedAt: serverTimestamp(),
         });
+      } else {
+        tx.set(referrerLbRef, toLeaderboardPayload(updatedReferrer));
       }
 
       tx.update(referredRef, {
@@ -2978,6 +3074,8 @@ export async function adminRemoveReferralRelationInFirestore(params: {
               inviterCount: nextCount,
               updatedAt: serverTimestamp(),
             });
+          } else {
+            tx.set(referrerLbRef, toLeaderboardPayload(referrerProfile));
           }
         }
       }
