@@ -86,9 +86,11 @@ import {
   getAdNetworkClaimCountToday,
   getBotJoinClaimCountToday,
   getChickenMilestoneReached,
+  getCoopFeverAdsWatched,
   getEffectiveAdminIds,
   getTaskRemainingSlots,
   getTotalAdsWatched,
+  getWithdrawAdsWatched,
   getWithdrawalStatusMeta,
   getWithdrawAdGateStatus,
   GOLDEN_EGG_COOLDOWN_MS,
@@ -118,6 +120,7 @@ import {
   REFERRER_SIGNUP_BONUS_EGGS,
   reinvestEggs,
   recordCompletedGateAd,
+  recordCoopFeverAd,
   REQUIRED_TELEGRAM_CHANNELS,
   shouldRequireAdForAction,
   SIGNUP_BONUS_COINS,
@@ -304,9 +307,9 @@ test('reinvestEggs converts eggs to coins with 20% bonus', () => {
   assert.equal(res.profile.coins, 1042);
 });
 
-test('executeWithdrawal enforces 30-ad watch gate, validates address and balance, and records withdrawal', () => {
+test('executeWithdrawal enforces 30-ad watch gate from 3 Tasks Coin Ad buttons, validates address and balance, and records withdrawal', () => {
   const { profile } = createDefaultProfile('player_test1', 'RK', '@rk', NOW);
-  const unwatchedProfile = { ...profile, eggs: 500, totalAdsWatched: 29 };
+  const unwatchedProfile = { ...profile, eggs: 500, totalAdsWatched: 45, withdrawAdsWatched: 29 };
   const blockedByAds = executeWithdrawal(
     unwatchedProfile,
     200,
@@ -317,7 +320,7 @@ test('executeWithdrawal enforces 30-ad watch gate, validates address and balance
   assert.ok('error' in blockedByAds);
   assert.match(blockedByAds.error, /30 ads/i);
 
-  const fundedProfile = { ...profile, eggs: 500, totalAdsWatched: MIN_WITHDRAW_ADS_WATCHED };
+  const fundedProfile = { ...profile, eggs: 500, withdrawAdsWatched: MIN_WITHDRAW_ADS_WATCHED };
   const badAddr = executeWithdrawal(fundedProfile, 200, 'abc', '', NOW);
   assert.ok('error' in badAddr);
 
@@ -2023,15 +2026,17 @@ test('sortTasks orders tasks accurately by Most Reward, Newest, and Ending Soon'
   );
 });
 
-test('totalAdsWatched accumulates across Free Eggs ads (with 10/10 chest) and coin ads to unlock withdrawal at 30 ads', () => {
+test('Withdraw 30-ad gate ONLY counts Tasks 3-site Coin Ad buttons and ignores Free Eggs, Gate, Bot Join, and Coop Fever ads', () => {
   const { profile } = createDefaultProfile('player_ads30', 'Kabir', '@kabir', NOW);
   let current = { ...profile, eggs: 250 };
 
   assert.equal(getTotalAdsWatched(current), 0);
+  assert.equal(getWithdrawAdsWatched(current), 0);
+  assert.equal(getCoopFeverAdsWatched(current), 0);
   assert.equal(getWithdrawAdGateStatus(current).unlocked, false);
   assert.equal(getWithdrawAdGateStatus(current).remaining, 30);
 
-  // Watch 20 Free Eggs ads -> grants 150 eggs on steps 1-9 & 11-19 and 650 eggs on steps 10 & 20; zero chickens
+  // Watch 20 Free Eggs ads + 5 Gate ads + 3 Bot Join ads + 25 Coop Fever ads -> MUST NOT advance withdrawAdsWatched!
   let totalFreeEggsAdded = 0;
   for (let i = 0; i < 20; i += 1) {
     const stepRes = watchAdStep(current, NOW + i * 1000);
@@ -2045,41 +2050,81 @@ test('totalAdsWatched accumulates across Free Eggs ads (with 10/10 chest) and co
     );
     assert.equal(stepRes.transaction.currency, 'eggs');
   }
+  for (let i = 0; i < 5; i += 1) {
+    current = recordCompletedGateAd(current);
+  }
+  for (let i = 0; i < 3; i += 1) {
+    const botRes = claimAdsgramBotJoinReward(current, '2026-11-14', NOW + 25_000 + i * 1000);
+    assert.ok(!('error' in botRes));
+    current = botRes.profile;
+  }
+  for (let i = 0; i < 25; i += 1) {
+    current = recordCoopFeverAd(current);
+  }
+
   assert.equal(current.watchedAdsCount, 0);
   assert.equal(current.leghornCount, 0);
   assert.equal(totalFreeEggsAdded, 20 * FREE_EGGS_PER_AD + 2 * FREE_EGGS_MILESTONE_BONUS);
   assert.equal(current.eggs, 250 + totalFreeEggsAdded);
-  assert.equal(getTotalAdsWatched(current), 20);
+  assert.equal(getTotalAdsWatched(current), 53);
+  assert.equal(getCoopFeverAdsWatched(current), 25);
+  // Withdraw gate is still 0/30!
+  assert.equal(getWithdrawAdsWatched(current), 0);
+  assert.equal(getWithdrawAdGateStatus(current).unlocked, false);
+  assert.equal(getWithdrawAdGateStatus(current).remaining, 30);
 
+  // Watch 29 ads across the 3 Coin Ad buttons in Tasks (spread across 2 days respecting daily limits)
   for (let i = 0; i < 5; i += 1) {
     const netRes = claimAdNetworkReward(current, 'adsgram', '2026-11-14', NOW + 30_000 + i * 1000);
     assert.ok(!('error' in netRes));
     current = netRes.profile;
   }
-  for (let i = 0; i < 4; i += 1) {
+  for (let i = 0; i < 5; i += 1) {
     const netRes = claimAdNetworkReward(current, 'gigapub', '2026-11-14', NOW + 40_000 + i * 1000);
     assert.ok(!('error' in netRes));
     current = netRes.profile;
   }
+  for (let i = 0; i < 5; i += 1) {
+    const netRes = claimAdNetworkReward(current, 'monetag', '2026-11-14', NOW + 50_000 + i * 1000);
+    assert.ok(!('error' in netRes));
+    current = netRes.profile;
+  }
+  for (let i = 0; i < 5; i += 1) {
+    const netRes = claimAdNetworkReward(current, 'adsgram', '2026-11-15', NOW + 90_000 + i * 1000);
+    assert.ok(!('error' in netRes));
+    current = netRes.profile;
+  }
+  for (let i = 0; i < 5; i += 1) {
+    const netRes = claimAdNetworkReward(current, 'gigapub', '2026-11-15', NOW + 100_000 + i * 1000);
+    assert.ok(!('error' in netRes));
+    current = netRes.profile;
+  }
+  for (let i = 0; i < 4; i += 1) {
+    const netRes = claimAdNetworkReward(current, 'monetag', '2026-11-15', NOW + 110_000 + i * 1000);
+    assert.ok(!('error' in netRes));
+    current = netRes.profile;
+  }
 
-  assert.equal(getTotalAdsWatched(current), 29);
+  assert.equal(getWithdrawAdsWatched(current), 29);
   assert.equal(getWithdrawAdGateStatus(current).unlocked, false);
   assert.equal(getWithdrawAdGateStatus(current).remaining, 1);
 
   // 30th ad via Monetag unlocks withdrawals!
-  const net30 = claimAdNetworkReward(current, 'monetag', '2026-11-14', NOW + 50_000);
+  const net30 = claimAdNetworkReward(current, 'monetag', '2026-11-15', NOW + 120_000);
   assert.ok(!('error' in net30));
   current = net30.profile;
-  assert.equal(getTotalAdsWatched(current), 30);
+  assert.equal(getWithdrawAdsWatched(current), 30);
   assert.equal(getWithdrawAdGateStatus(current).unlocked, true);
   assert.equal(getWithdrawAdGateStatus(current).remaining, 0);
+  // Coop Fever counter remains strictly unaffected by the 30 Tasks ads
+  assert.equal(getCoopFeverAdsWatched(current), 25);
 
   const wdOk = executeWithdrawal(
     current,
     150,
     'UQB06dO9oc06d-1c8DF03FLdCznEHz_aLIA69fxzITcunwpr',
     '',
-    NOW + 60_000,
+    NOW + 130_000,
   );
   assert.ok(!('error' in wdOk));
 });
@@ -2896,12 +2941,23 @@ test('paid task top-up and refund calculate added slots, fees, and unused pool r
   assert.equal(refundOrder.transaction.type, 'task_refund');
 });
 
-test('Coop Fever unlocks after 25 ads watched, grants 3x production multiplier, and resets cleanly', () => {
+test('Coop Fever uses dedicated coopFeverAdsWatched (not Tasks or Gate ads), unlocks 3x production at 25 ads, and resets cleanly', () => {
   let { profile } = createDefaultProfile('player_fever', 'Riya', '@riya', NOW);
   const bought = buyChickens({ ...profile, coins: 5000 }, 'leghorn', 2, NOW);
   assert.ok(!('error' in bought));
-  profile = { ...bought.profile, totalAdsWatched: 24, watchedAdsCount: 4 };
+  profile = bought.profile;
 
+  // Watching 30 Tasks Coin Ads / Gate ads / Free Egg ads must NOT advance Coop Fever!
+  profile = { ...profile, withdrawAdsWatched: 30, totalAdsWatched: 40, watchedAdsCount: 4 };
+  const blockedZero = getCoopFeverProgress(profile, NOW);
+  assert.equal(blockedZero.adsCollected, 0);
+  assert.equal(blockedZero.ready, false);
+
+  // Record 24 dedicated Coop Fever ads via recordCoopFeverAd -> still 1 short & withdrawAdsWatched stays unchanged
+  for (let i = 0; i < 24; i += 1) {
+    profile = recordCoopFeverAd(profile);
+  }
+  assert.equal(getWithdrawAdsWatched(profile), 30);
   const progress24 = getCoopFeverProgress(profile, NOW);
   assert.equal(progress24.adsCollected, 24);
   assert.equal(progress24.adsRemaining, 1);
@@ -2910,8 +2966,10 @@ test('Coop Fever unlocks after 25 ads watched, grants 3x production multiplier, 
   const blocked = activateCoopFever(profile, NOW);
   assert.ok('error' in blocked);
 
-  // Reach 27 ads -> 2 excess carry over after consuming 25
-  profile = { ...profile, totalAdsWatched: 27 };
+  // Reach 27 dedicated Coop Fever ads -> 2 excess carry over after consuming 25
+  for (let i = 0; i < 3; i += 1) {
+    profile = recordCoopFeverAd(profile);
+  }
   const readyProg = getCoopFeverProgress(profile, NOW);
   assert.equal(readyProg.ready, true);
   assert.equal(readyProg.adsCollected, COOP_FEVER_REQUIRED_ADS);
@@ -2967,10 +3025,12 @@ test('Auto-Harvest Drone supports 5h/10h/15h/20h/24h/7d in coins or eggs and har
   assert.equal(after10h.profile.totalEggsCollected, eggBuy.profile.totalEggsCollected + expected10h);
 });
 
-test('compact achievement tokens round-trip ads, Coop Fever, Auto-Harvest Drone, and reminder preference under 50-item cap', () => {
+test('compact achievement tokens round-trip ads, separate withdrawAdsWatched & coopFeverAdsWatched, Coop Fever, Auto-Harvest Drone, and reminder preference under 50-item cap', () => {
   const encoded = encodeAchievementsWithAds(['first_harvest', 'flock_5'], 42, {
+    withdrawAdsWatched: 19,
     coopFeverUntilMs: 1794800000000,
     coopFeverBaselineAds: 25,
+    coopFeverAdsWatched: 27,
     autoHarvestUntilMs: 1794900000000,
     telegramRemindersEnabled: false,
   });
@@ -2980,8 +3040,10 @@ test('compact achievement tokens round-trip ads, Coop Fever, Auto-Harvest Drone,
   const decoded = decodeAchievementsAndAds(encoded);
   assert.deepEqual(decoded.claimedAchievementIds, ['first_harvest', 'flock_5']);
   assert.equal(decoded.totalAdsWatched, 42);
+  assert.equal(decoded.withdrawAdsWatched, 19);
   assert.equal(decoded.coopFeverUntilMs, 1794800000000);
   assert.equal(decoded.coopFeverBaselineAds, 25);
+  assert.equal(decoded.coopFeverAdsWatched, 27);
   assert.equal(decoded.autoHarvestUntilMs, 1794900000000);
   assert.equal(decoded.telegramRemindersEnabled, false);
 });

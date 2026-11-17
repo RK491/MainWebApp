@@ -693,7 +693,7 @@ export function YourFarmView({
 
             <div className="space-y-1.5">
               <div className="flex items-center justify-between text-[11px] font-bold">
-                <span className="text-stone-600 dark:text-stone-300">Payout Ad Unlock</span>
+                <span className="text-stone-600 dark:text-stone-300">Payout Ad Unlock (3 Coin Ad Buttons)</span>
                 <span className="font-mono-num text-stone-900 dark:text-stone-100">
                   {adGate.unlocked ? 'Unlocked ✓' : `${adGate.watched}/${adGate.required} Ads`}
                 </span>

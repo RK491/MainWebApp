@@ -31,6 +31,7 @@ import {
   claimReferralMilestone,
   collectEggs,
   completeTask,
+  COOP_FEVER_REQUIRED_ADS,
   createDefaultProfile,
   createDefaultSeasonConfig,
   createPaidTaskOrder,
@@ -50,11 +51,13 @@ import {
   formatChannelsHandleSummary,
   formatPromoRewardSummary,
   getActiveRequiredChannels,
+  getCoopFeverProgress,
   getEffectiveAdminIds,
   isAdminPlayerId,
   isAutoHarvestDroneActive,
   purchaseAutoHarvestDrone,
   recordCompletedGateAd,
+  recordCoopFeverAd,
   REFERRAL_DEPOSIT_COMMISSION_RATE,
   REFERRER_SIGNUP_BONUS_COINS,
   reinvestEggs,
@@ -2382,6 +2385,60 @@ export default function App() {
     showToast('2× Laying Feed activated for 1 hour!');
   };
 
+  const handleClaimCoopFeverAd = () => {
+    const now = Date.now();
+    const updated = recordCoopFeverAd(latestProfileRef.current);
+    const nextProg = getCoopFeverProgress(updated, now);
+    playClaimSound(soundsEnabled);
+    triggerHapticFeedback('success');
+    void persistMutation({ nextProfile: updated });
+    if (nextProg.ready) {
+      triggerRewardConfetti();
+      showToast('3× Coop Fever unlocked (25/25 Ads)! Tap Activate 3× Fever on your Farm!');
+    } else {
+      showToast(
+        `3× Fever Ad counted (${nextProg.adsCollected}/${COOP_FEVER_REQUIRED_ADS}).`,
+      );
+    }
+  };
+
+  const handleTriggerCoopFeverAd = async () => {
+    if (watchingAdLoading) return;
+    const now = Date.now();
+    const prog = getCoopFeverProgress(latestProfileRef.current, now);
+    if (prog.active) {
+      showToast('Coop Fever 3× Rush is already active on your farm!');
+      return;
+    }
+    if (prog.ready) {
+      handleActivateCoopFever();
+      return;
+    }
+    setWatchingAdLoading(true);
+    setActiveAdNetwork(null);
+    setActiveAdAction(null);
+    try {
+      const external = await tryRunExternalRewardedAd(adConfig);
+      if (external.handled) {
+        if (external.rewarded) {
+          handleClaimCoopFeverAd();
+        } else {
+          showToast('Complete the ad to charge 3× Coop Fever.');
+        }
+        return;
+      }
+      setAdModalState({
+        open: true,
+        kind: 'coop_fever',
+        notice: external.message ?? null,
+        network: null,
+        mandatory: false,
+      });
+    } finally {
+      setWatchingAdLoading(false);
+    }
+  };
+
   const handleActivateCoopFever = () => {
     const now = Date.now();
     const current = latestProfileRef.current;
@@ -3151,6 +3208,7 @@ export default function App() {
               onGoldenEggDrop={handleGoldenEggTap}
               onActivateBooster={handleActivateBooster}
               onActivateCoopFever={handleActivateCoopFever}
+              onWatchCoopFeverAd={() => void handleTriggerCoopFeverAd()}
               onBuyChickens={() => navigateTab('packs')}
             />
           </div>
@@ -3256,6 +3314,8 @@ export default function App() {
             chickenBreed={adModalState.chickenBreed ?? null}
             chickenQty={adModalState.chickenQty ?? null}
             minerCostCoins={adModalState.minerCostCoins ?? null}
+            coopFeverAdsCollected={getCoopFeverProgress(profile, nowMs).adsCollected}
+            coopFeverAdsRequired={COOP_FEVER_REQUIRED_ADS}
             fallbackNotice={adModalState.notice}
             mandatory={adModalState.mandatory}
             onComplete={() => {
@@ -3279,6 +3339,8 @@ export default function App() {
                 handleClaimAdNetwork(currentModal.network);
               } else if (currentModal.kind === 'adsgram_task') {
                 handleClaimAdsgramBotJoin();
+              } else if (currentModal.kind === 'coop_fever') {
+                handleClaimCoopFeverAd();
               } else {
                 handleWatchAd();
               }

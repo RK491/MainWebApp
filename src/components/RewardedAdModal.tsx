@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, ExternalLink, Gift, Play, Sparkles, Timer, X } from 'lucide-react';
+import { CheckCircle2, ExternalLink, Flame, Gift, Play, Sparkles, Timer, X } from 'lucide-react';
 import { motion, useReducedMotion } from 'motion/react';
 import {
   ADSGRAM_BOT_JOIN_TASK,
   CHICKEN_PACKS,
+  COOP_FEVER_REQUIRED_ADS,
   FREE_EGGS_MILESTONE_BONUS,
   FREE_EGGS_PER_AD,
 } from '../game/economy';
@@ -18,6 +19,7 @@ export type ModalAdActionKind =
   | 'buy_chicken'
   | 'ad_network'
   | 'adsgram_task'
+  | 'coop_fever'
   | 'watch_ad';
 
 interface RewardedAdModalProps {
@@ -32,6 +34,8 @@ interface RewardedAdModalProps {
   chickenBreed?: ChickenBreedId | null;
   chickenQty?: number | null;
   minerCostCoins?: number | null;
+  coopFeverAdsCollected?: number | null;
+  coopFeverAdsRequired?: number | null;
   fallbackNotice?: string | null;
   mandatory?: boolean;
   onComplete: () => void;
@@ -50,6 +54,8 @@ export function RewardedAdModal({
   chickenBreed,
   chickenQty,
   minerCostCoins,
+  coopFeverAdsCollected,
+  coopFeverAdsRequired,
   fallbackNotice,
   mandatory = false,
   onComplete,
@@ -80,6 +86,9 @@ export function RewardedAdModal({
     : null;
   const minerPackName = minerPack?.name || 'Hen Miner';
   const safeMinerCost = Math.max(0, Math.floor(Number(minerCostCoins ?? 0)));
+  const feverReq = Math.max(1, Math.floor(Number(coopFeverAdsRequired ?? COOP_FEVER_REQUIRED_ADS)));
+  const feverCurrent = Math.max(0, Math.min(feverReq, Math.floor(Number(coopFeverAdsCollected ?? 0))));
+  const feverNext = Math.min(feverReq, feverCurrent + 1);
   const isMilestoneEggAd = watchedCount + 1 >= 10;
   const watchAdEggAmount = isMilestoneEggAd
     ? FREE_EGGS_PER_AD + FREE_EGGS_MILESTONE_BONUS
@@ -97,6 +106,7 @@ export function RewardedAdModal({
     if (actionKind === 'claim_promo') return 'Gift Code Ad';
     if (actionKind === 'buy_chicken') return 'Miner Purchase Ad';
     if (actionKind === 'adsgram_task') return 'AdsGram Bot Joins';
+    if (actionKind === 'coop_fever') return `3× Coop Fever (${feverNext}/${feverReq})`;
     if (networkLabel) return `${networkLabel} · Earn Coins`;
     return `Get Free Eggs (${watchedCount + 1}/10)`;
   })();
@@ -107,6 +117,7 @@ export function RewardedAdModal({
     if (actionKind === 'claim_promo') return `Unlock Gift ${promoCode || 'Code'}`;
     if (actionKind === 'buy_chicken') return `Unlock ${safeChickenQty}× ${minerPackName}`;
     if (actionKind === 'adsgram_task') return 'AdsGram Bot Joins & Clicks';
+    if (actionKind === 'coop_fever') return 'Charge 3× Coop Fever Rush';
     if (networkLabel) return `${networkLabel} Watch & Earn`;
     return 'Watch & Earn Free Eggs';
   })();
@@ -133,6 +144,11 @@ export function RewardedAdModal({
         rewardCoins ?? ADSGRAM_BOT_JOIN_TASK.rewardCoins
       } coins.`;
     }
+    if (actionKind === 'coop_fever') {
+      return feverNext >= feverReq
+        ? `Complete this final ad (${feverNext}/${feverReq}) to unlock 3× Coop Fever egg production for 10 minutes!`
+        : `Dedicated 3× Fever Ad (${feverNext}/${feverReq}). Complete ${feverReq} Farm Fever ads to earn 3× egg production for 10 minutes.`;
+    }
     if (hasCoinReward) {
       return `Watch until the timer ends to earn +${rewardCoins} coins directly to your wallet.`;
     }
@@ -148,6 +164,11 @@ export function RewardedAdModal({
     if (actionKind === 'buy_chicken') return `Buy ${safeChickenQty}× ${minerPackName}`;
     if (actionKind === 'adsgram_task') {
       return `Claim +${rewardCoins ?? ADSGRAM_BOT_JOIN_TASK.rewardCoins} Coins`;
+    }
+    if (actionKind === 'coop_fever') {
+      return feverNext >= feverReq
+        ? `Unlock 3× Fever (${feverNext}/${feverReq})`
+        : `Count 3× Fever Ad (${feverNext}/${feverReq})`;
     }
     if (hasCoinReward) return `Claim +${rewardCoins} Coins`;
     return `Claim +${watchAdEggAmount} Free Eggs`;
@@ -186,6 +207,8 @@ export function RewardedAdModal({
                 <ChickenSprite breed={chickenBreed} className="w-14 h-14" />
               ) : actionKind === 'watch_ad' ? (
                 <EggIcon className="w-14 h-14" />
+              ) : actionKind === 'coop_fever' ? (
+                <Flame className="w-11 h-11 text-orange-500 fill-orange-400" />
               ) : !imgFailed ? (
                 <img
                   src={clayHenMascot}
@@ -205,6 +228,15 @@ export function RewardedAdModal({
           <p className="text-xs text-stone-600 dark:text-stone-300 leading-relaxed">
             {description}
           </p>
+
+          {actionKind === 'coop_fever' && (
+            <div className="inline-flex items-center gap-1.5 rounded-xl bg-orange-100/90 dark:bg-orange-950/60 border border-orange-300/70 dark:border-orange-700/50 px-3 py-1 text-xs font-extrabold text-orange-800 dark:text-orange-300">
+              <Flame className="w-4 h-4 text-orange-500 fill-orange-500" />
+              <span className="font-mono-num">
+                Fever Ads: {feverCurrent} → {feverNext}/{feverReq}
+              </span>
+            </div>
+          )}
 
           {actionKind === 'collect_eggs' && safeEggs > 0 && (
             <div className="inline-flex items-center gap-1.5 rounded-xl bg-amber-100/80 dark:bg-amber-950/60 border border-amber-300/70 dark:border-amber-700/50 px-3 py-1 text-xs font-extrabold text-amber-800 dark:text-amber-300">

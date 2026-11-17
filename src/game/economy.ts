@@ -655,14 +655,18 @@ export interface CoopFeverProgress {
 }
 
 export function getCoopFeverProgress(
-  profile: Pick<UserFarmProfile, 'watchedAdsCount'> &
-    Partial<Pick<UserFarmProfile, 'totalAdsWatched' | 'coopFeverUntilMs' | 'coopFeverBaselineAds'>>,
+  profile: Partial<
+    Pick<
+      UserFarmProfile,
+      'coopFeverAdsWatched' | 'coopFeverUntilMs' | 'coopFeverBaselineAds'
+    >
+  >,
   nowMs = Date.now(),
 ): CoopFeverProgress {
-  const totalAds = getTotalAdsWatched(profile);
+  const feverAds = getCoopFeverAdsWatched(profile);
   const rawBaseline = Math.max(0, Math.floor(Number(profile.coopFeverBaselineAds ?? 0) || 0));
-  const baseline = Math.min(totalAds, rawBaseline);
-  const adsSinceBaseline = Math.max(0, totalAds - baseline);
+  const baseline = Math.min(feverAds, rawBaseline);
+  const adsSinceBaseline = Math.max(0, feverAds - baseline);
   const adsCollected = Math.min(COOP_FEVER_REQUIRED_ADS, adsSinceBaseline);
   const adsRemaining = Math.max(0, COOP_FEVER_REQUIRED_ADS - adsSinceBaseline);
   const active = isCoopFeverActive(profile, nowMs);
@@ -1156,15 +1160,27 @@ export function getTotalAdsWatched(
   return Math.max(0, Math.floor(Number(profile.totalAdsWatched ?? profile.watchedAdsCount ?? 0)));
 }
 
+export function getWithdrawAdsWatched(
+  profile: Partial<Pick<UserFarmProfile, 'withdrawAdsWatched'>>,
+): number {
+  return Math.max(0, Math.floor(Number(profile.withdrawAdsWatched ?? 0) || 0));
+}
+
+export function getCoopFeverAdsWatched(
+  profile: Partial<Pick<UserFarmProfile, 'coopFeverAdsWatched'>>,
+): number {
+  return Math.max(0, Math.floor(Number(profile.coopFeverAdsWatched ?? 0) || 0));
+}
+
 export function getWithdrawAdGateStatus(
-  profile: Partial<Pick<UserFarmProfile, 'watchedAdsCount' | 'totalAdsWatched'>>,
+  profile: Partial<Pick<UserFarmProfile, 'withdrawAdsWatched' | 'watchedAdsCount' | 'totalAdsWatched'>>,
 ): {
   watched: number;
   required: number;
   remaining: number;
   unlocked: boolean;
 } {
-  const watched = getTotalAdsWatched(profile);
+  const watched = getWithdrawAdsWatched(profile);
   const remaining = Math.max(0, MIN_WITHDRAW_ADS_WATCHED - watched);
   return {
     watched,
@@ -1175,13 +1191,14 @@ export function getWithdrawAdGateStatus(
 }
 
 export function validateWithdrawalInput(
-  profile: Pick<UserFarmProfile, 'eggs'> & Partial<Pick<UserFarmProfile, 'watchedAdsCount' | 'totalAdsWatched'>>,
+  profile: Pick<UserFarmProfile, 'eggs'> &
+    Partial<Pick<UserFarmProfile, 'withdrawAdsWatched' | 'watchedAdsCount' | 'totalAdsWatched'>>,
   eggsAmount: number,
   walletAddress: string,
 ): string | null {
   const adGate = getWithdrawAdGateStatus(profile);
   if (!adGate.unlocked) {
-    return `Watch at least ${adGate.required} ads before withdrawing (${adGate.watched}/${adGate.required} watched).`;
+    return `Watch at least ${adGate.required} ads from the 3 Coin Ad buttons in Tasks before withdrawing (${adGate.watched}/${adGate.required} watched).`;
   }
   const trimmed = walletAddress.trim();
   if (trimmed.length < 6) {
@@ -1905,12 +1922,14 @@ export function claimAdNetworkReward(
   );
   const nextCompletedIds = [...prunedIds, claimToken].slice(-50);
   const nextTotalAdsWatched = getTotalAdsWatched(profile) + 1;
+  const nextWithdrawAdsWatched = getWithdrawAdsWatched(profile) + 1;
 
   const nextProfile: UserFarmProfile = {
     ...profile,
     coins: profile.coins + def.rewardCoins,
     completedTaskIds: nextCompletedIds,
     totalAdsWatched: nextTotalAdsWatched,
+    withdrawAdsWatched: nextWithdrawAdsWatched,
   };
 
   const transaction: TransactionEntry = {
@@ -2117,6 +2136,8 @@ export function createDefaultProfile(
     claimedPromoCodes: [],
     watchedAdsCount: 0,
     totalAdsWatched: 0,
+    withdrawAdsWatched: 0,
+    coopFeverAdsWatched: 0,
     referralCode: createReferralCodeFromUid(uid),
     referredBy: '',
     referralActivated: false,
@@ -2266,13 +2287,13 @@ export function activateCoopFever(
   const progress = getCoopFeverProgress(profile, nowMs);
   if (!progress.ready) {
     return {
-      error: `Watch ${progress.adsRemaining} more ads to unlock Coop Fever 3× Rush (${progress.adsCollected}/${COOP_FEVER_REQUIRED_ADS}).`,
+      error: `Watch ${progress.adsRemaining} more 3× Fever ad${progress.adsRemaining === 1 ? '' : 's'} on the Farm tab to unlock Coop Fever 3× Rush (${progress.adsCollected}/${COOP_FEVER_REQUIRED_ADS}).`,
     };
   }
 
-  const totalAds = getTotalAdsWatched(profile);
+  const feverAds = getCoopFeverAdsWatched(profile);
   const rawBaseline = Math.max(0, Math.floor(Number(profile.coopFeverBaselineAds ?? 0) || 0));
-  const nextBaseline = Math.min(totalAds, rawBaseline + COOP_FEVER_REQUIRED_ADS);
+  const nextBaseline = Math.min(feverAds, rawBaseline + COOP_FEVER_REQUIRED_ADS);
 
   const nextProfile: UserFarmProfile = {
     ...profile,
@@ -2764,16 +2785,20 @@ export function createDefaultSeasonConfig(nowMs = Date.now()): SeasonConfig {
 }
 
 const ADS_TOKEN_PREFIX = '__ads:';
+const WITHDRAW_ADS_PREFIX = '__wad:';
 const COOP_FEVER_UNTIL_PREFIX = '__cf_u:';
 const COOP_FEVER_BASE_PREFIX = '__cf_b:';
+const COOP_FEVER_ADS_PREFIX = '__cf_a:';
 const AUTO_HARVEST_UNTIL_PREFIX = '__ah_u:';
 const TG_REMINDERS_PREFIX = '__tgr:';
 const TASK_META_PREFIX = '__m:';
 const TASK_SUBTITLE_MAX_LEN = 120;
 
 export interface AchievementTokenExtras {
+  withdrawAdsWatched?: number;
   coopFeverUntilMs?: number;
   coopFeverBaselineAds?: number;
+  coopFeverAdsWatched?: number;
   autoHarvestUntilMs?: number;
   telegramRemindersEnabled?: boolean;
 }
@@ -2781,8 +2806,10 @@ export interface AchievementTokenExtras {
 function isInternalAchievementStateToken(id: string): boolean {
   return (
     id.startsWith(ADS_TOKEN_PREFIX) ||
+    id.startsWith(WITHDRAW_ADS_PREFIX) ||
     id.startsWith(COOP_FEVER_UNTIL_PREFIX) ||
     id.startsWith(COOP_FEVER_BASE_PREFIX) ||
+    id.startsWith(COOP_FEVER_ADS_PREFIX) ||
     id.startsWith(AUTO_HARVEST_UNTIL_PREFIX) ||
     id.startsWith(TG_REMINDERS_PREFIX)
   );
@@ -2809,6 +2836,10 @@ export function encodeAchievementsWithAds(
   if (safeAds > 0) {
     stateTokens.push(`${ADS_TOKEN_PREFIX}${safeAds}`);
   }
+  const wad = Math.max(0, Math.floor(Number(extras.withdrawAdsWatched ?? 0) || 0));
+  if (wad > 0) {
+    stateTokens.push(`${WITHDRAW_ADS_PREFIX}${wad}`);
+  }
   const cfUntil = Math.max(0, Math.floor(Number(extras.coopFeverUntilMs ?? 0) || 0));
   if (cfUntil > 0) {
     stateTokens.push(`${COOP_FEVER_UNTIL_PREFIX}${cfUntil}`);
@@ -2816,6 +2847,10 @@ export function encodeAchievementsWithAds(
   const cfBase = Math.max(0, Math.floor(Number(extras.coopFeverBaselineAds ?? 0) || 0));
   if (cfBase > 0) {
     stateTokens.push(`${COOP_FEVER_BASE_PREFIX}${cfBase}`);
+  }
+  const cfAds = Math.max(0, Math.floor(Number(extras.coopFeverAdsWatched ?? 0) || 0));
+  if (cfAds > 0) {
+    stateTokens.push(`${COOP_FEVER_ADS_PREFIX}${cfAds}`);
   }
   const ahUntil = Math.max(0, Math.floor(Number(extras.autoHarvestUntilMs ?? 0) || 0));
   if (ahUntil > 0) {
@@ -2837,8 +2872,10 @@ export function decodeAchievementsAndAds(
 ): {
   claimedAchievementIds: string[];
   totalAdsWatched: number;
+  withdrawAdsWatched: number;
   coopFeverUntilMs: number;
   coopFeverBaselineAds: number;
+  coopFeverAdsWatched: number;
   autoHarvestUntilMs: number;
   telegramRemindersEnabled: boolean;
 } {
@@ -2846,8 +2883,10 @@ export function decodeAchievementsAndAds(
   const cleanIds: string[] = [];
   const seen = new Set<string>();
   let tokenAds = 0;
+  let tokenWad = 0;
   let tokenCfUntil = 0;
   let tokenCfBase = 0;
+  let tokenCfAds = 0;
   let tokenAhUntil = 0;
   let tokenTgReminders: boolean | undefined = undefined;
 
@@ -2858,6 +2897,13 @@ export function decodeAchievementsAndAds(
       const parsed = Math.floor(Number(str.slice(ADS_TOKEN_PREFIX.length)));
       if (Number.isFinite(parsed) && parsed > tokenAds) {
         tokenAds = parsed;
+      }
+      continue;
+    }
+    if (str.startsWith(WITHDRAW_ADS_PREFIX)) {
+      const parsed = Math.floor(Number(str.slice(WITHDRAW_ADS_PREFIX.length)));
+      if (Number.isFinite(parsed) && parsed > tokenWad) {
+        tokenWad = parsed;
       }
       continue;
     }
@@ -2872,6 +2918,13 @@ export function decodeAchievementsAndAds(
       const parsed = Math.floor(Number(str.slice(COOP_FEVER_BASE_PREFIX.length)));
       if (Number.isFinite(parsed) && parsed > tokenCfBase) {
         tokenCfBase = parsed;
+      }
+      continue;
+    }
+    if (str.startsWith(COOP_FEVER_ADS_PREFIX)) {
+      const parsed = Math.floor(Number(str.slice(COOP_FEVER_ADS_PREFIX.length)));
+      if (Number.isFinite(parsed) && parsed > tokenCfAds) {
+        tokenCfAds = parsed;
       }
       continue;
     }
@@ -2894,15 +2947,19 @@ export function decodeAchievementsAndAds(
 
   const explicitNum = Math.max(0, Math.floor(Number(explicitTotalAds ?? 0) || 0));
   const fallbackNum = Math.max(0, Math.floor(Number(fallbackWatchedAdsCount ?? 0) || 0));
+  const explicitWad = Math.max(0, Math.floor(Number(explicitExtras.withdrawAdsWatched ?? 0) || 0));
   const explicitCfUntil = Math.max(0, Math.floor(Number(explicitExtras.coopFeverUntilMs ?? 0) || 0));
   const explicitCfBase = Math.max(0, Math.floor(Number(explicitExtras.coopFeverBaselineAds ?? 0) || 0));
+  const explicitCfAds = Math.max(0, Math.floor(Number(explicitExtras.coopFeverAdsWatched ?? 0) || 0));
   const explicitAhUntil = Math.max(0, Math.floor(Number(explicitExtras.autoHarvestUntilMs ?? 0) || 0));
 
   return {
     claimedAchievementIds: cleanIds,
     totalAdsWatched: Math.max(tokenAds, explicitNum, fallbackNum),
+    withdrawAdsWatched: Math.max(tokenWad, explicitWad),
     coopFeverUntilMs: Math.max(tokenCfUntil, explicitCfUntil),
     coopFeverBaselineAds: Math.max(tokenCfBase, explicitCfBase),
+    coopFeverAdsWatched: Math.max(tokenCfAds, explicitCfAds),
     autoHarvestUntilMs: Math.max(tokenAhUntil, explicitAhUntil),
     telegramRemindersEnabled:
       explicitExtras.telegramRemindersEnabled !== undefined
@@ -3357,6 +3414,14 @@ export function shouldRequireAdForAction(action: AdGateActionType): boolean {
 export function recordCompletedGateAd(profile: UserFarmProfile): UserFarmProfile {
   return {
     ...profile,
+    totalAdsWatched: getTotalAdsWatched(profile) + 1,
+  };
+}
+
+export function recordCoopFeverAd(profile: UserFarmProfile): UserFarmProfile {
+  return {
+    ...profile,
+    coopFeverAdsWatched: getCoopFeverAdsWatched(profile) + 1,
     totalAdsWatched: getTotalAdsWatched(profile) + 1,
   };
 }

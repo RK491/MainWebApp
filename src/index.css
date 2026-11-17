@@ -733,6 +733,103 @@
   animation: boosterBorderPulse 2.2s ease-in-out infinite;
 }
 
+@keyframes farmWorldSway {
+  0%, 100% {
+    transform: translate3d(-2px, 0px, 0) scale(1.022) rotate(-0.22deg);
+  }
+  25% {
+    transform: translate3d(2px, -2px, 0) scale(1.032) rotate(0.14deg);
+  }
+  50% {
+    transform: translate3d(3px, 1px, 0) scale(1.04) rotate(0.24deg);
+  }
+  75% {
+    transform: translate3d(-1px, 2px, 0) scale(1.03) rotate(-0.12deg);
+  }
+}
+
+@keyframes farmContainerBreathe {
+  0%, 100% {
+    transform: translate3d(0, 0px, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(0, -2.5px, 0) scale(1.004);
+  }
+}
+
+.animate-farm-world-sway {
+  transform-origin: center center;
+  will-change: transform;
+  animation: farmWorldSway 18s ease-in-out infinite;
+}
+
+.animate-farm-container-breathe {
+  animation: clayViewEnter 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes foliageRustleA {
+  0%, 100% {
+    transform: translate3d(-1.5px, 0px, 0) scale(1);
+  }
+  33% {
+    transform: translate3d(1.8px, -1px, 0) scale(1.006);
+  }
+  66% {
+    transform: translate3d(0.4px, 0.8px, 0) scale(0.998);
+  }
+}
+
+@keyframes foliageRustleB {
+  0%, 100% {
+    transform: translate3d(1.6px, 0.4px, 0) scale(1);
+  }
+  40% {
+    transform: translate3d(-1.6px, -0.9px, 0) scale(1.005);
+  }
+  75% {
+    transform: translate3d(0.6px, -0.3px, 0) scale(0.999);
+  }
+}
+
+@keyframes cropWindRipple {
+  0%, 100% {
+    transform: translate3d(-1.6px, 0px, 0) skewX(-0.7deg);
+  }
+  50% {
+    transform: translate3d(2.0px, -0.7px, 0) skewX(0.9deg);
+  }
+}
+
+@keyframes reedBreezeSway {
+  0%, 100% {
+    transform: translate3d(-1.4px, 0px, 0) rotate(-0.8deg);
+  }
+  50% {
+    transform: translate3d(1.8px, -0.6px, 0) rotate(1.1deg);
+  }
+}
+
+.animate-foliage-rustle-a {
+  will-change: transform;
+  animation: foliageRustleA 5.8s ease-in-out infinite;
+}
+
+.animate-foliage-rustle-b {
+  will-change: transform;
+  animation: foliageRustleB 6.6s ease-in-out infinite;
+}
+
+.animate-crop-ripple {
+  will-change: transform;
+  animation: cropWindRipple 4.4s ease-in-out infinite;
+}
+
+.animate-reed-sway {
+  transform-origin: center bottom;
+  will-change: transform;
+  animation: reedBreezeSway 4.2s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-chicken-bob,
   .animate-chicken-pop,
@@ -756,6 +853,12 @@
   .animate-harvest-rise,
   .animate-egg-wiggle,
   .animate-booster-aura,
+  .animate-farm-world-sway,
+  .animate-farm-container-breathe,
+  .animate-foliage-rustle-a,
+  .animate-foliage-rustle-b,
+  .animate-crop-ripple,
+  .animate-reed-sway,
   .animate-splash-pop,
   .animate-splash-progress {
     animation: none !important;

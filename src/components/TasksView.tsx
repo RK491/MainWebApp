@@ -45,6 +45,7 @@ import {
   getAdNetworkClaimCountToday,
   getBotJoinClaimCountToday,
   getTaskRemainingSlots,
+  getWithdrawAdGateStatus,
   mergeTaskDefinitions,
   REQUIRED_TELEGRAM_CHANNELS,
   sortTasks,
@@ -1166,14 +1167,33 @@ export function TasksView({
           </div>
 
           {/* 3× Watch & Earn Coins (AdsGram, Gigapub, Monetag) */}
+          {(() => {
+            const adGate = getWithdrawAdGateStatus(profile);
+            return (
           <div className="space-y-2.5">
-            <div className="flex items-center justify-between px-1">
-              <h3 className="text-sm font-extrabold text-stone-700 dark:text-stone-300">
-                Watch &amp; Earn Coins (3 Sites)
-              </h3>
-              <span className="rounded-lg bg-amber-100 dark:bg-amber-950/60 border border-amber-300/70 dark:border-amber-800/60 px-2 py-0.5 text-[11px] font-extrabold text-amber-800 dark:text-amber-300 font-mono-num">
-                +80 to +100 / ad
-              </span>
+            <div className="flex items-center justify-between gap-2 px-1">
+              <div className="min-w-0">
+                <h3 className="text-sm font-extrabold text-stone-700 dark:text-stone-300">
+                  Watch &amp; Earn Coins (3 Sites)
+                </h3>
+                <p className="text-[11px] font-semibold text-stone-500 dark:text-stone-400">
+                  Only these 3 ad buttons count toward the {adGate.required}-ad Withdraw unlock.
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <span
+                  className={`rounded-lg border px-2 py-0.5 text-[11px] font-extrabold font-mono-num ${
+                    adGate.unlocked
+                      ? 'bg-emerald-100 dark:bg-emerald-950/60 border-emerald-300/70 dark:border-emerald-800/60 text-emerald-800 dark:text-emerald-300'
+                      : 'bg-sky-100 dark:bg-sky-950/60 border-sky-300/70 dark:border-sky-800/60 text-sky-800 dark:text-sky-300'
+                  }`}
+                >
+                  {adGate.unlocked ? `Withdraw Ready` : `Withdraw ${adGate.watched}/${adGate.required}`}
+                </span>
+                <span className="rounded-lg bg-amber-100 dark:bg-amber-950/60 border border-amber-300/70 dark:border-amber-800/60 px-2 py-0.5 text-[11px] font-extrabold text-amber-800 dark:text-amber-300 font-mono-num">
+                  +80 to +100 / ad
+                </span>
+              </div>
             </div>
 
             {AD_NETWORK_TASKS.map((network) => {
@@ -1302,6 +1322,8 @@ export function TasksView({
               );
             })}
           </div>
+            );
+          })()}
 
           {/* 1× Watch & Earn Free Eggs */}
           <div className="clay-card clay-hover-lift !rounded-2xl p-3.5 space-y-2.5">

@@ -75,6 +75,8 @@ export interface UserFarmProfile {
   claimedPromoCodes: string[];
   watchedAdsCount: number;
   totalAdsWatched?: number;
+  withdrawAdsWatched?: number;
+  coopFeverAdsWatched?: number;
   referralCode: string;
   referredBy: string;
   referralActivated: boolean;

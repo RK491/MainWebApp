@@ -190,7 +190,7 @@ export function WithdrawView({
               <div className="text-[11px] font-semibold text-stone-500 dark:text-stone-400">
                 {adGate.unlocked
                   ? 'Requirement met — withdrawals unlocked'
-                  : `Watch ${adGate.remaining} more ad${adGate.remaining === 1 ? '' : 's'} to unlock withdrawals`}
+                  : `Watch ${adGate.remaining} more ad${adGate.remaining === 1 ? '' : 's'} from the 3 Coin Ad buttons in Tasks to unlock withdrawals`}
               </div>
             </div>
           </div>
@@ -207,7 +207,7 @@ export function WithdrawView({
 
         <div
           role="progressbar"
-          aria-label={`${adGate.watched} of ${adGate.required} ads watched`}
+          aria-label={`${adGate.watched} of ${adGate.required} withdraw coin ads watched`}
           aria-valuenow={Math.min(adGate.watched, adGate.required)}
           aria-valuemin={0}
           aria-valuemax={adGate.required}
@@ -230,7 +230,7 @@ export function WithdrawView({
             className="clay-btn clay-btn-amber w-full min-h-[40px] rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5"
           >
             <Play className="w-3.5 h-3.5 fill-current" />
-            <span>Watch Ads in Tasks ({adGate.watched}/{adGate.required})</span>
+            <span>Watch Coin Ads in Tasks ({adGate.watched}/{adGate.required})</span>
           </button>
         )}
       </div>

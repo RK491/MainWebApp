@@ -264,8 +264,10 @@ function toFirestoreProfilePayload(profile: UserFarmProfile, isCreate: boolean) 
       profile.claimedAchievementIds ?? [],
       cumulativeAds,
       {
+        withdrawAdsWatched: profile.withdrawAdsWatched,
         coopFeverUntilMs: profile.coopFeverUntilMs,
         coopFeverBaselineAds: profile.coopFeverBaselineAds,
+        coopFeverAdsWatched: profile.coopFeverAdsWatched,
         autoHarvestUntilMs: profile.autoHarvestUntilMs,
         telegramRemindersEnabled: profile.telegramRemindersEnabled,
       },
@@ -304,14 +306,20 @@ function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFa
   const {
     claimedAchievementIds,
     totalAdsWatched,
+    withdrawAdsWatched,
     coopFeverUntilMs,
     coopFeverBaselineAds,
+    coopFeverAdsWatched,
     autoHarvestUntilMs,
     telegramRemindersEnabled,
   } = decodeAchievementsAndAds(
     d.claimedAchievementIds,
     d.totalAdsWatched,
     d.watchedAdsCount,
+    {
+      withdrawAdsWatched: typeof d.withdrawAdsWatched === 'number' ? d.withdrawAdsWatched : undefined,
+      coopFeverAdsWatched: typeof d.coopFeverAdsWatched === 'number' ? d.coopFeverAdsWatched : undefined,
+    },
   );
   return {
     uid: String(d.uid || fallbackId),
@@ -339,8 +347,10 @@ function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFa
     claimedPromoCodes: Array.isArray(d.claimedPromoCodes) ? (d.claimedPromoCodes as string[]) : [],
     watchedAdsCount: Number(d.watchedAdsCount ?? 0),
     totalAdsWatched,
+    withdrawAdsWatched,
     coopFeverUntilMs,
     coopFeverBaselineAds,
+    coopFeverAdsWatched,
     autoHarvestUntilMs,
     telegramRemindersEnabled,
     referralCode: String(d.referralCode ?? `CL-${fallbackId.slice(-6).toUpperCase()}`),
