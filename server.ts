@@ -2,6 +2,7 @@ import 'dotenv/config';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
+import { isIP } from 'node:net';
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,7 +25,9 @@ import {
   type DocumentReference,
   type DocumentSnapshot,
   type Firestore,
+  type Query,
   type QueryDocumentSnapshot,
+  type QuerySnapshot,
 } from 'firebase/firestore';
 import {
   ADMIN_PASSCODE_VAULT_UID,
@@ -111,6 +114,34 @@ function isValidSafeId(id: unknown): id is string {
   return typeof id === 'string' && /^[a-zA-Z0-9_-]{3,64}$/.test(id.trim());
 }
 
+function isPrivateOrReservedIpv4(ip: string): boolean {
+  const parts = ip.split('.').map((p) => Number(p));
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+    return true;
+  }
+  const [a, b] = parts;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  if (a === 169 && b === 254) return true; // Link-local / cloud metadata
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && (b === 0 || b === 168)) return true;
+  if (a === 198 && (b === 18 || b === 19)) return true; // Benchmarking
+  if (a >= 224) return true; // Multicast & reserved
+  return false;
+}
+
+function isPrivateOrReservedIpv6(ip: string): boolean {
+  const lower = ip.toLowerCase();
+  if (lower === '::' || lower === '::1') return true;
+  if (lower.startsWith('::ffff:')) {
+    const v4 = lower.slice(7);
+    if (isIP(v4) === 4) return isPrivateOrReservedIpv4(v4);
+    return true;
+  }
+  if (/^(fc|fd|fe8|fe9|fea|feb|ff)/i.test(lower)) return true;
+  return false;
+}
+
 function isSafePublicHttpsUrl(rawUrl: string): boolean {
   const trimmed = rawUrl.trim();
   if (!trimmed || trimmed.length > 512) return false;
@@ -118,29 +149,21 @@ function isSafePublicHttpsUrl(rawUrl: string): boolean {
     const parsed = new URL(trimmed);
     if (parsed.protocol !== 'https:') return false;
     if (parsed.username || parsed.password) return false;
-    const host = parsed.hostname.toLowerCase();
-    if (!host || !host.includes('.')) return false;
+    const rawHost = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    if (!rawHost) return false;
+    // Block decimal / hex / octal shorthand IP literals
+    if (/^\d+$/.test(rawHost) || /^0x[0-9a-f.]+$/i.test(rawHost)) return false;
+    const ipType = isIP(rawHost);
+    if (ipType === 4) return !isPrivateOrReservedIpv4(rawHost);
+    if (ipType === 6) return !isPrivateOrReservedIpv6(rawHost);
+    if (!rawHost.includes('.')) return false;
     if (
-      host === 'localhost' ||
-      host.endsWith('.local') ||
-      host.endsWith('.internal') ||
-      host.endsWith('.localhost') ||
-      host === '0.0.0.0' ||
-      host === '::1' ||
-      host.startsWith('127.') ||
-      host.startsWith('10.') ||
-      host.startsWith('192.168.') ||
-      host.startsWith('169.254.') ||
-      host.startsWith('[fc') ||
-      host.startsWith('[fd') ||
-      host.startsWith('[fe80')
+      rawHost === 'localhost' ||
+      rawHost.endsWith('.local') ||
+      rawHost.endsWith('.internal') ||
+      rawHost.endsWith('.localhost')
     ) {
       return false;
-    }
-    const m172 = host.match(/^172\.(\d+)\./);
-    if (m172) {
-      const oct2 = Number(m172[1]);
-      if (oct2 >= 16 && oct2 <= 31) return false;
     }
     return true;
   } catch {
@@ -149,9 +172,12 @@ function isSafePublicHttpsUrl(rawUrl: string): boolean {
 }
 
 function getClientIp(req: express.Request): string {
-  const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0]?.trim();
-  if (fwd) return fwd.slice(0, 64);
-  return String(req.socket?.remoteAddress || 'unknown').slice(0, 64);
+  const sockIp = String(req.socket?.remoteAddress || 'unknown').trim().slice(0, 64);
+  const rawFwd = String(req.headers['x-forwarded-for'] || '').split(',')[0]?.trim();
+  if (rawFwd && isIP(rawFwd)) {
+    return `${rawFwd.slice(0, 48)}`;
+  }
+  return sockIp;
 }
 
 const rateLimitBuckets = new Map<string, number[]>();
@@ -792,6 +818,38 @@ function resolveVerifiedAdminActor(params: {
   return null;
 }
 
+function resolveVerifiedPlayerActor(params: {
+  req: express.Request;
+  token?: string;
+  initData?: string;
+}): string | null {
+  const authHeader = String(params.req.headers.authorization || '')
+    .replace(/^Bearer\s+/i, '')
+    .trim();
+  const candidateToken = String(params.token || authHeader || '').trim();
+  if (candidateToken) {
+    const verified = verifySessionToken(candidateToken);
+    if (
+      verified &&
+      (verified.role === 'player' || verified.role === 'admin') &&
+      typeof verified.playerId === 'string' &&
+      isValidSafeId(verified.playerId)
+    ) {
+      return verified.playerId;
+    }
+  }
+
+  const rawInitData = String(params.initData || '').trim();
+  if (rawInitData && TELEGRAM_BOT_TOKEN) {
+    const verifiedInit = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN);
+    if (verifiedInit.valid && verifiedInit.playerId && isValidSafeId(verifiedInit.playerId)) {
+      return verifiedInit.playerId;
+    }
+  }
+
+  return null;
+}
+
 const REMINDERS_FILE = path.resolve(__dirname, '.data', 'reminders.json');
 
 interface PlayerReminderRecord {
@@ -1012,7 +1070,7 @@ async function persistServerTxHashToFirestore(
     });
     return inserted;
   } catch {
-    return true;
+    return false;
   }
 }
 
@@ -1137,11 +1195,20 @@ async function collectBroadcastRecipients(excludeBanned: boolean): Promise<strin
 
   if (excludeBanned) {
     try {
-      const banSnap = await getDocs(query(collection(serverDb, 'banned_users'), limit(100)));
-      for (const d of banSnap.docs) {
-        const uid = String(d.data()?.uid || d.id || '').trim();
-        const num = extractTelegramNumericUserId(uid);
-        if (num) bannedSet.add(num);
+      let lastBanDoc: QueryDocumentSnapshot<DocumentData> | null = null;
+      for (let page = 0; page < 25; page += 1) {
+        const banQuery: Query<DocumentData> = lastBanDoc
+          ? query(collection(serverDb, 'banned_users'), orderBy('bannedAtMs', 'desc'), startAfter(lastBanDoc), limit(100))
+          : query(collection(serverDb, 'banned_users'), orderBy('bannedAtMs', 'desc'), limit(100));
+        const banSnap: QuerySnapshot<DocumentData> = await getDocs(banQuery);
+        if (banSnap.empty) break;
+        for (const d of banSnap.docs) {
+          const uid = String(d.data()?.uid || d.id || '').trim();
+          const num = extractTelegramNumericUserId(uid);
+          if (num) bannedSet.add(num);
+        }
+        if (banSnap.docs.length < 100) break;
+        lastBanDoc = banSnap.docs[banSnap.docs.length - 1];
       }
     } catch {
       // Non-fatal
@@ -1151,10 +1218,10 @@ async function collectBroadcastRecipients(excludeBanned: boolean): Promise<strin
   try {
     let lastDoc: QueryDocumentSnapshot<DocumentData> | null = null;
     for (let page = 0; page < 40; page += 1) {
-      const q = lastDoc
+      const q: Query<DocumentData> = lastDoc
         ? query(collection(serverDb, 'players'), orderBy('createdAtMs', 'asc'), startAfter(lastDoc), limit(50))
         : query(collection(serverDb, 'players'), orderBy('createdAtMs', 'asc'), limit(50));
-      const snap = await getDocs(q);
+      const snap: QuerySnapshot<DocumentData> = await getDocs(q);
       if (snap.empty) break;
       for (const docSnap of snap.docs) {
         const uid = String(docSnap.data()?.uid || docSnap.id || '').trim();
@@ -1171,12 +1238,21 @@ async function collectBroadcastRecipients(excludeBanned: boolean): Promise<strin
   }
 
   try {
-    const lbSnap = await getDocs(query(collection(serverDb, 'leaderboard'), orderBy('buyerPoints', 'desc'), limit(50)));
-    for (const d of lbSnap.docs) {
-      const tgId = extractTelegramNumericUserId(String(d.data()?.uid || d.id || ''));
-      if (tgId && !bannedSet.has(tgId)) {
-        uniqueChatIds.add(tgId);
+    let lastLbDoc: QueryDocumentSnapshot<DocumentData> | null = null;
+    for (let page = 0; page < 10; page += 1) {
+      const lbQuery: Query<DocumentData> = lastLbDoc
+        ? query(collection(serverDb, 'leaderboard'), orderBy('buyerPoints', 'desc'), startAfter(lastLbDoc), limit(50))
+        : query(collection(serverDb, 'leaderboard'), orderBy('buyerPoints', 'desc'), limit(50));
+      const lbSnap: QuerySnapshot<DocumentData> = await getDocs(lbQuery);
+      if (lbSnap.empty) break;
+      for (const d of lbSnap.docs) {
+        const tgId = extractTelegramNumericUserId(String(d.data()?.uid || d.id || ''));
+        if (tgId && !bannedSet.has(tgId)) {
+          uniqueChatIds.add(tgId);
+        }
       }
+      if (lbSnap.docs.length < 50) break;
+      lastLbDoc = lbSnap.docs[lbSnap.docs.length - 1];
     }
   } catch {
     // Non-fatal
@@ -1228,6 +1304,7 @@ async function startServer() {
     }
     const body = req.body as {
       initData?: string;
+      token?: string;
       playerId?: string;
       requiredChannels?: Array<Partial<RequiredTelegramChannel>>;
     };
@@ -1243,15 +1320,31 @@ async function startServer() {
         .slice(0, 10);
     }
 
-    let numericUserId: string | null = null;
-    if (rawInitData && TELEGRAM_BOT_TOKEN) {
-      const verifiedInit = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN);
-      if (verifiedInit.valid && verifiedInit.playerId) {
-        numericUserId = extractTelegramNumericUserId(verifiedInit.playerId);
-      }
+    const verifiedActor = resolveVerifiedPlayerActor({
+      req,
+      token: body.token,
+      initData: rawInitData,
+    });
+    if (rawInitData && TELEGRAM_BOT_TOKEN && !verifiedActor) {
+      res.status(401).json({ ok: false, error: 'Invalid Telegram session.' });
+      return;
     }
+
+    let numericUserId: string | null = verifiedActor
+      ? extractTelegramNumericUserId(verifiedActor)
+      : null;
     if (!numericUserId) {
-      numericUserId = extractTelegramNumericUserId(rawPlayerId);
+      const fallbackTgId = extractTelegramNumericUserId(rawPlayerId);
+      if (fallbackTgId) {
+        if (TELEGRAM_BOT_TOKEN) {
+          res.status(401).json({
+            ok: false,
+            error: 'Verified Telegram session required to verify channel membership.',
+          });
+          return;
+        }
+        numericUserId = fallbackTgId;
+      }
     }
 
     if (!channelsCfg.enabled || targetChannels.length === 0) {
@@ -1547,7 +1640,8 @@ async function startServer() {
       }
     }
 
-    const rl = checkRateLimit(`admin_auth:${ip}`, 8, 15 * 60_000);
+    const sockAddr = String(req.socket?.remoteAddress || 'unknown').slice(0, 64);
+    const rl = checkRateLimit(`admin_auth:${ip}:${sockAddr}`, 8, 15 * 60_000);
     if (!rl.allowed) {
       res.status(429).json({
         ok: false,
@@ -1574,6 +1668,16 @@ async function startServer() {
       res.status(403).json({
         ok: false,
         error: `Restricted to authorized Admin IDs (Primary: ${PRIMARY_ADMIN_TELEGRAM_ID}).`,
+      });
+      return;
+    }
+
+    const idRl = checkRateLimit(`admin_auth_id:${resolvedPlayerId}`, 8, 15 * 60_000);
+    if (!idRl.allowed) {
+      res.status(429).json({
+        ok: false,
+        requiresPasscode: true,
+        error: `Too many attempts for this Admin ID. Wait ${idRl.retryAfterSec}s.`,
       });
       return;
     }
@@ -1904,6 +2008,7 @@ async function startServer() {
     const body = req.body as {
       playerId?: string;
       initData?: string;
+      token?: string;
       enabled?: boolean;
       basketFullAtMs?: number;
       feedBoostUntilMs?: number;
@@ -1911,15 +2016,21 @@ async function startServer() {
       autoHarvestUntilMs?: number;
     };
 
-    let playerId = String(body.playerId || '').trim();
-    const rawInitData = String(body.initData || '').trim();
-    if (rawInitData && TELEGRAM_BOT_TOKEN) {
-      const check = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN);
-      if (!check.valid || !check.playerId) {
-        res.status(401).json({ ok: false, error: 'Invalid Telegram session.' });
-        return;
-      }
-      playerId = check.playerId;
+    const rawPlayerId = String(body.playerId || '').trim();
+    const verifiedActor = resolveVerifiedPlayerActor({
+      req,
+      token: body.token,
+      initData: body.initData,
+    });
+    if ((body.initData || body.token) && !verifiedActor && TELEGRAM_BOT_TOKEN) {
+      res.status(401).json({ ok: false, error: 'Invalid Telegram session.' });
+      return;
+    }
+
+    let playerId = verifiedActor || rawPlayerId;
+    if (verifiedActor && rawPlayerId && verifiedActor !== rawPlayerId) {
+      res.status(403).json({ ok: false, error: 'Session mismatch for reminder sync.' });
+      return;
     }
 
     if (!isValidSafeId(playerId)) {
@@ -1933,10 +2044,19 @@ async function startServer() {
       return;
     }
 
+    if (TELEGRAM_BOT_TOKEN && !verifiedActor) {
+      res.status(401).json({
+        ok: false,
+        error: 'Verified Telegram session required to register push reminders.',
+      });
+      return;
+    }
+
     const prev = reminderStore.get(playerId);
+    const maxFutureMs = Date.now() + 31 * 86_400_000;
     const clampMs = (v: unknown) => {
       const n = Math.floor(Number(v) || 0);
-      return Number.isFinite(n) && n > 0 ? n : 0;
+      return Number.isFinite(n) && n > 0 ? Math.min(maxFutureMs, n) : 0;
     };
 
     const next: PlayerReminderRecord = {
@@ -1977,16 +2097,17 @@ async function startServer() {
       depositGram?: string;
       depositUsd?: number;
       initData?: string;
+      token?: string;
     };
 
     const referrerUid = String(body.referrerUid || '').trim();
     const referredUid = String(body.referredUid || '').trim();
     const numericReferrerId = extractTelegramNumericUserId(referrerUid);
     const event = body.event === 'deposit_commission' ? 'deposit_commission' : 'referral_joined';
-    const rewardCoins = Math.min(
-      10_000,
-      Math.max(0, Math.round(Number(body.rewardCoins ?? (event === 'referral_joined' ? REFERRER_SIGNUP_BONUS_COINS : 0)))),
-    );
+    const rewardCoins =
+      event === 'referral_joined'
+        ? REFERRER_SIGNUP_BONUS_COINS
+        : Math.min(10_000, Math.max(0, Math.round(Number(body.rewardCoins ?? 0))));
 
     if (!isValidSafeId(referrerUid) || !numericReferrerId) {
       res.json({
@@ -1997,7 +2118,18 @@ async function startServer() {
       return;
     }
 
-    if (serverDb && isValidSafeId(referredUid)) {
+    if (!isValidSafeId(referredUid)) {
+      res.status(400).json({ ok: false, sent: false, reason: 'Valid referredUid required' });
+      return;
+    }
+
+    const verifiedActor = resolveVerifiedPlayerActor({
+      req,
+      token: body.token,
+      initData: body.initData,
+    });
+
+    if (serverDb) {
       try {
         const refSnap = await getFreshDoc(doc(serverDb, 'players', referrerUid, 'referrals', referredUid));
         if (!refSnap.exists()) {
@@ -2009,14 +2141,16 @@ async function startServer() {
           }
         }
       } catch {
-        // Proceed if Firestore offline check is inconclusive
-      }
-    } else if (body.initData && TELEGRAM_BOT_TOKEN) {
-      const check = verifyTelegramInitData(String(body.initData), TELEGRAM_BOT_TOKEN);
-      if (!check.valid) {
-        res.status(401).json({ ok: false, sent: false, reason: 'Invalid session' });
+        res.status(503).json({
+          ok: false,
+          sent: false,
+          reason: 'Database verification temporarily unavailable',
+        });
         return;
       }
+    } else if (TELEGRAM_BOT_TOKEN && (!verifiedActor || verifiedActor !== referredUid)) {
+      res.status(401).json({ ok: false, sent: false, reason: 'Verified session required' });
+      return;
     }
 
     const dedupKey = `${event}:${referrerUid}:${referredUid || rewardCoins}:${String(body.depositGram || '')}`;
@@ -2323,7 +2457,11 @@ async function startServer() {
     let authWallet = String(body.walletAddress || '').slice(0, 128);
     let authMemo = String(body.memo || '').slice(0, 64);
 
-    if (serverDb && isValidSafeId(withdrawalId)) {
+    if (serverDb) {
+      if (!isValidSafeId(withdrawalId)) {
+        res.status(400).json({ ok: false, sent: false, reason: 'Valid withdrawalId required.' });
+        return;
+      }
       try {
         const wdSnap = await getFreshDoc(doc(serverDb, 'withdraw_requests', withdrawalId));
         if (!wdSnap.exists()) {
@@ -2343,11 +2481,20 @@ async function startServer() {
         authWallet = String(d.walletAddress || authWallet);
         authMemo = String(d.memo || authMemo);
       } catch {
-        // Fallback when Firestore offline check fails
+        res.status(503).json({
+          ok: false,
+          sent: false,
+          reason: 'Database verification temporarily unavailable.',
+        });
+        return;
       }
-    } else if (status === 'pending' && body.initData && TELEGRAM_BOT_TOKEN) {
-      const check = verifyTelegramInitData(String(body.initData), TELEGRAM_BOT_TOKEN);
-      if (!check.valid) {
+    } else if (status === 'pending' && TELEGRAM_BOT_TOKEN) {
+      const verifiedPlayer = resolveVerifiedPlayerActor({
+        req,
+        token: body.token,
+        initData: body.initData,
+      });
+      if (!verifiedPlayer) {
         res.status(401).json({ ok: false, sent: false, reason: 'Invalid session' });
         return;
       }

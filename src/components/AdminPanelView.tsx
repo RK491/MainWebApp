@@ -15,7 +15,9 @@ import {
   Eye,
   EyeOff,
   Flame,
+  Film,
   Gift,
+  Image,
   Infinity as InfinityIcon,
   KeyRound,
   Link2,
@@ -44,6 +46,7 @@ import {
   UserPlus,
   Users,
   UserX,
+  Video,
   Wallet,
   X,
   XCircle,
@@ -102,6 +105,17 @@ interface ChannelDiagnosticResult {
     userStatus?: string | null;
     error?: string;
   }>;
+}
+
+interface BroadcastResult {
+  ok: boolean;
+  totalTargets?: number;
+  sentCount?: number;
+  failedCount?: number;
+  blockedCount?: number;
+  testOnlyToAdmin?: boolean;
+  sampleError?: string;
+  error?: string;
 }
 
 interface AdminPanelViewProps {
@@ -198,6 +212,16 @@ interface AdminPanelViewProps {
     handle?: string;
   }) => Promise<void>;
   onRemoveAdmin: (targetId: string) => Promise<void>;
+  onSendBroadcast?: (input: {
+    title: string;
+    message: string;
+    mediaType: 'none' | 'photo' | 'video' | 'animation';
+    mediaUrl?: string;
+    buttonText?: string;
+    buttonUrl?: string;
+    excludeBanned?: boolean;
+    testOnlyToAdmin?: boolean;
+  }) => Promise<BroadcastResult>;
 }
 
 const AD_PROVIDER_CARDS: Array<{
@@ -313,6 +337,7 @@ export function AdminPanelView({
   onRemoveReferralRelation,
   onAddAdmin,
   onRemoveAdmin,
+  onSendBroadcast,
 }: AdminPanelViewProps) {
   const extraAdminIds = useMemo(
     () => getEffectiveAdminIds(adminsConfig),
@@ -337,7 +362,7 @@ export function AdminPanelView({
   } | null>(null);
 
   const [tab, setTab] = useState<
-    'withdrawals' | 'users' | 'admins' | 'channels' | 'promos' | 'tasks' | 'ads' | 'ad_ids'
+    'withdrawals' | 'users' | 'admins' | 'channels' | 'promos' | 'tasks' | 'ads' | 'ad_ids' | 'broadcast'
   >('withdrawals');
   const [wdFilter, setWdFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
   const [wdSearch, setWdSearch] = useState('');
@@ -421,6 +446,18 @@ export function AdminPanelView({
   const [taskIcon, setTaskIcon] = useState('send');
   const [taskUrl, setTaskUrl] = useState('');
   const [savingTask, setSavingTask] = useState(false);
+
+  // Broadcast state
+  const [bcastTitle, setBcastTitle] = useState('');
+  const [bcastMessage, setBcastMessage] = useState('');
+  const [bcastMediaType, setBcastMediaType] = useState<'none' | 'photo' | 'video' | 'animation'>('none');
+  const [bcastMediaUrl, setBcastMediaUrl] = useState('');
+  const [bcastButtonText, setBcastButtonText] = useState('');
+  const [bcastButtonUrl, setBcastButtonUrl] = useState('');
+  const [bcastExcludeBanned, setBcastExcludeBanned] = useState(true);
+  const [bcastPreviewError, setBcastPreviewError] = useState(false);
+  const [sendingBroadcast, setSendingBroadcast] = useState<'test' | 'all' | null>(null);
+  const [broadcastResult, setBroadcastResult] = useState<BroadcastResult | null>(null);
 
   // Guided 3-step Gift Code Generator state
   const [giftStep, setGiftStep] = useState<1 | 2 | 3>(1);
@@ -1632,6 +1669,7 @@ export function AdminPanelView({
             { id: 'tasks', label: 'Tasks', icon: ListPlus, count: 0 },
             { id: 'ads', label: 'Ads', icon: Megaphone, count: 0 },
             { id: 'ad_ids', label: 'Block IDs', icon: KeyRound, count: savedAdIdsCount },
+            { id: 'broadcast', label: 'Broadcast', icon: Send, count: 0 },
           ] as const
         ).map((item) => {
           const Icon = item.icon;
@@ -5049,6 +5087,346 @@ export function AdminPanelView({
           </div>
         </form>
       )}
+
+      {/* ========================================================================
+          BROADCAST TAB (WITH MEDIA & CTA BUTTON SUPPORT)
+         ======================================================================== */}
+      {tab === 'broadcast' && (() => {
+        const cleanMediaUrl = bcastMediaUrl.trim();
+        const isHttpsMedia = cleanMediaUrl.startsWith('https://');
+        const maxMessageLen = bcastMediaType === 'none' ? 2000 : 950;
+        const canSend =
+          Boolean(onSendBroadcast) &&
+          !sendingBroadcast &&
+          (bcastTitle.trim().length > 0 || bcastMessage.trim().length > 0) &&
+          (bcastMediaType === 'none' || isHttpsMedia);
+
+        const triggerBroadcast = async (testOnlyToAdmin: boolean) => {
+          if (!onSendBroadcast || sendingBroadcast) return;
+          setSendingBroadcast(testOnlyToAdmin ? 'test' : 'all');
+          setBroadcastResult(null);
+          try {
+            const res = await onSendBroadcast({
+              title: bcastTitle.trim(),
+              message: bcastMessage.trim(),
+              mediaType: bcastMediaType,
+              mediaUrl: bcastMediaType !== 'none' ? cleanMediaUrl : undefined,
+              buttonText: bcastButtonText.trim() || undefined,
+              buttonUrl: bcastButtonText.trim() ? bcastButtonUrl.trim() : undefined,
+              excludeBanned: bcastExcludeBanned,
+              testOnlyToAdmin,
+            });
+            setBroadcastResult(res);
+          } catch (err) {
+            setBroadcastResult({
+              ok: false,
+              error: err instanceof Error ? err.message : 'Broadcast request failed.',
+            });
+          } finally {
+            setSendingBroadcast(null);
+          }
+        };
+
+        return (
+          <div key="admin-tab-broadcast" className="animate-clay-enter space-y-4">
+            <div className="clay-card p-4 space-y-4">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+                    <Send className="w-4 h-4 text-sky-500" />
+                    <span>Telegram Bot Broadcast</span>
+                  </h2>
+                  <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
+                    Send announcement DMs (with optional photo, video, or GIF) to all registered Telegram players.
+                  </p>
+                </div>
+                {serverBotConfigured === false && (
+                  <span className="px-2 py-1 rounded-lg bg-rose-500/15 text-rose-600 dark:text-rose-400 text-[10px] font-extrabold shrink-0">
+                    Bot Offline
+                  </span>
+                )}
+              </div>
+
+              <div className="space-y-3">
+                <div className="space-y-1">
+                  <label htmlFor="bcast-title" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                    Headline Title
+                  </label>
+                  <input
+                    id="bcast-title"
+                    type="text"
+                    maxLength={100}
+                    value={bcastTitle}
+                    onChange={(e) => setBcastTitle(e.target.value)}
+                    placeholder="e.g. Weekend 3× Fever Event is Live!"
+                    className="clay-inset w-full min-h-[44px] px-3 text-sm font-bold text-stone-900 dark:text-stone-100"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <label htmlFor="bcast-message" className="font-bold text-stone-700 dark:text-stone-300">
+                      Message Body
+                    </label>
+                    <span className="font-mono-num text-[11px] font-bold text-stone-400">
+                      {bcastMessage.length}/{maxMessageLen}
+                    </span>
+                  </div>
+                  <textarea
+                    id="bcast-message"
+                    rows={4}
+                    maxLength={maxMessageLen}
+                    value={bcastMessage}
+                    onChange={(e) => setBcastMessage(e.target.value)}
+                    placeholder="Write your announcement message..."
+                    className="clay-inset w-full p-3 text-sm font-medium text-stone-900 dark:text-stone-100 resize-y min-h-[104px]"
+                  />
+                </div>
+
+                {/* Media Attachment Type */}
+                <div className="space-y-1.5">
+                  <div className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                    Media Attachment
+                  </div>
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {(
+                      [
+                        { id: 'none', label: 'Text Only', icon: Send },
+                        { id: 'photo', label: 'Photo', icon: Image },
+                        { id: 'video', label: 'Video', icon: Video },
+                        { id: 'animation', label: 'GIF', icon: Film },
+                      ] as const
+                    ).map((m) => {
+                      const MIcon = m.icon;
+                      const active = bcastMediaType === m.id;
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => {
+                            onTabTap?.();
+                            setBcastMediaType(m.id);
+                            setBcastPreviewError(false);
+                          }}
+                          className={`clay-btn min-h-[42px] px-2 rounded-xl text-xs font-extrabold flex items-center justify-center gap-1.5 ${
+                            active
+                              ? 'clay-btn-sky'
+                              : 'text-stone-600 dark:text-stone-300'
+                          }`}
+                        >
+                          <MIcon className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate">{m.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {bcastMediaType !== 'none' && (
+                  <div className="space-y-2">
+                    <label htmlFor="bcast-media-url" className="text-xs font-bold text-stone-700 dark:text-stone-300 block">
+                      Public HTTPS Media URL ({bcastMediaType})
+                    </label>
+                    <input
+                      id="bcast-media-url"
+                      type="url"
+                      value={bcastMediaUrl}
+                      onChange={(e) => {
+                        setBcastMediaUrl(e.target.value);
+                        setBcastPreviewError(false);
+                      }}
+                      placeholder="https://example.com/banner.jpg"
+                      className="clay-inset w-full min-h-[44px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100"
+                    />
+                    {cleanMediaUrl && !isHttpsMedia && (
+                      <p className="text-[11px] font-bold text-rose-600 dark:text-rose-400">
+                        URL must start with https:// (local or http URLs are blocked).
+                      </p>
+                    )}
+                    {isHttpsMedia && (bcastMediaType === 'photo' || bcastMediaType === 'animation') && !bcastPreviewError && (
+                      <div className="clay-inset !rounded-2xl p-2 overflow-hidden">
+                        <img
+                          src={cleanMediaUrl}
+                          alt="Broadcast media preview"
+                          referrerPolicy="no-referrer"
+                          onError={() => setBcastPreviewError(true)}
+                          className="w-full max-h-48 object-cover rounded-xl"
+                        />
+                      </div>
+                    )}
+                    {bcastPreviewError && (
+                      <p className="text-[11px] font-semibold text-amber-600 dark:text-amber-400">
+                        Preview could not load in browser, but Telegram will still fetch valid public URLs.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Optional Inline CTA Button */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div className="space-y-1">
+                    <label htmlFor="bcast-btn-text" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                      CTA Button Label (optional)
+                    </label>
+                    <input
+                      id="bcast-btn-text"
+                      type="text"
+                      maxLength={32}
+                      value={bcastButtonText}
+                      onChange={(e) => setBcastButtonText(e.target.value)}
+                      placeholder="Claim Bonus Now"
+                      className="clay-inset w-full min-h-[42px] px-3 text-xs font-bold text-stone-900 dark:text-stone-100"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label htmlFor="bcast-btn-url" className="text-xs font-bold text-stone-700 dark:text-stone-300">
+                      CTA Button HTTPS URL
+                    </label>
+                    <input
+                      id="bcast-btn-url"
+                      type="url"
+                      value={bcastButtonUrl}
+                      onChange={(e) => setBcastButtonUrl(e.target.value)}
+                      placeholder="https://t.me/..."
+                      className="clay-inset w-full min-h-[42px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100"
+                    />
+                  </div>
+                </div>
+
+                {/* Exclude Banned Toggle */}
+                <div className="clay-inset px-3.5 py-2.5 flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-extrabold text-stone-900 dark:text-stone-100">
+                      Exclude Banned Players
+                    </div>
+                    <div className="text-[11px] text-stone-500 dark:text-stone-400">
+                      Skip blocked accounts during full broadcast
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={bcastExcludeBanned}
+                    aria-label="Exclude banned users from broadcast"
+                    onClick={() => setBcastExcludeBanned((v) => !v)}
+                    className={`w-12 h-7 rounded-full p-1 transition-colors shrink-0 cursor-pointer ${
+                      bcastExcludeBanned ? 'bg-emerald-500' : 'bg-stone-300 dark:bg-stone-700'
+                    }`}
+                  >
+                    <span
+                      className={`block w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                        bcastExcludeBanned ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                <button
+                  type="button"
+                  disabled={!canSend}
+                  onClick={() => void triggerBroadcast(true)}
+                  className="clay-btn clay-btn-sky min-h-[44px] rounded-2xl font-extrabold text-xs flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {sendingBroadcast === 'test' ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Eye className="w-4 h-4" />
+                  )}
+                  <span>{sendingBroadcast === 'test' ? 'Sending Test...' : 'Send Test to Admin'}</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={!canSend}
+                  onClick={() => void triggerBroadcast(false)}
+                  className="clay-btn clay-btn-emerald min-h-[44px] rounded-2xl font-extrabold text-xs flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {sendingBroadcast === 'all' ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Megaphone className="w-4 h-4" />
+                  )}
+                  <span>
+                    {sendingBroadcast === 'all' ? 'Broadcasting...' : 'Broadcast to All Users'}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {broadcastResult && (
+              <div
+                className={`clay-card p-4 space-y-2.5 ${
+                  broadcastResult.ok
+                    ? 'border border-emerald-500/30'
+                    : 'border border-rose-500/30'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-1.5">
+                    {broadcastResult.ok ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                    ) : (
+                      <XCircle className="w-4 h-4 text-rose-600 dark:text-rose-400" />
+                    )}
+                    <span>
+                      {broadcastResult.ok
+                        ? broadcastResult.testOnlyToAdmin
+                          ? 'Test Broadcast Result'
+                          : 'Broadcast Delivery Summary'
+                        : 'Broadcast Failed'}
+                    </span>
+                  </div>
+                  {typeof broadcastResult.totalTargets === 'number' && (
+                    <span className="text-xs font-mono-num font-extrabold text-stone-500 dark:text-stone-400">
+                      {broadcastResult.totalTargets} target{broadcastResult.totalTargets === 1 ? '' : 's'}
+                    </span>
+                  )}
+                </div>
+
+                {broadcastResult.error ? (
+                  <p className="text-xs font-bold text-rose-600 dark:text-rose-400">
+                    {broadcastResult.error}
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="clay-card-mint !rounded-xl p-2.5 text-center">
+                      <div className="text-[10px] font-bold uppercase text-emerald-800 dark:text-emerald-300">
+                        Sent
+                      </div>
+                      <div className="text-lg font-extrabold font-mono-num text-emerald-900 dark:text-emerald-200">
+                        {(broadcastResult.sentCount ?? 0).toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="clay-card-warm !rounded-xl p-2.5 text-center">
+                      <div className="text-[10px] font-bold uppercase text-amber-800 dark:text-amber-300">
+                        Blocked
+                      </div>
+                      <div className="text-lg font-extrabold font-mono-num text-amber-900 dark:text-amber-200">
+                        {(broadcastResult.blockedCount ?? 0).toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="clay-inset !rounded-xl p-2.5 text-center">
+                      <div className="text-[10px] font-bold uppercase text-stone-500 dark:text-stone-400">
+                        Failed
+                      </div>
+                      <div className="text-lg font-extrabold font-mono-num text-stone-900 dark:text-stone-100">
+                        {(broadcastResult.failedCount ?? 0).toLocaleString()}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {broadcastResult.sampleError && (
+                  <p className="text-[11px] font-semibold text-stone-500 dark:text-stone-400 break-words">
+                    Note: {broadcastResult.sampleError}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }

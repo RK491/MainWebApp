@@ -13,9 +13,11 @@ import {
 import { AnimatePresence, motion } from 'motion/react';
 import { testFirestoreConnection } from './firebase';
 import {
+  activateCoopFever,
   activateFeedBooster,
   AD_NETWORK_TASKS,
   ADSGRAM_BOT_JOIN_TASK,
+  applyAutoHarvestIfDue,
   buyChickens,
   calculatePendingEggs,
   calculateProductionRate,
@@ -30,21 +32,28 @@ import {
   collectEggs,
   completeTask,
   createDefaultProfile,
+  createDefaultSeasonConfig,
   createPaidTaskOrder,
+  createRefundPaidTaskOrder,
+  createTopUpPaidTaskOrder,
   DEFAULT_AD_CONFIG,
   DEFAULT_ADMINS_CONFIG,
   DEFAULT_CHANNELS_CONFIG,
   DEFAULT_GET_CODE_CHANNEL_URL,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
+  eggsToUsd,
   executeDeposit,
   executeWithdrawal,
+  extractTelegramNumericUserId,
   formatAwayDuration,
   formatChannelsHandleSummary,
   formatPromoRewardSummary,
   getActiveRequiredChannels,
   getEffectiveAdminIds,
   isAdminPlayerId,
+  isAutoHarvestDroneActive,
+  purchaseAutoHarvestDrone,
   recordCompletedGateAd,
   REFERRAL_DEPOSIT_COMMISSION_RATE,
   REFERRER_SIGNUP_BONUS_COINS,
@@ -79,6 +88,7 @@ import {
   incrementTaskClaimCountInFirestore,
   loadCachedBanRecord,
   loadCachedPlayerProfile,
+  refundPaidCustomTaskInFirestore,
   removeAdminInFirestore,
   resolveActivePlayerIdentity,
   reviewWithdrawalInFirestore,
@@ -91,18 +101,23 @@ import {
   subscribeToBannedUsers,
   subscribeToChannelsConfig,
   subscribeToCustomTasks,
+  subscribeToLeaderboard,
   subscribeToPlayer,
   subscribeToPlayerBanStatus,
   subscribeToPromoCodes,
   subscribeToRecentPlayers,
+  subscribeToSeasonConfig,
   toggleCustomTaskInFirestore,
   togglePromoCodeInFirestore,
+  topUpPaidCustomTaskInFirestore,
   unbanPlayerInFirestore,
 } from './services/farmStore';
 import type {
   AdConfig,
   AdminsConfig,
   AdNetworkId,
+  AutoHarvestCurrency,
+  AutoHarvestDurationId,
   BannedUserRecord,
   ChannelsConfig,
   ChannelVerificationResult,
@@ -110,9 +125,11 @@ import type {
   DepositOrder,
   DynamicPromoCode,
   LanguageCode,
+  LeaderboardEntry,
   NavTab,
   PromoRewardType,
   ReferralRecord,
+  SeasonConfig,
   SubView,
   TaskCategory,
   TaskDefinition,
@@ -178,6 +195,7 @@ import { DepositView } from './components/DepositView';
 import { FarmMeadow } from './components/FarmMeadow';
 import { FriendsView } from './components/FriendsView';
 import { CoinIcon, EggIcon } from './components/GameIcons';
+import { LeaderboardView } from './components/LeaderboardView';
 import { PacksView } from './components/PacksView';
 import { ProfileView, SettingsModal, YourFarmView } from './components/ProfileAndFarmViews';
 import { OfflineIndicator } from './components/PWAControls';
@@ -236,10 +254,14 @@ export default function App() {
   const [allWithdrawRequests, setAllWithdrawRequests] = useState<WithdrawRequestRecord[]>([]);
   const [promoCodes, setPromoCodes] = useState<DynamicPromoCode[]>([]);
   const [recentPlayers, setRecentPlayers] = useState<UserFarmProfile[]>([]);
+  const [leaderboardEntries, setLeaderboardEntries] = useState<LeaderboardEntry[]>([]);
+  const [seasonConfig, setSeasonConfig] = useState<SeasonConfig>(() => createDefaultSeasonConfig());
   const [bannedUsers, setBannedUsers] = useState<BannedUserRecord[]>([]);
   const [adminsConfig, setAdminsConfig] = useState<AdminsConfig>(DEFAULT_ADMINS_CONFIG);
   const [adminUnlocked, setAdminUnlocked] = useState(false);
   const [adminSessionToken, setAdminSessionToken] = useState<string>('');
+  const [playerSessionToken, setPlayerSessionToken] = useState<string>('');
+  const playerSessionTokenRef = useRef<string>('');
   const [adminPasscodeSource, setAdminPasscodeSource] = useState<
     'database' | 'server_file' | 'env' | 'default'
   >('default');
@@ -466,10 +488,18 @@ export default function App() {
   useEffect(() => {
     const initData = getTelegramInitData();
     if (!initData) return;
-    void safeFetchJson('/api/auth/verify-telegram', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ initData }),
+    void safeFetchJson<{ ok?: boolean; verified?: boolean; sessionToken?: string }>(
+      '/api/auth/verify-telegram',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData }),
+      },
+    ).then((res) => {
+      if (res?.ok && res.verified && res.sessionToken) {
+        playerSessionTokenRef.current = res.sessionToken;
+        setPlayerSessionToken(res.sessionToken);
+      }
     });
   }, []);
 
@@ -684,12 +714,20 @@ export default function App() {
     const unsubAdmins = subscribeToAdminsConfig((cfg) => {
       setAdminsConfig(cfg);
     });
+    const unsubLeaderboard = subscribeToLeaderboard((entries) => {
+      setLeaderboardEntries(entries);
+    });
+    const unsubSeason = subscribeToSeasonConfig((cfg) => {
+      setSeasonConfig(cfg);
+    });
     return () => {
       unsubTasks();
       unsubAds();
       unsubChannels();
       unsubPromos();
       unsubAdmins();
+      unsubLeaderboard();
+      unsubSeason();
     };
   }, []);
 
@@ -832,9 +870,12 @@ export default function App() {
               body: JSON.stringify({
                 event: 'referral_joined',
                 referrerUid: refRes.referrerUid,
+                referredUid: refRes.profile.uid,
                 referredName: refRes.profile.displayName,
                 referredHandle: refRes.profile.handle,
                 rewardCoins: refRes.coinsRewarded,
+                initData: getTelegramInitData(),
+                token: playerSessionTokenRef.current,
               }),
             });
             if (typeof window !== 'undefined') {
@@ -1006,6 +1047,7 @@ export default function App() {
           body: JSON.stringify({
             playerId: latestProfileRef.current.uid,
             initData: getTelegramInitData(),
+            token: playerSessionTokenRef.current,
             requiredChannels: activeRequiredChannels,
           }),
         });
@@ -1302,11 +1344,14 @@ export default function App() {
           body: JSON.stringify({
             event: 'deposit_commission',
             referrerUid: current.referredBy,
+            referredUid: current.uid,
             referredName: current.displayName,
             referredHandle: current.handle,
             rewardCoins: res.referrerCommissionCoins,
             depositGram: res.deposit.cryptoAmount,
             depositUsd: res.deposit.usdAmount,
+            initData: getTelegramInitData(),
+            token: playerSessionTokenRef.current,
           }),
         });
       }
@@ -1355,6 +1400,9 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        withdrawalId: res.withdrawal.id.replace(/[^a-zA-Z0-9_-]/g, '_'),
+        initData: getTelegramInitData(),
+        token: playerSessionTokenRef.current,
         displayName: profile.displayName,
         handle: profile.handle,
         playerId: profile.uid,
@@ -1380,6 +1428,9 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          withdrawalId: request.id,
+          initData: getTelegramInitData(),
+          token: adminSessionToken,
           displayName: request.displayName,
           handle: request.handle,
           playerId: request.userId,
@@ -1491,6 +1542,84 @@ export default function App() {
     },
     [showToast, soundsEnabled],
   );
+
+  const handleTopUpTask = async (taskId: string, budgetCoins: number): Promise<boolean> => {
+    await ensurePromiseRef.current;
+    const current = latestProfileRef.current;
+    const task = customTasks.find((t) => t.id === taskId);
+    if (!task) {
+      showToast('Campaign task not found.');
+      return false;
+    }
+    const order = createTopUpPaidTaskOrder(current, task, budgetCoins, Date.now());
+    if ('error' in order) {
+      showToast(order.error);
+      return false;
+    }
+    try {
+      const committed = await topUpPaidCustomTaskInFirestore({
+        profile: order.profile,
+        taskId,
+        addedSlots: order.preview.additionalSlots,
+        addedPaidCoins: order.preview.totalCostCoins,
+        transaction: order.transaction,
+      });
+      if ('error' in committed) {
+        showToast(committed.error);
+        return false;
+      }
+      latestProfileRef.current = committed.profile;
+      setProfile(committed.profile);
+      setCustomTasks((prev) => prev.map((t) => (t.id === taskId ? committed.task : t)));
+      setTransactions((prev) => [order.transaction, ...prev].slice(0, 60));
+      playCoinChimeSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      showToast(
+        `+${order.preview.additionalSlots} slots added (-${order.preview.totalCostCoins.toLocaleString()} coins)`,
+      );
+      return true;
+    } catch {
+      showToast('Failed to top up campaign.');
+      return false;
+    }
+  };
+
+  const handleRefundTask = async (taskId: string): Promise<boolean> => {
+    await ensurePromiseRef.current;
+    const current = latestProfileRef.current;
+    const task = customTasks.find((t) => t.id === taskId);
+    if (!task) {
+      showToast('Campaign task not found.');
+      return false;
+    }
+    const order = createRefundPaidTaskOrder(current, task, Date.now());
+    if ('error' in order) {
+      showToast(order.error);
+      return false;
+    }
+    try {
+      const committed = await refundPaidCustomTaskInFirestore({
+        profile: order.profile,
+        taskId,
+        transaction: order.transaction,
+      });
+      if ('error' in committed) {
+        showToast(committed.error);
+        return false;
+      }
+      latestProfileRef.current = committed.profile;
+      setProfile(committed.profile);
+      setCustomTasks((prev) => prev.map((t) => (t.id === taskId ? committed.task : t)));
+      setTransactions((prev) => [order.transaction, ...prev].slice(0, 60));
+      playClaimSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      showToast(`Refunded +${committed.refundCoins.toLocaleString()} unused coins!`);
+      return true;
+    } catch {
+      showToast('Failed to refund unused campaign slots.');
+      return false;
+    }
+  };
 
   const handleToggleCustomTask = async (taskId: string, isActive: boolean) => {
     try {
@@ -1893,6 +2022,56 @@ export default function App() {
     showToast(`Removed Co-Admin ${label}!`);
   };
 
+  const handleSendBroadcast = async (input: {
+    title: string;
+    message: string;
+    mediaType: 'none' | 'photo' | 'video' | 'animation';
+    mediaUrl?: string;
+    buttonText?: string;
+    buttonUrl?: string;
+    excludeBanned?: boolean;
+    testOnlyToAdmin?: boolean;
+  }) => {
+    try {
+      const response = await fetch('/api/admin/broadcast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...input,
+          token: adminSessionToken,
+          initData: getTelegramInitData(),
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        ok?: boolean;
+        totalTargets?: number;
+        sentCount?: number;
+        failedCount?: number;
+        blockedCount?: number;
+        testOnlyToAdmin?: boolean;
+        sampleError?: string;
+        error?: string;
+      };
+      if (response.ok && payload.ok) {
+        playClaimSound(soundsEnabled);
+        triggerHapticFeedback('success');
+        showToast(
+          payload.testOnlyToAdmin
+            ? `Test DM sent (${payload.sentCount ?? 0}/${payload.totalTargets ?? 0})`
+            : `Broadcast complete: ${payload.sentCount ?? 0} delivered`,
+        );
+        return { ok: true, ...payload };
+      }
+      const errMsg = payload.error || 'Failed to send broadcast.';
+      showToast(errMsg);
+      return { ok: false, error: errMsg, ...payload };
+    } catch {
+      const errMsg = 'Network error while sending broadcast.';
+      showToast(errMsg);
+      return { ok: false, error: errMsg };
+    }
+  };
+
   const handleClaimDaily = () => {
     const now = Date.now();
     const res = claimDailyStreak(profile, todayStr, now);
@@ -2203,6 +2382,162 @@ export default function App() {
     showToast('2× Laying Feed activated for 1 hour!');
   };
 
+  const handleActivateCoopFever = () => {
+    const now = Date.now();
+    const current = latestProfileRef.current;
+    const res = activateCoopFever(current, now);
+    if ('error' in res) {
+      showToast(res.error);
+      return;
+    }
+    playGoldenEggSound(soundsEnabled);
+    triggerHapticFeedback('success');
+    triggerRewardConfetti();
+    void persistMutation({
+      nextProfile: res.profile,
+      transaction: res.transaction,
+    });
+    showToast('Coop Fever 3× Golden Rush activated for 10 minutes!');
+  };
+
+  const handlePurchaseAutoHarvestDrone = (
+    durationId: AutoHarvestDurationId,
+    currency: AutoHarvestCurrency,
+  ) => {
+    const now = Date.now();
+    const current = latestProfileRef.current;
+    const res = purchaseAutoHarvestDrone(current, durationId, currency, now);
+    if ('error' in res) {
+      showToast(res.error);
+      return;
+    }
+    playCoinChimeSound(soundsEnabled);
+    triggerHapticFeedback('success');
+    triggerRewardConfetti();
+    void persistMutation({
+      nextProfile: res.profile,
+      transaction: res.transaction,
+    });
+    showToast(`Auto-Harvest Drone active (${res.tier.label})!`);
+  };
+
+  const handleToggleTelegramReminders = useCallback(() => {
+    const current = latestProfileRef.current;
+    const nextEnabled = current.telegramRemindersEnabled === false;
+    const nextProfile: UserFarmProfile = {
+      ...current,
+      telegramRemindersEnabled: nextEnabled,
+    };
+    playTabTapSound(soundsEnabled);
+    triggerHapticFeedback('selection');
+    void persistMutation({ nextProfile });
+    showToast(
+      nextEnabled
+        ? 'Telegram Bot Push Reminders enabled!'
+        : 'Telegram Bot Push Reminders paused.',
+    );
+  }, [persistMutation, showToast, soundsEnabled]);
+
+  // Execute Auto-Harvest Drone automatically when active & basket reaches capacity
+  const autoHarvestBusyRef = useRef(false);
+  useEffect(() => {
+    if (!isPlayerSynced || isBanned || autoHarvestBusyRef.current) return;
+    const current = latestProfileRef.current;
+    const now = Date.now();
+    if (!isAutoHarvestDroneActive(current, now)) return;
+    const res = applyAutoHarvestIfDue(current, now);
+    if (res.autoHarvestedEggs <= 0) return;
+
+    const droneTx: TransactionEntry = {
+      id: `tx_autoharvest_${now}`,
+      userId: current.uid,
+      type: 'auto_harvest',
+      title: `Auto-Harvest Drone (+${res.autoHarvestedEggs.toLocaleString()} eggs)`.slice(0, 80),
+      amount: res.autoHarvestedEggs,
+      currency: 'eggs',
+      usdValue: eggsToUsd(res.autoHarvestedEggs),
+      status: 'completed',
+      createdAtMs: now,
+    };
+
+    autoHarvestBusyRef.current = true;
+    void persistMutation({
+      nextProfile: res.profile,
+      transaction: droneTx,
+    }).finally(() => {
+      autoHarvestBusyRef.current = false;
+    });
+    showToast(`Auto-Harvest Drone collected +${res.autoHarvestedEggs.toLocaleString()} eggs!`);
+  }, [
+    isBanned,
+    isPlayerSynced,
+    nowMs,
+    persistMutation,
+    profile.autoHarvestUntilMs,
+    profile.lastCollectedAt,
+    showToast,
+  ]);
+
+  // Sync Basket Full & Boost Expiry Push Reminders to Telegram Bot server
+  const lastReminderSyncKeyRef = useRef<string>('');
+  useEffect(() => {
+    if (!isPlayerSynced || isBanned) return;
+    if (!extractTelegramNumericUserId(profile.uid)) return;
+    const initData = getTelegramInitData();
+    if (!playerSessionToken && !initData) return;
+
+    const now = Date.now();
+    const ratePerHour = calculateProductionRate(profile, now);
+    const pending = calculatePendingEggs(profile, now);
+    const remainingCapacity = Math.max(0, profile.basketCapacity - pending);
+    const rawFullAt =
+      ratePerHour > 0 && remainingCapacity > 0
+        ? now + Math.ceil((remainingCapacity / ratePerHour) * 3_600_000)
+        : 0;
+    const basketFullAtMs = rawFullAt > 0 ? Math.floor(rawFullAt / 60_000) * 60_000 : 0;
+    const enabled = profile.telegramRemindersEnabled !== false;
+    const feedBoostUntilMs = Number(profile.feedBoostUntilMs ?? 0);
+    const coopFeverUntilMs = Number(profile.coopFeverUntilMs ?? 0);
+    const autoHarvestUntilMs = Number(profile.autoHarvestUntilMs ?? 0);
+
+    const sig = [
+      profile.uid,
+      enabled ? '1' : '0',
+      basketFullAtMs,
+      feedBoostUntilMs,
+      coopFeverUntilMs,
+      autoHarvestUntilMs,
+      playerSessionToken ? 'tok' : 'init',
+    ].join(':');
+    if (lastReminderSyncKeyRef.current === sig) return;
+
+    const timer = window.setTimeout(() => {
+      lastReminderSyncKeyRef.current = sig;
+      void safeFetchJson('/api/reminders/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerId: profile.uid,
+          initData,
+          token: playerSessionToken,
+          enabled,
+          basketFullAtMs,
+          feedBoostUntilMs,
+          coopFeverUntilMs,
+          autoHarvestUntilMs,
+        }),
+      });
+    }, 650);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    isBanned,
+    isPlayerSynced,
+    nowMs,
+    playerSessionToken,
+    profile,
+  ]);
+
   const handleGoldenEggTap = () => {
     const now = Date.now();
     const current = latestProfileRef.current;
@@ -2343,6 +2678,7 @@ export default function App() {
           onRemoveReferralRelation={handleRemoveReferralRelation}
           onAddAdmin={handleAddAdmin}
           onRemoveAdmin={handleRemoveAdmin}
+          onSendBroadcast={handleSendBroadcast}
         />
       );
     }
@@ -2354,6 +2690,7 @@ export default function App() {
           pendingEggs={pendingEggs}
           notificationsEnabled={notificationsEnabled}
           notificationPermission={notificationPermission}
+          telegramRemindersEnabled={profile.telegramRemindersEnabled !== false}
           onBack={() => setSubView('none')}
           onUpgradeBasket={handleUpgradeBasket}
           onGoPacks={() => {
@@ -2362,7 +2699,9 @@ export default function App() {
           }}
           onOpenWithdraw={() => openSubView('withdraw')}
           onToggleNotifications={() => void handleToggleNotifications()}
+          onToggleTelegramReminders={handleToggleTelegramReminders}
           onActivateBooster={handleActivateBooster}
+          onPurchaseAutoHarvestDrone={handlePurchaseAutoHarvestDrone}
         />
       );
     }
@@ -2415,6 +2754,19 @@ export default function App() {
       );
     }
 
+    if (activeTab === 'leaderboard') {
+      return (
+        <LeaderboardView
+          profile={profile}
+          entries={leaderboardEntries}
+          seasonConfig={seasonConfig}
+          onTabTap={() => playTabTapSound(soundsEnabled)}
+          onNavigateFriends={() => navigateTab('friends')}
+          onNavigatePacks={() => navigateTab('packs')}
+        />
+      );
+    }
+
     if (activeTab === 'tasks') {
       return (
         <TasksView
@@ -2445,6 +2797,8 @@ export default function App() {
           onTriggerAdsgramTask={() => void handleTriggerAdsgramTask()}
           onOpenDeposit={() => openSubView('deposit')}
           onCreateTask={handleCreatePaidUserTask}
+          onTopUpTask={handleTopUpTask}
+          onRefundTask={handleRefundTask}
           onRefreshTasks={handleRefreshTasks}
         />
       );
@@ -2796,6 +3150,7 @@ export default function App() {
               }}
               onGoldenEggDrop={handleGoldenEggTap}
               onActivateBooster={handleActivateBooster}
+              onActivateCoopFever={handleActivateCoopFever}
               onBuyChickens={() => navigateTab('packs')}
             />
           </div>
@@ -2824,6 +3179,7 @@ export default function App() {
           labels={{
             farm: strings.farm,
             packs: strings.packs,
+            ranks: strings.ranks,
             tasks: strings.tasks,
             friends: strings.friends,
             wallet: strings.wallet,
@@ -2952,11 +3308,13 @@ export default function App() {
           soundsEnabled={soundsEnabled}
           notificationsEnabled={notificationsEnabled}
           notificationPermission={notificationPermission}
+          telegramRemindersEnabled={profile.telegramRemindersEnabled !== false}
           themeMode={themeMode}
           onChangeLanguage={handleChangeLanguage}
           onToggleMusic={handleToggleMusic}
           onToggleSounds={handleToggleSounds}
           onToggleNotifications={() => void handleToggleNotifications()}
+          onToggleTelegramReminders={handleToggleTelegramReminders}
           onToggleTheme={handleToggleTheme}
           onClose={() => setShowSettings(false)}
         />

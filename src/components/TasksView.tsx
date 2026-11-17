@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowLeft,
   ArrowUpDown,
+  BarChart3,
   Check,
   ChevronRight,
   Clock,
@@ -17,6 +18,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  RotateCcw,
   Send,
   ShieldCheck,
   Sparkles,
@@ -32,7 +34,9 @@ import {
   AD_NETWORK_TASKS,
   ADSGRAM_BOT_JOIN_TASK,
   calculatePaidTaskFromBudget,
+  calculatePaidTaskTopUp,
   calculateProductionRate,
+  calculateTaskRefundAmount,
   CHICKEN_PACKS,
   DAILY_STREAK_REWARDS,
   DEFAULT_GET_CODE_CHANNEL_URL,
@@ -46,6 +50,7 @@ import {
   sortTasks,
   USER_TASK_MAX_REWARD_COINS,
   USER_TASK_MIN_REWARD_COINS,
+  USER_TASK_MIN_TOPUP_COINS,
   USER_TASK_MIN_TOTAL_COST_COINS,
 } from '../game/economy';
 import type {
@@ -99,6 +104,8 @@ interface TasksViewProps {
     actionUrl: string;
     totalSlots: number;
   }) => Promise<boolean>;
+  onTopUpTask?: (taskId: string, budgetCoins: number) => Promise<boolean>;
+  onRefundTask?: (taskId: string) => Promise<boolean>;
 }
 
 const DEFAULT_PAYOUT_CHANNEL_URL = getTelegramChannelUrl('@AG_PAYOUTS');
@@ -131,6 +138,8 @@ export function TasksView({
   onOpenDeposit,
   onRefreshTasks,
   onCreateTask,
+  onTopUpTask,
+  onRefundTask,
 }: TasksViewProps) {
   const shouldReduceMotion = useReducedMotion();
   const resolvedGetCodeUrl =
@@ -747,6 +756,26 @@ export function TasksView({
     }
   };
 
+  const [showCampaignsDrawer, setShowCampaignsDrawer] = useState(false);
+  const [topUpTargetId, setTopUpTargetId] = useState<string | null>(null);
+  const [topUpBudgetInput, setTopUpBudgetInput] = useState(String(USER_TASK_MIN_TOPUP_COINS));
+  const [busyCampaignId, setBusyCampaignId] = useState<string | null>(null);
+
+  const myCampaigns = useMemo(
+    () => customTasks.filter((t) => t.creatorUid === profile.uid),
+    [customTasks, profile.uid],
+  );
+
+  const campaignSummary = useMemo(() => {
+    let totalClicks = 0;
+    let totalInvested = 0;
+    for (const c of myCampaigns) {
+      totalClicks += Math.max(0, Number(c.claimedCount ?? 0));
+      totalInvested += Math.max(0, Number(c.paidCoins ?? 0));
+    }
+    return { totalClicks, totalInvested };
+  }, [myCampaigns]);
+
   const FILTER_TABS: Array<{ id: FilterTab; label: string }> = [
     { id: 'social', label: 'Social' },
     { id: 'daily', label: 'Daily' },
@@ -799,7 +828,7 @@ export function TasksView({
           </p>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0">
           {onRefreshTasks && (
             <button
               type="button"
@@ -815,6 +844,23 @@ export function TasksView({
               <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin text-amber-600 dark:text-amber-400' : ''}`} />
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => {
+              onTabTap?.();
+              setShowCampaignsDrawer(true);
+            }}
+            className="clay-btn clay-btn-neutral min-h-[40px] px-3 rounded-2xl text-xs font-extrabold inline-flex items-center gap-1.5 shrink-0"
+          >
+            <BarChart3 className="w-4 h-4 text-sky-600 dark:text-sky-400" />
+            <span className="hidden sm:inline">My Campaigns</span>
+            <span className="sm:hidden">Campaigns</span>
+            {myCampaigns.length > 0 && (
+              <span className="font-mono-num text-[10px] font-extrabold px-1.5 py-0.5 rounded-md bg-sky-500/15 text-sky-700 dark:text-sky-300">
+                {myCampaigns.length}
+              </span>
+            )}
+          </button>
           <button
             type="button"
             onClick={() => {
@@ -1810,6 +1856,226 @@ export function TasksView({
               </>
             )}
           </form>
+        </div>
+      )}
+
+      {/* Sponsor "My Campaigns" Analytics + Top-Up / Refund Drawer */}
+      {showCampaignsDrawer && (
+        <div
+          className="animate-clay-backdrop fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 dark:bg-black/70 backdrop-blur-xs p-0 sm:p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="my-campaigns-title"
+        >
+          <div className="animate-clay-modal clay-card w-full sm:max-w-md max-h-[88vh] rounded-t-3xl sm:rounded-3xl p-5 flex flex-col gap-4 overflow-hidden">
+            <div className="flex items-center justify-between gap-2 shrink-0">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-10 h-10 rounded-2xl clay-icon-well-sky flex items-center justify-center text-sky-600 dark:text-sky-400 shrink-0">
+                  <BarChart3 className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <h2 id="my-campaigns-title" className="text-base font-extrabold text-stone-900 dark:text-stone-100 truncate">
+                    My Sponsor Campaigns
+                  </h2>
+                  <p className="text-xs text-stone-500 dark:text-stone-400">
+                    Min {USER_TASK_MIN_REWARD_COINS} coins per user click · Top-Up or Refund unused slots
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                aria-label="Close campaigns drawer"
+                onClick={() => {
+                  setTopUpTargetId(null);
+                  setShowCampaignsDrawer(false);
+                }}
+                className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center text-stone-600 dark:text-stone-300 shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Summary KPIs */}
+            <div className="grid grid-cols-3 gap-2 shrink-0">
+              <div className="clay-inset !rounded-2xl p-2.5 text-center">
+                <div className="text-[10px] font-bold text-stone-500 dark:text-stone-400">Campaigns</div>
+                <div className="text-sm font-extrabold font-mono-num tabular-nums text-stone-900 dark:text-stone-100">
+                  {myCampaigns.length}
+                </div>
+              </div>
+              <div className="clay-inset !rounded-2xl p-2.5 text-center">
+                <div className="text-[10px] font-bold text-stone-500 dark:text-stone-400">User Clicks</div>
+                <div className="text-sm font-extrabold font-mono-num tabular-nums text-emerald-700 dark:text-emerald-300">
+                  {campaignSummary.totalClicks.toLocaleString()}
+                </div>
+              </div>
+              <div className="clay-inset !rounded-2xl p-2.5 text-center">
+                <div className="text-[10px] font-bold text-stone-500 dark:text-stone-400">Coins Spent</div>
+                <div className="text-sm font-extrabold font-mono-num tabular-nums text-amber-700 dark:text-amber-300">
+                  {campaignSummary.totalInvested.toLocaleString()}
+                </div>
+              </div>
+            </div>
+
+            {/* Campaign List */}
+            <div className="overflow-y-auto space-y-3 pr-0.5 flex-1">
+              {myCampaigns.length === 0 ? (
+                <div className="clay-inset !rounded-2xl p-6 text-center space-y-3">
+                  <p className="text-xs text-stone-600 dark:text-stone-300">
+                    You have not launched any sponsor campaigns yet. Set your own per-click reward (min {USER_TASK_MIN_REWARD_COINS} coins/user) and track every completion live.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowCampaignsDrawer(false);
+                      setAddModalStep('form');
+                      setShowAddModal(true);
+                    }}
+                    className="clay-btn clay-btn-amber min-h-[42px] px-4 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Launch Sponsor Task</span>
+                  </button>
+                </div>
+              ) : (
+                myCampaigns.map((camp) => {
+                  const totalSlots = Math.max(0, Number(camp.totalSlots ?? 0));
+                  const claimed = Math.max(0, Number(camp.claimedCount ?? 0));
+                  const remaining = Math.max(0, totalSlots - claimed);
+                  const pct = totalSlots > 0 ? Math.min(100, Math.round((claimed / totalSlots) * 100)) : 0;
+                  const refundPreview = calculateTaskRefundAmount(camp);
+                  const isTopUpOpen = topUpTargetId === camp.id;
+                  const topUpCalc = isTopUpOpen
+                    ? calculatePaidTaskTopUp(camp.rewardCoins, Number(topUpBudgetInput) || 0, totalSlots)
+                    : null;
+                  const isBusy = busyCampaignId === camp.id;
+
+                  return (
+                    <div key={camp.id} className="clay-inset !rounded-2xl p-3.5 space-y-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100 truncate">
+                            {camp.title}
+                          </div>
+                          <div className="text-[11px] text-stone-500 dark:text-stone-400 font-mono-num tabular-nums mt-0.5">
+                            +{camp.rewardCoins.toLocaleString()} coins/click · {claimed}/{totalSlots} clicks
+                            {' · '}
+                            <span className={camp.isActive !== false && remaining > 0 ? 'text-emerald-700 dark:text-emerald-300 font-bold' : 'text-stone-500'}>
+                              {camp.isActive === false ? 'Ended' : remaining === 0 ? 'Completed' : `${remaining} left`}
+                            </span>
+                          </div>
+                        </div>
+                        <span className="text-xs font-extrabold font-mono-num tabular-nums text-amber-700 dark:text-amber-300 shrink-0">
+                          {(camp.paidCoins ?? totalSlots * camp.rewardCoins).toLocaleString()} c
+                        </span>
+                      </div>
+
+                      <div className="h-2 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-emerald-500 transition-all duration-300"
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+
+                      {isTopUpOpen && topUpCalc && (
+                        <div className="clay-card-warm !rounded-xl p-3 space-y-2 text-xs">
+                          <label htmlFor={`topup-budget-${camp.id}`} className="block font-bold text-stone-700 dark:text-stone-200">
+                            Top-Up Budget (min {USER_TASK_MIN_TOPUP_COINS.toLocaleString()} coins)
+                          </label>
+                          <input
+                            id={`topup-budget-${camp.id}`}
+                            type="number"
+                            min={USER_TASK_MIN_TOPUP_COINS}
+                            step={50}
+                            value={topUpBudgetInput}
+                            onChange={(e) => setTopUpBudgetInput(e.target.value)}
+                            className="clay-inset w-full min-h-[40px] px-3 text-sm font-mono-num font-bold text-stone-900 dark:text-stone-100"
+                          />
+                          {topUpCalc.valid ? (
+                            <div className="flex items-center justify-between text-[11px] font-mono-num tabular-nums text-stone-700 dark:text-stone-200">
+                              <span>
+                                +{topUpCalc.additionalSlots.toLocaleString()} slots (Fee: {topUpCalc.platformFeeCoins}c)
+                              </span>
+                              <span className="font-extrabold text-amber-800 dark:text-amber-300">
+                                Cost: {topUpCalc.totalCostCoins.toLocaleString()}c
+                              </span>
+                            </div>
+                          ) : (
+                            <div className="text-[11px] font-bold text-rose-600 dark:text-rose-400">
+                              {topUpCalc.error}
+                            </div>
+                          )}
+                          <div className="grid grid-cols-2 gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => setTopUpTargetId(null)}
+                              className="clay-btn clay-btn-neutral min-h-[38px] rounded-xl text-xs font-bold"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              disabled={!topUpCalc.valid || !onTopUpTask || isBusy || profile.coins < topUpCalc.totalCostCoins}
+                              onClick={async () => {
+                                if (!onTopUpTask || !topUpCalc.valid) return;
+                                setBusyCampaignId(camp.id);
+                                try {
+                                  const ok = await onTopUpTask(camp.id, Number(topUpBudgetInput) || 0);
+                                  if (ok) setTopUpTargetId(null);
+                                } finally {
+                                  setBusyCampaignId(null);
+                                }
+                              }}
+                              className="clay-btn clay-btn-emerald min-h-[38px] rounded-xl text-xs font-extrabold disabled:opacity-50"
+                            >
+                              {isBusy ? 'Topping up...' : 'Confirm Top-Up'}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          disabled={isBusy || !onTopUpTask}
+                          onClick={() => {
+                            setTopUpTargetId(isTopUpOpen ? null : camp.id);
+                            setTopUpBudgetInput(String(USER_TASK_MIN_TOPUP_COINS));
+                          }}
+                          className="clay-btn clay-btn-amber min-h-[40px] rounded-xl text-xs font-extrabold flex items-center justify-center gap-1 disabled:opacity-50"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Top-Up Slots</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={isBusy || !onRefundTask || camp.isActive === false || refundPreview.refundCoins <= 0}
+                          onClick={async () => {
+                            if (!onRefundTask || refundPreview.refundCoins <= 0) return;
+                            setBusyCampaignId(camp.id);
+                            try {
+                              await onRefundTask(camp.id);
+                            } finally {
+                              setBusyCampaignId(null);
+                            }
+                          }}
+                          className="clay-btn clay-btn-neutral min-h-[40px] rounded-xl text-xs font-extrabold flex items-center justify-center gap-1 disabled:opacity-50"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400" />
+                          <span>
+                            {refundPreview.refundCoins > 0
+                              ? `Refund +${refundPreview.refundCoins.toLocaleString()}c`
+                              : 'No Refund Left'}
+                          </span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>

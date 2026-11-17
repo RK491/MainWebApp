@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowUpRight, Award, Package, Plus, Sparkles, X, Zap } from 'lucide-react';
+import { ArrowUpRight, Award, Bot, Feather, Flame, Package, Plus, Sparkles, Star, X, Zap } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import type { ChickenBreedId, UserFarmProfile } from '../types/farm';
 import {
@@ -8,17 +8,22 @@ import {
   calculateTotalChickens,
   CHICKEN_MILESTONES,
   type ChickenMilestoneInfo,
+  COOP_FEVER_MULTIPLIER,
+  COOP_FEVER_REQUIRED_ADS,
   eggsToGram,
   eggsToUsd,
   FEED_BOOSTER_COST_COINS,
   getChickenMilestoneReached,
+  getCoopFeverProgress,
   getWithdrawAdGateStatus,
   GOLDEN_EGG_REWARD_COINS,
+  isAutoHarvestDroneActive,
+  isCoopFeverActive,
   isFeedBoosterActive,
   isGoldenEggReady,
 } from '../game/economy';
-import { ChickenSprite, EggIcon } from './GameIcons';
-import farmMeadowBg from '../assets/images/poultry_farm_meadow_1794853573543.jpg';
+import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
+import farmMeadowBg from '../assets/images/isometric_farm_no_hens_1794882362098.jpg';
 
 interface FarmMeadowProps {
   profile: UserFarmProfile;
@@ -32,6 +37,7 @@ interface FarmMeadowProps {
   onChickenTap: () => void;
   onGoldenEggDrop?: () => void;
   onActivateBooster?: () => void;
+  onActivateCoopFever?: () => void;
   onBuyChickens?: () => void;
 }
 
@@ -42,6 +48,20 @@ interface RoamingHen {
   y: number;
   facingLeft: boolean;
   delayMs: number;
+}
+
+interface MeadowParticle {
+  id: string;
+  kind: 'egg_collect' | 'chicken_buy';
+  glyph: 'egg' | 'coin' | 'feather' | 'star';
+  originXPercent: number;
+  originYPercent: number;
+  dx: number;
+  dy: number;
+  delay: number;
+  duration: number;
+  rotateDeg: number;
+  scale: number;
 }
 
 interface FlyingEggParticle {
@@ -58,22 +78,22 @@ interface FlyingEggParticle {
 }
 
 const SPAWN_SPOTS = [
-  { x: 46, y: 55 },
-  { x: 34, y: 61 },
-  { x: 55, y: 65 },
-  { x: 66, y: 54 },
-  { x: 41, y: 49 },
-  { x: 70, y: 63 },
-  { x: 28, y: 56 },
-  { x: 50, y: 60 },
-  { x: 38, y: 67 },
-  { x: 60, y: 49 },
-  { x: 23, y: 61 },
-  { x: 60, y: 68 },
-  { x: 75, y: 59 },
-  { x: 33, y: 49 },
-  { x: 47, y: 69 },
-  { x: 56, y: 52 },
+  { x: 45, y: 55 },
+  { x: 56, y: 58 },
+  { x: 38, y: 50 },
+  { x: 64, y: 61 },
+  { x: 51, y: 49 },
+  { x: 69, y: 56 },
+  { x: 41, y: 59 },
+  { x: 59, y: 52 },
+  { x: 47, y: 63 },
+  { x: 34, y: 47 },
+  { x: 62, y: 65 },
+  { x: 53, y: 60 },
+  { x: 72, y: 59 },
+  { x: 43, y: 46 },
+  { x: 49, y: 65 },
+  { x: 67, y: 51 },
 ];
 
 function getStoredMilestone(uid: string): number {
@@ -101,14 +121,26 @@ function formatCountdownMs(ms: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-const POLLEN_MOTES = [
-  { left: '16%', top: '34%', delay: '0s', size: 'w-2 h-2' },
-  { left: '34%', top: '44%', delay: '1.1s', size: 'w-1.5 h-1.5' },
-  { left: '56%', top: '30%', delay: '2.2s', size: 'w-2 h-2' },
-  { left: '74%', top: '42%', delay: '0.7s', size: 'w-1.5 h-1.5' },
-  { left: '84%', top: '28%', delay: '3.1s', size: 'w-2 h-2' },
-  { left: '24%', top: '58%', delay: '1.8s', size: 'w-1.5 h-1.5' },
-];
+const ATMOSPHERIC_DUST_PARTICLES = [
+  { left: '11%', top: '26%', size: 5, dx: 26, dy: -22, duration: 12.5, delay: 0.2, tone: 'gold' },
+  { left: '22%', top: '38%', size: 4, dx: -18, dy: -28, duration: 14.2, delay: 1.4, tone: 'ivory' },
+  { left: '31%', top: '21%', size: 6, dx: 22, dy: -16, duration: 11.8, delay: 2.6, tone: 'amber' },
+  { left: '42%', top: '44%', size: 4, dx: 28, dy: -24, duration: 15.6, delay: 0.8, tone: 'gold' },
+  { left: '53%', top: '31%', size: 5, dx: -24, dy: -20, duration: 13.4, delay: 3.1, tone: 'ivory' },
+  { left: '64%', top: '47%', size: 6, dx: 20, dy: -26, duration: 16.0, delay: 1.9, tone: 'amber' },
+  { left: '76%', top: '29%', size: 4, dx: -22, dy: -18, duration: 12.2, delay: 4.0, tone: 'gold' },
+  { left: '87%', top: '41%', size: 5, dx: -16, dy: -24, duration: 14.8, delay: 0.5, tone: 'ivory' },
+  { left: '17%', top: '57%', size: 5, dx: 24, dy: -26, duration: 13.8, delay: 2.2, tone: 'amber' },
+  { left: '29%', top: '65%', size: 4, dx: 18, dy: -20, duration: 15.2, delay: 3.7, tone: 'gold' },
+  { left: '46%', top: '60%', size: 6, dx: -20, dy: -30, duration: 17.0, delay: 1.1, tone: 'ivory' },
+  { left: '58%', top: '68%', size: 4, dx: 22, dy: -22, duration: 12.9, delay: 4.5, tone: 'gold' },
+  { left: '72%', top: '62%', size: 5, dx: -26, dy: -24, duration: 14.4, delay: 2.9, tone: 'amber' },
+  { left: '84%', top: '56%', size: 4, dx: -18, dy: -18, duration: 13.1, delay: 0.9, tone: 'ivory' },
+  { left: '36%', top: '76%', size: 5, dx: 20, dy: -28, duration: 15.8, delay: 2.4, tone: 'gold' },
+  { left: '61%', top: '79%', size: 4, dx: -16, dy: -22, duration: 16.4, delay: 5.0, tone: 'ivory' },
+  { left: '79%', top: '74%', size: 5, dx: -22, dy: -26, duration: 13.7, delay: 1.6, tone: 'amber' },
+  { left: '14%', top: '43%', size: 3.5, dx: 16, dy: -16, duration: 11.2, delay: 3.3, tone: 'ivory' },
+] as const;
 
 export function FarmMeadow({
   profile,
@@ -122,6 +154,7 @@ export function FarmMeadow({
   onChickenTap,
   onGoldenEggDrop,
   onActivateBooster,
+  onActivateCoopFever,
   onBuyChickens,
 }: FarmMeadowProps) {
   const prefersReducedMotion = useReducedMotion();
@@ -131,6 +164,8 @@ export function FarmMeadow({
   const [chirps, setChirps] = useState<Array<{ seq: number; henId: string; text: string; isGolden: boolean }>>([]);
   const [tapBursts, setTapBursts] = useState<Array<{ seq: number; henId: string; isGolden: boolean }>>([]);
   const [harvestBurst, setHarvestBurst] = useState<{ seq: number; amount: number } | null>(null);
+  const [chickenPurchaseBanner, setChickenPurchaseBanner] = useState<{ seq: number; addedCount: number } | null>(null);
+  const [meadowParticles, setMeadowParticles] = useState<MeadowParticle[]>([]);
   const [isCollectPopping, setIsCollectPopping] = useState(false);
   const [collectRippleSeq, setCollectRippleSeq] = useState(0);
   const [flyingEggs, setFlyingEggs] = useState<FlyingEggParticle[]>([]);
@@ -139,6 +174,8 @@ export function FarmMeadow({
 
   const prevUidRef = useRef<string>(profile.uid);
   const prevTotalChickensRef = useRef<number | null>(null);
+  const pendingChickenBurstCountRef = useRef(0);
+  const particleBatchSeqRef = useRef(0);
   const chirpSeqRef = useRef(0);
   const harvestSeqRef = useRef(0);
   const flyingBatchSeqRef = useRef(0);
@@ -157,6 +194,11 @@ export function FarmMeadow({
 
   const boosterActive = isFeedBoosterActive(profile, liveNowMs);
   const boostRemainingMs = Math.max(0, Number(profile.feedBoostUntilMs ?? 0) - liveNowMs);
+  const feverActive = isCoopFeverActive(profile, liveNowMs);
+  const feverRemainingMs = Math.max(0, Number(profile.coopFeverUntilMs ?? 0) - liveNowMs);
+  const feverProgress = getCoopFeverProgress(profile, liveNowMs);
+  const droneActive = isAutoHarvestDroneActive(profile, liveNowMs);
+  const droneRemainingMs = Math.max(0, Number(profile.autoHarvestUntilMs ?? 0) - liveNowMs);
   const goldenReady = isGoldenEggReady(profile, liveNowMs);
   const productionRate = calculateProductionRate(profile, liveNowMs);
   const totalChickens = calculateTotalChickens(profile);
@@ -166,10 +208,65 @@ export function FarmMeadow({
   const totalMinedUsd = eggsToUsd(totalMinedEggs);
   const adGate = getWithdrawAdGateStatus(profile);
 
+  const spawnMeadowParticleBurst = (kind: 'egg_collect' | 'chicken_buy', countAdded = 1) => {
+    const batchSeq = ++particleBatchSeqRef.current;
+    if (kind === 'chicken_buy') {
+      setChickenPurchaseBanner({ seq: batchSeq, addedCount: countAdded });
+      const bannerTimer = window.setTimeout(() => {
+        setChickenPurchaseBanner((cur) => (cur?.seq === batchSeq ? null : cur));
+      }, 1500);
+      effectTimersRef.current.push(bannerTimer);
+    }
+
+    if (prefersReducedMotion) return;
+
+    const particleCount = kind === 'chicken_buy' ? 18 : 14;
+    const originXPercent = kind === 'chicken_buy' ? 50 : 73;
+    const originYPercent = kind === 'chicken_buy' ? 56 : 82;
+
+    const created: MeadowParticle[] = Array.from({ length: particleCount }, (_, idx) => {
+      const angle =
+        kind === 'chicken_buy'
+          ? (idx / particleCount) * Math.PI * 2 + (idx % 2 === 0 ? 0.14 : -0.14)
+          : -Math.PI * 0.92 + (idx / Math.max(1, particleCount - 1)) * Math.PI * 0.84;
+      const dist =
+        kind === 'chicken_buy'
+          ? 70 + (idx % 4) * 26
+          : 60 + (idx % 4) * 22;
+
+      const glyphs: MeadowParticle['glyph'][] =
+        kind === 'chicken_buy'
+          ? ['feather', 'star', 'coin', 'feather']
+          : ['egg', 'star', 'coin', 'egg'];
+
+      return {
+        id: `mp-${batchSeq}-${idx}`,
+        kind,
+        glyph: glyphs[idx % glyphs.length],
+        originXPercent,
+        originYPercent,
+        dx: Math.round(Math.cos(angle) * dist),
+        dy: Math.round(Math.sin(angle) * dist - (kind === 'egg_collect' ? 24 : 10)),
+        delay: (idx % 5) * 0.03,
+        duration: 0.65 + (idx % 3) * 0.12,
+        rotateDeg: (idx % 2 === 0 ? 1 : -1) * (25 + idx * 14),
+        scale: 0.85 + (idx % 3) * 0.2,
+      };
+    });
+
+    setMeadowParticles((prev) => [...prev.slice(-24), ...created]);
+    const cleanup = window.setTimeout(() => {
+      const idSet = new Set(created.map((p) => p.id));
+      setMeadowParticles((prev) => prev.filter((p) => !idSet.has(p.id)));
+    }, 1200);
+    effectTimersRef.current.push(cleanup);
+  };
+
   useEffect(() => {
     if (prevUidRef.current !== profile.uid) {
       prevUidRef.current = profile.uid;
       prevTotalChickensRef.current = null;
+      pendingChickenBurstCountRef.current = 0;
       setActiveMilestone(null);
     }
 
@@ -191,6 +288,15 @@ export function FarmMeadow({
     prevTotalChickensRef.current = totalChickens;
 
     if (totalChickens > prevCount) {
+      const added = totalChickens - prevCount;
+      const visibleInViewport =
+        isVisible || (typeof window !== 'undefined' && window.innerWidth >= 1024);
+      if (visibleInViewport) {
+        spawnMeadowParticleBurst('chicken_buy', added);
+      } else {
+        pendingChickenBurstCountRef.current += added;
+      }
+
       const reached = getChickenMilestoneReached(prevCount, totalChickens);
       const storedMax = getStoredMilestone(profile.uid);
       if (reached && reached.threshold > storedMax) {
@@ -198,7 +304,19 @@ export function FarmMeadow({
         setActiveMilestone(reached);
       }
     }
-  }, [isProfileSynced, profile.uid, totalChickens]);
+  }, [isProfileSynced, isVisible, profile.uid, totalChickens]);
+
+  useEffect(() => {
+    const visibleInViewport =
+      isVisible || (typeof window !== 'undefined' && window.innerWidth >= 1024);
+    if (!visibleInViewport || pendingChickenBurstCountRef.current <= 0) return;
+    const count = pendingChickenBurstCountRef.current;
+    pendingChickenBurstCountRef.current = 0;
+    const t = window.setTimeout(() => {
+      spawnMeadowParticleBurst('chicken_buy', count);
+    }, 120);
+    return () => window.clearTimeout(t);
+  }, [isVisible]);
 
   useEffect(() => {
     const visibleInViewport =
@@ -227,7 +345,7 @@ export function FarmMeadow({
   useEffect(() => {
     const id = window.setInterval(() => {
       setStepTick((t) => t + 1);
-    }, 3200);
+    }, 2600);
     return () => {
       window.clearInterval(id);
       if (popTimerRef.current) window.clearTimeout(popTimerRef.current);
@@ -241,6 +359,7 @@ export function FarmMeadow({
   }, []);
 
   const triggerCollectEffects = () => {
+    spawnMeadowParticleBurst('egg_collect', 1);
     setIsCollectPopping(false);
     window.requestAnimationFrame(() => {
       setIsCollectPopping(true);
@@ -311,13 +430,13 @@ export function FarmMeadow({
     return baseHens.map((breed, idx) => {
       const spot = SPAWN_SPOTS[idx % SPAWN_SPOTS.length];
       const phase = (stepTick + idx) % 4;
-      const dx = phase === 0 ? 0 : phase === 1 ? 4.5 : phase === 2 ? 2 : -4;
-      const dy = phase === 0 ? 0 : phase === 1 ? -2.2 : phase === 2 ? 2.5 : -1;
+      const dx = phase === 0 ? 0 : phase === 1 ? 3.8 : phase === 2 ? 1.8 : -3.4;
+      const dy = phase === 0 ? 0 : phase === 1 ? -1.8 : phase === 2 ? 2.1 : -0.9;
       return {
         id: `${breed}-${idx}`,
         breed,
-        x: Math.max(14, Math.min(86, spot.x + dx)),
-        y: Math.max(46, Math.min(71, spot.y + dy)),
+        x: Math.max(24, Math.min(74, spot.x + dx)),
+        y: Math.max(41, Math.min(64, spot.y + dy)),
         facingLeft: phase >= 2,
         delayMs: (idx % 5) * 200,
       };
@@ -328,108 +447,606 @@ export function FarmMeadow({
 
   return (
     <section
-      aria-label="Interactive GRAM Mining Poultry Farm"
-      className="animate-clay-enter relative w-full flex-1 lg:flex-none overflow-hidden rounded-none lg:rounded-[2rem] lg:clay-card bg-gradient-to-b from-sky-300 via-emerald-700 to-stone-900 min-h-[540px] h-full lg:h-auto lg:aspect-[9/14] lg:min-h-[600px] lg:max-h-[760px]"
+      aria-label="Live Isometric Sustainable Poultry Estate"
+      className="animate-clay-enter relative w-full flex-1 lg:flex-none overflow-hidden rounded-none lg:rounded-[2rem] lg:clay-card bg-gradient-to-b from-amber-200 via-emerald-800 to-stone-950 min-h-[540px] h-full lg:h-auto lg:aspect-[9/14] lg:min-h-[600px] lg:max-h-[760px]"
     >
-      {!bgFailed && (
-        <img
-          src={farmMeadowBg}
-          alt="Realistic outdoor free-range poultry farm with weathered wooden chicken coop, red timber barn, sunlit green meadow, and packed-earth path"
-          referrerPolicy="no-referrer"
-          onError={() => setBgFailed(true)}
-          className="absolute inset-0 w-full h-full object-cover object-center select-none pointer-events-none"
-        />
-      )}
+      {/* Synchronized Living 3D Isometric Estate Canvas (continuous video-like motion + aligned animations) */}
+      <motion.div
+        animate={
+          prefersReducedMotion
+            ? undefined
+            : {
+                scale: [1.018, 1.042, 1.028, 1.018],
+                x: [-4, 4, -2, -4],
+                y: [-2.5, 2.5, -1, -2.5],
+              }
+        }
+        transition={{
+          duration: 22,
+          repeat: Infinity,
+          ease: 'easeInOut',
+        }}
+        className="absolute inset-0 pointer-events-none overflow-hidden will-change-transform"
+        aria-hidden="true"
+      >
+        {!bgFailed ? (
+          <img
+            src={farmMeadowBg}
+            alt="3D isometric sustainable farm complex in golden hour sunlight featuring a two-story farmhouse with glass solarium and rooftop garden, solar-roofed barn with hydroponic wall, packing facility with delivery truck, two solar chicken coops, terraced crop fields, foreground pond with fountain and waterfowl, forest, and distant wind farm"
+            referrerPolicy="no-referrer"
+            onError={() => setBgFailed(true)}
+            className="w-full h-full object-cover object-center select-none pointer-events-none"
+          />
+        ) : (
+          <div className="w-full h-full bg-gradient-to-b from-amber-300/40 via-emerald-800 to-stone-900 flex items-center justify-center">
+            <div className="rounded-3xl bg-stone-950/55 border border-white/15 px-5 py-3 text-center text-amber-100 text-xs font-semibold">
+              Sustainable Eco-Farm Estate
+            </div>
+          </div>
+        )}
 
-      {/* Natural golden morning sunlight & subtle floating pollen motes */}
-      <div className="absolute inset-0 pointer-events-none overflow-hidden" aria-hidden="true">
+        {/* 1. Golden-hour atmospheric sunbeams & horizon warmth */}
         <div
-          className="animate-sunbeam absolute -top-20 -left-16 w-72 h-[125%] bg-gradient-to-b from-amber-100/25 via-yellow-50/10 to-transparent blur-2xl"
+          className="animate-sunbeam absolute -top-20 -left-16 w-80 h-[125%] bg-gradient-to-b from-amber-100/28 via-yellow-50/12 to-transparent blur-2xl"
         />
         <div
           style={{ animationDelay: '2.4s' }}
-          className="animate-sunbeam absolute -top-24 left-1/3 w-52 h-[125%] bg-gradient-to-b from-white/20 via-amber-100/8 to-transparent blur-2xl"
+          className="animate-sunbeam absolute -top-24 left-1/3 w-56 h-[125%] bg-gradient-to-b from-amber-50/20 via-amber-100/10 to-transparent blur-2xl"
         />
-        {POLLEN_MOTES.map((mote, idx) => (
-          <span
-            key={idx}
-            style={{ left: mote.left, top: mote.top, animationDelay: mote.delay }}
-            className={`animate-pollen-drift absolute ${mote.size} rounded-full ${
-              boosterActive
-                ? 'bg-emerald-200/85 shadow-[0_0_10px_rgba(52,211,153,0.9)]'
-                : 'bg-amber-100/75 shadow-[0_0_8px_rgba(254,243,199,0.75)]'
-            }`}
-          />
-        ))}
+        <div
+          className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_18%_8%,rgba(253,230,138,0.22),transparent_48%)]"
+        />
+
+        {!prefersReducedMotion && (
+          <>
+            {/* Drifting golden-hour high sky clouds */}
+            <motion.div
+              animate={{ x: [-48, 72, -48], opacity: [0.22, 0.38, 0.22] }}
+              transition={{ duration: 26, repeat: Infinity, ease: 'easeInOut' }}
+              style={{ left: '10%', top: '1.8%' }}
+              className="absolute w-36 h-6 rounded-full bg-amber-100/45 blur-md"
+            />
+            <motion.div
+              animate={{ x: [42, -52, 42], opacity: [0.18, 0.32, 0.18] }}
+              transition={{ duration: 32, repeat: Infinity, ease: 'easeInOut' }}
+              style={{ left: '54%', top: '3.0%' }}
+              className="absolute w-40 h-5 rounded-full bg-orange-100/40 blur-md"
+            />
+            <motion.div
+              animate={{ x: [-28, 46, -28], opacity: [0.14, 0.28, 0.14] }}
+              transition={{ duration: 22, delay: 4, repeat: Infinity, ease: 'easeInOut' }}
+              style={{ left: '34%', top: '4.6%' }}
+              className="absolute w-28 h-4 rounded-full bg-amber-50/35 blur-md"
+            />
+
+            {/* Soaring farm swallows gliding across distant lake & forest */}
+            {[0, 1, 2, 3].map((idx) => (
+              <motion.svg
+                key={`bird-${idx}`}
+                viewBox="0 0 24 12"
+                initial={{ x: -30, y: 0, opacity: 0 }}
+                animate={{
+                  x: [-35 + idx * 14, 150 + idx * 20, 350],
+                  y: [0, -11 - idx * 3, -4],
+                  scaleY: [1, 0.55, 1.15, 0.65, 1],
+                  opacity: [0, 0.85, 0.85, 0],
+                }}
+                transition={{
+                  duration: 14 + idx * 2.2,
+                  delay: idx * 3.1,
+                  repeat: Infinity,
+                  ease: 'linear',
+                }}
+                style={{ left: `${8 + idx * 4}%`, top: `${7.5 + idx * 2.2}%` }}
+                className="absolute w-4 h-2.5 text-stone-800/75"
+              >
+                <path
+                  d="M1 8 Q6 2 12 7 Q18 2 23 8"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                />
+              </motion.svg>
+            ))}
+
+            {/* Distant lake sunlight water glints */}
+            {[
+              { left: '24%', top: '10.4%', width: 'w-9', delay: 0 },
+              { left: '36%', top: '11.6%', width: 'w-11', delay: 0.9 },
+              { left: '48%', top: '9.8%', width: 'w-8', delay: 1.7 },
+              { left: '57%', top: '11.2%', width: 'w-7', delay: 2.5 },
+            ].map((glint, idx) => (
+              <motion.span
+                key={`lake-glint-${idx}`}
+                animate={{ opacity: [0.15, 0.78, 0.15], scaleX: [0.85, 1.4, 0.85] }}
+                transition={{ duration: 3.1, delay: glint.delay, repeat: Infinity, ease: 'easeInOut' }}
+                style={{ left: glint.left, top: glint.top }}
+                className={`absolute ${glint.width} h-[2px] rounded-full bg-amber-100/80 blur-[0.5px]`}
+              />
+            ))}
+
+            {/* 2. Spinning 3-blade rotors on the 5 distant wind farm turbines */}
+            {[59.5, 63.4, 67.1, 70.9, 75.0].map((leftPct, idx) => (
+              <motion.span
+                key={`turbine-${idx}`}
+                animate={{ rotate: 360 }}
+                transition={{
+                  duration: 2.0 + idx * 0.22,
+                  repeat: Infinity,
+                  ease: 'linear',
+                }}
+                style={{ left: `${leftPct}%`, top: '6.4%' }}
+                className="absolute w-4 h-4 -translate-x-1/2 -translate-y-1/2 opacity-80"
+              >
+                <span className="absolute left-1/2 top-0 -translate-x-1/2 w-[1.5px] h-2 bg-white/95 rounded-full shadow-[0_0_5px_rgba(255,255,255,0.85)]" />
+                <span className="absolute left-1/2 bottom-0.5 -translate-x-1/2 rotate-[120deg] origin-top w-[1.5px] h-2 bg-white/90 rounded-full" />
+                <span className="absolute left-1/2 bottom-0.5 -translate-x-1/2 -rotate-[120deg] origin-top w-[1.5px] h-2 bg-white/90 rounded-full" />
+              </motion.span>
+            ))}
+
+            {/* 3. Solar panel golden-hour reflection glint sweeps (Barn roof, Packing roof & Distant solar array) */}
+            <motion.div
+              animate={{ opacity: [0, 0.5, 0], x: [-28, 32] }}
+              transition={{ duration: 4.8, repeat: Infinity, repeatDelay: 2.8, ease: 'easeInOut' }}
+              style={{ left: '52%', top: '23%', transform: 'rotate(-22deg)' }}
+              className="absolute w-28 h-9 rounded-full bg-gradient-to-r from-transparent via-amber-100/60 to-transparent blur-sm"
+            />
+            <motion.div
+              animate={{ opacity: [0, 0.45, 0], x: [-16, 18] }}
+              transition={{ duration: 4.2, delay: 1.9, repeat: Infinity, repeatDelay: 3.4, ease: 'easeInOut' }}
+              style={{ left: '77%', top: '36.5%', transform: 'rotate(-22deg)' }}
+              className="absolute w-16 h-5 rounded-full bg-gradient-to-r from-transparent via-sky-100/60 to-transparent blur-sm"
+            />
+            <motion.div
+              animate={{ opacity: [0, 0.42, 0], x: [-20, 22] }}
+              transition={{ duration: 5.5, delay: 0.8, repeat: Infinity, repeatDelay: 3.8, ease: 'easeInOut' }}
+              style={{ left: '78%', top: '11.5%', transform: 'rotate(-16deg)' }}
+              className="absolute w-24 h-4 rounded-full bg-gradient-to-r from-transparent via-amber-100/55 to-transparent blur-sm"
+            />
+
+            {/* 4. Forest canopy, rooftop garden & vertical hydroponic wind sway */}
+            {[
+              { left: '12%', top: '24%', w: 'w-20', h: 'h-14', dx: 4, dur: 5.8, delay: 0 },
+              { left: '84%', top: '25%', w: 'w-20', h: 'h-16', dx: -4, dur: 6.4, delay: 1.2 },
+              { left: '26%', top: '25%', w: 'w-14', h: 'h-8', dx: 3, dur: 4.9, delay: 0.6 },
+              { left: '55%', top: '33%', w: 'w-14', h: 'h-9', dx: 2.5, dur: 5.3, delay: 1.8 },
+              { left: '14%', top: '91%', w: 'w-24', h: 'h-14', dx: 5, dur: 6.8, delay: 0.9 },
+              { left: '84%', top: '89%', w: 'w-24', h: 'h-16', dx: -5, dur: 6.1, delay: 2.1 },
+            ].map((foliage, idx) => (
+              <motion.div
+                key={`foliage-breeze-${idx}`}
+                animate={{
+                  x: [-foliage.dx, foliage.dx, -foliage.dx],
+                  scale: [1, 1.03, 0.99, 1],
+                  opacity: [0.12, 0.28, 0.12],
+                }}
+                transition={{
+                  duration: foliage.dur,
+                  delay: foliage.delay,
+                  repeat: Infinity,
+                  ease: 'easeInOut',
+                }}
+                style={{ left: foliage.left, top: foliage.top }}
+                className={`absolute -translate-x-1/2 -translate-y-1/2 ${foliage.w} ${foliage.h} rounded-full bg-lime-200/25 blur-md`}
+              />
+            ))}
+
+            {/* 5. Main Farmhouse cozy chimney smoke, solarium glass shimmer & porch lantern glow */}
+            {[0, 1.2, 2.4].map((delaySec, idx) => (
+              <motion.span
+                key={`smoke-${idx}`}
+                initial={{ opacity: 0, y: 0, x: 0, scale: 0.55 }}
+                animate={{
+                  opacity: [0, 0.48, 0.25, 0],
+                  y: [-2, -28 - idx * 4],
+                  x: [0, 12 + idx * 3],
+                  scale: [0.55, 1.35, 1.8],
+                }}
+                transition={{
+                  duration: 4.0,
+                  delay: delaySec,
+                  repeat: Infinity,
+                  ease: 'easeOut',
+                }}
+                style={{ left: '29.2%', top: '24.4%' }}
+                className="absolute w-3.5 h-3.5 rounded-full bg-amber-50/70 blur-[3px]"
+              />
+            ))}
+            <motion.div
+              animate={{ opacity: [0.12, 0.36, 0.12] }}
+              transition={{ duration: 4.4, repeat: Infinity, ease: 'easeInOut' }}
+              style={{ left: '14.5%', top: '37.5%', transform: 'rotate(-20deg)' }}
+              className="absolute -translate-x-1/2 -translate-y-1/2 w-14 h-7 rounded-full bg-amber-100/40 blur-md"
+            />
+            <motion.span
+              animate={{ opacity: [0.45, 0.9, 0.45], scale: [0.9, 1.2, 0.9] }}
+              transition={{ duration: 2.6, repeat: Infinity, ease: 'easeInOut' }}
+              style={{ left: '34.4%', top: '36.8%' }}
+              className="absolute w-3 h-3 rounded-full bg-amber-300/75 blur-[3px]"
+            />
+
+            {/* 6. Terraced crop fields butterflies & golden grain breeze waves */}
+            {[
+              { left: '20%', top: '52%', dx: 20, dy: -13, dur: 5.2, color: 'text-amber-300' },
+              { left: '31%', top: '59%', dx: -17, dy: -11, dur: 6.0, color: 'text-yellow-200' },
+              { left: '14%', top: '63%', dx: 15, dy: -14, dur: 4.7, color: 'text-orange-200' },
+              { left: '39%', top: '63%', dx: 16, dy: -9, dur: 5.7, color: 'text-amber-200' },
+            ].map((bf, idx) => (
+              <motion.div
+                key={`butterfly-${idx}`}
+                animate={{
+                  x: [0, bf.dx, bf.dx * 0.4, -bf.dx * 0.5, 0],
+                  y: [0, bf.dy, -4, bf.dy * 0.7, 0],
+                  scaleX: [1, 0.4, 1, 0.45, 1],
+                }}
+                transition={{
+                  duration: bf.dur,
+                  delay: idx * 0.85,
+                  repeat: Infinity,
+                  ease: 'easeInOut',
+                }}
+                style={{ left: bf.left, top: bf.top }}
+                className={`absolute w-2.5 h-2.5 ${bf.color} drop-shadow-[0_1px_2px_rgba(0,0,0,0.45)]`}
+              >
+                <svg viewBox="0 0 16 12" className="w-full h-full fill-current">
+                  <path d="M8 6 C5 1, 1 2, 2 6 C1 9, 5 11, 8 7 C11 11, 15 9, 14 6 C15 2, 11 1, 8 6 Z" />
+                </svg>
+              </motion.div>
+            ))}
+
+            {/* Warm wind ripples passing across golden wheat & terraced vegetable beds */}
+            <motion.div
+              animate={{ x: [-30, 38, -30], opacity: [0.1, 0.36, 0.1] }}
+              transition={{ duration: 5.8, repeat: Infinity, ease: 'easeInOut' }}
+              style={{ left: '84%', top: '61%', transform: 'rotate(-20deg)' }}
+              className="absolute -translate-x-1/2 -translate-y-1/2 w-24 h-12 rounded-full bg-gradient-to-r from-transparent via-amber-200/50 to-transparent blur-md"
+            />
+            <motion.div
+              animate={{ x: [-28, 34, -28], opacity: [0.08, 0.28, 0.08] }}
+              transition={{ duration: 6.4, delay: 1.8, repeat: Infinity, ease: 'easeInOut' }}
+              style={{ left: '25%', top: '58%', transform: 'rotate(-22deg)' }}
+              className="absolute -translate-x-1/2 -translate-y-1/2 w-28 h-12 rounded-full bg-gradient-to-r from-transparent via-lime-200/40 to-transparent blur-md"
+            />
+
+            {/* 7. Packing & Processing delivery truck idle life & amber dispatch beacon */}
+            <motion.span
+              animate={{ opacity: [0.35, 1, 0.35], scale: [0.85, 1.25, 0.85] }}
+              transition={{ duration: 1.6, repeat: Infinity, ease: 'easeInOut' }}
+              style={{ left: '86.4%', top: '47.6%' }}
+              className="absolute w-2 h-2 rounded-full bg-amber-300 shadow-[0_0_9px_rgba(252,211,77,0.95)]"
+            />
+            <motion.span
+              animate={{ opacity: [0.18, 0.42, 0.18], scaleX: [0.95, 1.06, 0.95] }}
+              transition={{ duration: 0.45, repeat: Infinity, ease: 'easeInOut' }}
+              style={{ left: '92.5%', top: '49.8%' }}
+              className="absolute w-3.5 h-2 rounded-full bg-stone-200/40 blur-[2px]"
+            />
+
+            {/* 8. Foreground pond fountain live vertical plume, droplet spray, shimmer & concentric ripples */}
+            <div
+              style={{ left: '63.5%', top: '75.5%' }}
+              className="absolute -translate-x-1/2 -translate-y-1/2 w-32 h-16"
+            >
+              {[0, 0.7, 1.4].map((delaySec, idx) => (
+                <motion.span
+                  key={`ripple-${idx}`}
+                  initial={{ opacity: 0.72, scale: 0.22 }}
+                  animate={{ opacity: 0, scale: 1.5 }}
+                  transition={{
+                    duration: 2.1,
+                    delay: delaySec,
+                    repeat: Infinity,
+                    ease: 'easeOut',
+                  }}
+                  className="absolute inset-0 rounded-[999px] border border-sky-100/75"
+                />
+              ))}
+              {/* Vertical mist jet pulsing like video water spray */}
+              <motion.span
+                animate={{ scaleY: [0.82, 1.15, 0.88, 1.08, 0.82], opacity: [0.55, 0.85, 0.6, 0.8, 0.55] }}
+                transition={{ duration: 1.1, repeat: Infinity, ease: 'easeInOut' }}
+                className="absolute left-1/2 bottom-1/2 -translate-x-1/2 w-3 h-7 origin-bottom rounded-t-full bg-gradient-to-t from-sky-100/75 via-white/85 to-transparent blur-[1px]"
+              />
+              {[
+                { dx: -9, peak: -16, delay: 0 },
+                { dx: -4, peak: -19, delay: 0.25 },
+                { dx: 0, peak: -21, delay: 0.5 },
+                { dx: 4, peak: -18, delay: 0.75 },
+                { dx: 9, peak: -15, delay: 0.4 },
+              ].map((drop, idx) => (
+                <motion.span
+                  key={`drop-${idx}`}
+                  animate={{
+                    y: [2, drop.peak, 5],
+                    x: [0, drop.dx * 0.6, drop.dx],
+                    opacity: [0, 0.95, 0],
+                    scale: [0.6, 1.15, 0.5],
+                  }}
+                  transition={{
+                    duration: 1.15,
+                    delay: drop.delay,
+                    repeat: Infinity,
+                    ease: 'easeOut',
+                  }}
+                  className="absolute left-1/2 top-1/2 w-1.5 h-1.5 rounded-full bg-white/95 shadow-[0_0_6px_rgba(224,242,254,0.95)]"
+                />
+              ))}
+            </div>
+
+            {/* Foreground pond gentle sunlight water sparkles */}
+            {[
+              { left: '47%', top: '76%', delay: 0.2 },
+              { left: '54%', top: '81%', delay: 1.1 },
+              { left: '72%', top: '74%', delay: 0.6 },
+              { left: '77%', top: '79%', delay: 1.9 },
+            ].map((sparkle, idx) => (
+              <motion.span
+                key={`pond-glint-${idx}`}
+                animate={{ opacity: [0.1, 0.75, 0.1], scaleX: [0.8, 1.35, 0.8] }}
+                transition={{ duration: 2.8, delay: sparkle.delay, repeat: Infinity, ease: 'easeInOut' }}
+                style={{ left: sparkle.left, top: sparkle.top }}
+                className="absolute w-5 h-[2px] rounded-full bg-sky-100/80 blur-[0.5px]"
+              />
+            ))}
+
+            {/* 9. Realistic swimming swans & ducks moving smoothly across the pond */}
+            {[
+              { left: '53%', top: '76%', rx: 22, ry: 7, dur: 9.2, isSwan: true },
+              { left: '71%', top: '78%', rx: -20, ry: -6, dur: 10.6, isSwan: true },
+              { left: '56%', top: '82%', rx: 18, ry: -5, dur: 8.0, isSwan: false },
+              { left: '67%', top: '72%', rx: -16, ry: 5, dur: 9.8, isSwan: false },
+            ].map((bird, idx) => (
+              <motion.div
+                key={`waterfowl-${idx}`}
+                animate={{
+                  x: [0, bird.rx, bird.rx * 0.5, -bird.rx * 0.4, 0],
+                  y: [0, bird.ry, -bird.ry * 0.6, bird.ry * 0.4, 0],
+                  rotate: [-2, 2, -1.5, 1.5, -2],
+                }}
+                transition={{
+                  duration: bird.dur,
+                  delay: idx * 0.75,
+                  repeat: Infinity,
+                  ease: 'easeInOut',
+                }}
+                style={{ left: bird.left, top: bird.top }}
+                className="absolute -translate-x-1/2 -translate-y-1/2"
+              >
+                <motion.span
+                  animate={{ scale: [0.85, 1.25, 0.85], opacity: [0.55, 0.18, 0.55] }}
+                  transition={{ duration: 2.2, delay: idx * 0.4, repeat: Infinity, ease: 'easeInOut' }}
+                  className="absolute -bottom-0.5 left-1/2 -translate-x-1/2 w-5 h-1.5 rounded-full border border-sky-100/65"
+                />
+                {bird.isSwan ? (
+                  <svg viewBox="0 0 20 16" className="w-4 h-3.5 drop-shadow-[0_2px_3px_rgba(12,35,48,0.45)]">
+                    <path
+                      d="M4 11 C4 8, 9 8, 12 10 C13 7, 13 4, 15 3 C16.5 2.5, 17.5 3.5, 16.5 4.8 C15 5, 14.5 8, 15 11 C15 13, 6 13.5, 4 11 Z"
+                      fill="#ffffff"
+                    />
+                    <path d="M16.5 4 L18.5 4.6 L16.4 5.2 Z" fill="#f59e0b" />
+                  </svg>
+                ) : (
+                  <svg viewBox="0 0 18 14" className="w-3.5 h-3 drop-shadow-[0_2px_3px_rgba(12,35,48,0.45)]">
+                    <ellipse cx="8" cy="9" rx="5" ry="3" fill="#785032" />
+                    <circle cx="13" cy="5.5" r="2.2" fill="#065f46" />
+                    <path d="M14.8 5.4 L17 6 L14.8 6.4 Z" fill="#f59e0b" />
+                  </svg>
+                )}
+              </motion.div>
+            ))}
+          </>
+        )}
+
+        {/* Active Auto-Harvest Drone patrolling smoothly above solar coops & crops */}
+        {droneActive && !prefersReducedMotion && (
+          <motion.div
+            animate={{
+              x: [-58, 56, 42, -46, -58],
+              y: [-10, -24, 6, -4, -10],
+            }}
+            transition={{
+              duration: 11,
+              repeat: Infinity,
+              ease: 'easeInOut',
+            }}
+            style={{ left: '50%', top: '38%' }}
+            className="absolute -translate-x-1/2 -translate-y-1/2 flex flex-col items-center"
+          >
+            <div className="w-8 h-8 rounded-full bg-sky-500/20 border border-sky-300/70 backdrop-blur-sm flex items-center justify-center shadow-[0_6px_14px_rgba(14,165,233,0.45)]">
+              <Bot className="w-4 h-4 text-sky-100" />
+            </div>
+            <span className="mt-1.5 w-6 h-1.5 rounded-full bg-stone-950/35 blur-[2px]" />
+          </motion.div>
+        )}
+      </motion.div>
+
+      {/* Dedicated Subtle Golden-Hour Atmospheric Layer: slow-drifting pollen & warm light dust */}
+      <div
+        data-layer="golden-hour-atmosphere"
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 z-[5] overflow-hidden"
+      >
+        <div
+          className={`absolute inset-0 transition-opacity duration-700 ${
+            boosterActive
+              ? 'bg-[radial-gradient(ellipse_at_25%_20%,rgba(110,231,183,0.14),transparent_60%)]'
+              : 'bg-[radial-gradient(ellipse_at_22%_18%,rgba(253,224,71,0.14),transparent_62%),radial-gradient(ellipse_at_80%_72%,rgba(251,146,60,0.08),transparent_55%)]'
+          }`}
+        />
+        {!prefersReducedMotion &&
+          ATMOSPHERIC_DUST_PARTICLES.map((particle, idx) => {
+            const toneClass = boosterActive
+              ? 'bg-emerald-200/80 shadow-[0_0_8px_rgba(52,211,153,0.75)]'
+              : particle.tone === 'amber'
+                ? 'bg-amber-200/80 shadow-[0_0_8px_rgba(251,191,36,0.7)]'
+                : particle.tone === 'gold'
+                  ? 'bg-yellow-100/75 shadow-[0_0_7px_rgba(254,240,138,0.65)]'
+                  : 'bg-amber-50/70 shadow-[0_0_6px_rgba(255,251,235,0.6)]';
+
+            return (
+              <motion.span
+                key={`atmo-dust-${idx}`}
+                initial={{ opacity: 0, x: 0, y: 0, scale: 0.7 }}
+                animate={{
+                  opacity: [0, 0.55, 0.35, 0.62, 0],
+                  x: [0, particle.dx * 0.45, particle.dx * 0.85, particle.dx],
+                  y: [0, particle.dy * 0.35, particle.dy * 0.72, particle.dy],
+                  scale: [0.7, 1.05, 0.9, 1.1, 0.75],
+                }}
+                transition={{
+                  duration: particle.duration,
+                  delay: particle.delay,
+                  repeat: Infinity,
+                  ease: 'easeInOut',
+                }}
+                style={{
+                  left: particle.left,
+                  top: particle.top,
+                  width: `${particle.size}px`,
+                  height: `${particle.size}px`,
+                }}
+                className={`absolute rounded-full will-change-transform ${toneClass}`}
+              />
+            );
+          })}
       </div>
 
-      {/* 2x Laying Feed Active Booster Aura */}
+      {/* 2x Laying Feed & 3x Coop Fever Active Booster Auras */}
       {boosterActive && (
         <div
           aria-hidden="true"
           className="animate-booster-aura pointer-events-none absolute inset-0 z-[15] lg:rounded-[2rem] ring-4 ring-inset ring-emerald-400/55 shadow-[inset_0_0_32px_rgba(16,185,129,0.28)]"
         />
       )}
+      {feverActive && (
+        <div
+          aria-hidden="true"
+          className="animate-booster-aura pointer-events-none absolute inset-0 z-[15] lg:rounded-[2rem] ring-4 ring-inset ring-amber-400/75 shadow-[inset_0_0_44px_rgba(245,158,11,0.42)]"
+        />
+      )}
 
       {/* Top sky & bottom earth scrims for natural outdoor readability */}
-      <div className="absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-stone-950/45 via-stone-950/15 to-transparent pointer-events-none" />
+      <div className="absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-stone-950/50 via-stone-950/20 to-transparent pointer-events-none" />
       <div className="absolute inset-x-0 bottom-0 h-52 bg-gradient-to-t from-stone-950/80 via-stone-950/35 to-transparent pointer-events-none" />
 
       {/* Top Mining HUD: 2x Feed Booster + Golden Egg Alert + GRAM Payout Status */}
       {!activeMilestone && (
-        <div className="absolute top-3 inset-x-3 z-20 flex items-center justify-between gap-2 pointer-events-none">
-          {totalChickens <= 0 ? (
-            <div className="pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/70 backdrop-blur-md border border-white/15 px-3 py-2 text-[11px] font-extrabold text-stone-100 inline-flex items-center gap-1.5 shadow-lg">
-              <EggIcon className="w-3.5 h-3.5 opacity-75 shrink-0" />
-              <span>Mining Idle · 0 Hens</span>
-            </div>
-          ) : boosterActive ? (
-            <div className="clay-btn-emerald pointer-events-auto min-h-[44px] px-3 py-2 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg">
-              <Zap className="w-3.5 h-3.5 fill-current shrink-0" />
-              <span className="font-mono-num">2× Feed · {formatCountdownMs(boostRemainingMs)}</span>
-            </div>
-          ) : onActivateBooster ? (
-            <button
-              type="button"
-              onClick={onActivateBooster}
-              aria-label={`Activate 2x Laying Feed booster for ${FEED_BOOSTER_COST_COINS} coins`}
-              className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/75 hover:bg-stone-900/85 backdrop-blur-md border border-amber-300/35 px-3 py-2 text-[11px] font-extrabold text-amber-100 inline-flex items-center gap-1.5 shadow-lg"
-            >
-              <Zap className="w-3.5 h-3.5 text-amber-400 fill-amber-400 shrink-0" />
-              <span>2× Boost ({FEED_BOOSTER_COST_COINS})</span>
-            </button>
-          ) : (
-            <span />
-          )}
-
-          <div className="flex items-center gap-1.5">
-            {totalChickens > 0 && goldenReady && onGoldenEggDrop && (
-              <div className="animate-clay-badge clay-btn-amber pointer-events-none min-h-[44px] px-2.5 py-2 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1 shadow-lg">
-                <Sparkles className="w-3.5 h-3.5 shrink-0" />
-                <span className="hidden sm:inline">Tap Hen Gold!</span>
-                <span className="sm:hidden">Gold!</span>
+        <div className="absolute top-3 inset-x-3 z-20 flex flex-col gap-1.5 pointer-events-none">
+          <div className="flex items-center justify-between gap-2">
+            {totalChickens <= 0 ? (
+              <div className="pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/70 backdrop-blur-md border border-white/15 px-3 py-2 text-[11px] font-extrabold text-stone-100 inline-flex items-center gap-1.5 shadow-lg">
+                <EggIcon className="w-3.5 h-3.5 opacity-75 shrink-0" />
+                <span>Mining Idle · 0 Hens</span>
               </div>
-            )}
-            {onOpenWithdraw && (
+            ) : boosterActive ? (
+              <div className="clay-btn-emerald pointer-events-auto min-h-[44px] px-3 py-2 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg">
+                <Zap className="w-3.5 h-3.5 fill-current shrink-0" />
+                <span className="font-mono-num">2× Feed · {formatCountdownMs(boostRemainingMs)}</span>
+              </div>
+            ) : onActivateBooster ? (
               <button
                 type="button"
-                onClick={onOpenWithdraw}
-                aria-label="Open GRAM Token withdrawal and payout status"
-                className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/75 hover:bg-stone-900/85 backdrop-blur-md border border-emerald-400/35 px-3 py-2 text-[11px] font-extrabold text-white inline-flex items-center gap-1.5 shadow-lg"
+                onClick={onActivateBooster}
+                aria-label={`Activate 2x Laying Feed booster for ${FEED_BOOSTER_COST_COINS} coins`}
+                className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/75 hover:bg-stone-900/85 backdrop-blur-md border border-amber-300/35 px-3 py-2 text-[11px] font-extrabold text-amber-100 inline-flex items-center gap-1.5 shadow-lg"
               >
-                <span
-                  aria-hidden="true"
-                  className={`w-2 h-2 rounded-full shrink-0 ${
-                    adGate.unlocked ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+                <Zap className="w-3.5 h-3.5 text-amber-400 fill-amber-400 shrink-0" />
+                <span>2× Boost ({FEED_BOOSTER_COST_COINS})</span>
+              </button>
+            ) : (
+              <span />
+            )}
+
+            <div className="flex items-center gap-1.5">
+              {totalChickens > 0 && goldenReady && onGoldenEggDrop && (
+                <div className="animate-clay-badge clay-btn-amber pointer-events-none min-h-[44px] px-2.5 py-2 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1 shadow-lg">
+                  <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                  <span className="hidden sm:inline">Tap Hen Gold!</span>
+                  <span className="sm:hidden">Gold!</span>
+                </div>
+              )}
+              {onOpenWithdraw && (
+                <button
+                  type="button"
+                  onClick={onOpenWithdraw}
+                  aria-label="Open GRAM Token withdrawal and payout status"
+                  className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/75 hover:bg-stone-900/85 backdrop-blur-md border border-emerald-400/35 px-3 py-2 text-[11px] font-extrabold text-white inline-flex items-center gap-1.5 shadow-lg"
+                >
+                  <span
+                    aria-hidden="true"
+                    className={`w-2 h-2 rounded-full shrink-0 ${
+                      adGate.unlocked ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+                    }`}
+                  />
+                  <span>Withdraw</span>
+                  <span className="font-mono-num text-[10px] px-1.5 py-0.5 rounded-md bg-white/10 text-emerald-300">
+                    {adGate.unlocked ? 'Ready' : `${adGate.watched}/${adGate.required}`}
+                  </span>
+                  <ArrowUpRight className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Row 2: Coop Fever 3x Rush (inside Farm section) + Auto-Harvest Drone Chip */}
+          <div className="flex items-center justify-between gap-2">
+            {feverActive ? (
+              <div className="pointer-events-auto min-h-[40px] px-3 py-1.5 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 text-amber-950 border border-amber-200/70 text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg">
+                <Flame className="w-3.5 h-3.5 fill-current shrink-0" />
+                <span className="font-mono-num">
+                  {COOP_FEVER_MULTIPLIER}× Fever · {formatCountdownMs(feverRemainingMs)}
+                </span>
+              </div>
+            ) : onActivateCoopFever ? (
+              <button
+                type="button"
+                onClick={onActivateCoopFever}
+                aria-label={
+                  feverProgress.ready
+                    ? `Activate ${COOP_FEVER_MULTIPLIER}x Coop Fever Rush`
+                    : `Coop Fever ${COOP_FEVER_MULTIPLIER}x Rush progress: ${feverProgress.adsCollected} of ${COOP_FEVER_REQUIRED_ADS} ads`
+                }
+                className={`clay-btn pointer-events-auto min-h-[40px] px-3 py-1.5 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg ${
+                  feverProgress.ready
+                    ? 'bg-gradient-to-r from-amber-400 via-orange-400 to-amber-300 text-amber-950 border border-amber-200 animate-pulse'
+                    : 'bg-stone-950/72 hover:bg-stone-900/85 backdrop-blur-md border border-orange-400/35 text-amber-100'
+                }`}
+              >
+                <Flame
+                  className={`w-3.5 h-3.5 shrink-0 ${
+                    feverProgress.ready ? 'text-orange-700 fill-orange-700' : 'text-orange-400'
                   }`}
                 />
-                <span>Withdraw</span>
-                <span className="font-mono-num text-[10px] px-1.5 py-0.5 rounded-md bg-white/10 text-emerald-300">
-                  {adGate.unlocked ? 'Ready' : `${adGate.watched}/${adGate.required}`}
-                </span>
-                <ArrowUpRight className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
+                {feverProgress.ready ? (
+                  <span>Activate {COOP_FEVER_MULTIPLIER}× Fever!</span>
+                ) : (
+                  <span className="font-mono-num tabular-nums">
+                    {COOP_FEVER_MULTIPLIER}× Fever · {feverProgress.adsCollected}/{COOP_FEVER_REQUIRED_ADS} Ads
+                  </span>
+                )}
               </button>
+            ) : (
+              <span />
             )}
+
+            <button
+              type="button"
+              onClick={onOpenYourFarm}
+              aria-label="Open Farm Manager & Auto-Harvest Drone controls"
+              className={`clay-btn pointer-events-auto min-h-[40px] px-2.5 py-1.5 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg ${
+                droneActive
+                  ? 'bg-sky-950/80 backdrop-blur-md border border-sky-400/45 text-sky-200'
+                  : 'bg-stone-950/65 hover:bg-stone-900/80 backdrop-blur-md border border-white/15 text-stone-200'
+              }`}
+            >
+              <Bot className={`w-3.5 h-3.5 shrink-0 ${droneActive ? 'text-sky-400' : 'text-stone-400'}`} />
+              <span className="font-mono-num tabular-nums">
+                {droneActive
+                  ? `Drone ${droneRemainingMs >= 3_600_000 ? `${Math.ceil(droneRemainingMs / 3_600_000)}h` : formatCountdownMs(droneRemainingMs)}`
+                  : 'Auto-Drone'}
+              </span>
+            </button>
           </div>
         </div>
       )}
@@ -503,7 +1120,7 @@ export function FarmMeadow({
         {roamingHens.map((hen, idx) => {
           const isPopping = poppedHen?.id === hen.id;
           const isGoldenTarget = goldenReady && Boolean(onGoldenEggDrop) && idx === 0;
-          const depthScale = Number((0.86 + ((hen.y - 46) / 25) * 0.28).toFixed(3));
+          const depthScale = Number((0.68 + ((hen.y - 40) / 26) * 0.24).toFixed(3));
           return (
             <button
               key={hen.id}
@@ -613,6 +1230,71 @@ export function FarmMeadow({
             </button>
           );
         })}
+      </div>
+
+      {/* Motion Particle Bursts on Egg Collection & Chicken Purchases */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 z-[25] overflow-hidden"
+      >
+        <AnimatePresence>
+          {chickenPurchaseBanner && (
+            <motion.div
+              key={`hen-banner-${chickenPurchaseBanner.seq}`}
+              initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 12, scale: 0.85 }}
+              animate={prefersReducedMotion ? { opacity: 1 } : { opacity: [0, 1, 1, 0], y: -38, scale: [0.85, 1.08, 1] }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 1.3, ease: [0.16, 1, 0.3, 1] }}
+              className="absolute left-1/2 top-[48%] -translate-x-1/2 rounded-full bg-gradient-to-r from-amber-400 to-emerald-400 text-stone-950 border border-white/80 px-3.5 py-1 text-xs font-extrabold shadow-xl whitespace-nowrap flex items-center gap-1.5"
+            >
+              <Sparkles className="w-3.5 h-3.5 shrink-0" />
+              <span>+{chickenPurchaseBanner.addedCount} {chickenPurchaseBanner.addedCount === 1 ? 'Hen' : 'Hens'} Joined Coop!</span>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {meadowParticles.map((p) => (
+            <motion.div
+              key={p.id}
+              initial={{
+                opacity: 0,
+                x: 0,
+                y: 0,
+                scale: 0.35,
+                rotate: 0,
+              }}
+              animate={{
+                opacity: [0, 1, 1, 0],
+                x: p.dx,
+                y: p.dy,
+                scale: [0.35, p.scale * 1.15, p.scale * 0.65],
+                rotate: p.rotateDeg,
+              }}
+              exit={{ opacity: 0 }}
+              transition={{
+                duration: p.duration,
+                delay: p.delay,
+                ease: [0.16, 1, 0.3, 1],
+              }}
+              style={{
+                left: `${p.originXPercent}%`,
+                top: `${p.originYPercent}%`,
+              }}
+              className="absolute -translate-x-1/2 -translate-y-1/2 will-change-transform drop-shadow-[0_3px_8px_rgba(245,158,11,0.55)]"
+            >
+              {p.glyph === 'egg' ? (
+                <EggIcon className="w-5 h-5" />
+              ) : p.glyph === 'coin' ? (
+                <CoinIcon className="w-5 h-5" />
+              ) : p.glyph === 'feather' ? (
+                <Feather className="w-5 h-5 text-amber-200 fill-amber-100/80" />
+              ) : (
+                <Star className="w-4 h-4 text-amber-300 fill-amber-300" />
+              )}
+            </motion.div>
+          ))}
+        </AnimatePresence>
       </div>
 
       {/* Bottom GRAM Mining Telemetry + Action Dock (floats cleanly above mobile BottomNav) */}

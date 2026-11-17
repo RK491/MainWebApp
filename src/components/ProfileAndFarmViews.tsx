@@ -5,6 +5,7 @@ import {
   ArrowUpRight,
   Award,
   Bell,
+  Bot,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -14,6 +15,7 @@ import {
   HelpCircle,
   Moon,
   Music,
+  Send,
   ShieldCheck,
   Sparkles,
   Sun,
@@ -22,6 +24,7 @@ import {
   Zap,
 } from 'lucide-react';
 import {
+  AUTO_HARVEST_DRONE_TIERS,
   BASKET_TIERS,
   calculateLevelYieldMultiplier,
   calculateProductionRate,
@@ -34,11 +37,17 @@ import {
   getWithdrawAdGateStatus,
   getXpForLevel,
   isAdminPlayerId,
+  isAutoHarvestDroneActive,
   isFeedBoosterActive,
   PRIMARY_ADMIN_TELEGRAM_ID,
 } from '../game/economy';
 import { getPrimaryDepositMemo } from '../game/tonGram';
-import type { LanguageCode, UserFarmProfile } from '../types/farm';
+import type {
+  AutoHarvestCurrency,
+  AutoHarvestDurationId,
+  LanguageCode,
+  UserFarmProfile,
+} from '../types/farm';
 import { LANGUAGE_OPTIONS, t } from '../utils/i18n';
 import type { BrowserNotificationPermission } from '../utils/notifications';
 import type { ThemeMode } from '../utils/theme';
@@ -362,12 +371,18 @@ interface YourFarmViewProps {
   pendingEggs: number;
   notificationsEnabled: boolean;
   notificationPermission: BrowserNotificationPermission;
+  telegramRemindersEnabled?: boolean;
   onBack: () => void;
   onUpgradeBasket: () => void;
   onGoPacks: () => void;
   onOpenWithdraw?: () => void;
   onToggleNotifications: () => void;
+  onToggleTelegramReminders?: () => void;
   onActivateBooster?: () => void;
+  onPurchaseAutoHarvestDrone?: (
+    durationId: AutoHarvestDurationId,
+    currency: AutoHarvestCurrency,
+  ) => void;
 }
 
 export function YourFarmView({
@@ -375,17 +390,21 @@ export function YourFarmView({
   pendingEggs,
   notificationsEnabled,
   notificationPermission,
+  telegramRemindersEnabled = true,
   onBack,
   onUpgradeBasket,
   onGoPacks,
   onOpenWithdraw,
   onToggleNotifications,
+  onToggleTelegramReminders,
   onActivateBooster,
+  onPurchaseAutoHarvestDrone,
 }: YourFarmViewProps) {
   const prefersReducedMotion = useReducedMotion();
   const [liveNowMs, setLiveNowMs] = useState(() => Date.now());
   const prevCapacityRef = useRef(profile.basketCapacity);
   const [justUpgraded, setJustUpgraded] = useState(false);
+  const [droneCurrency, setDroneCurrency] = useState<AutoHarvestCurrency>('coins');
 
   useEffect(() => {
     const id = window.setInterval(() => setLiveNowMs(Date.now()), 1000);
@@ -514,6 +533,98 @@ export function YourFarmView({
           </div>
         </div>
       )}
+
+      {/* Auto-Harvest Drone / Farm Manager Pass */}
+      {onPurchaseAutoHarvestDrone && (() => {
+        const droneActive = isAutoHarvestDroneActive(profile, liveNowMs);
+        const droneLeftMs = Math.max(0, Number(profile.autoHarvestUntilMs ?? 0) - liveNowMs);
+        const hrsLeft = Math.floor(droneLeftMs / 3_600_000);
+        const minLeft = Math.floor((droneLeftMs % 3_600_000) / 60_000);
+        return (
+          <div className="clay-card p-4 space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-11 h-11 rounded-2xl clay-icon-well-sky flex items-center justify-center text-sky-600 dark:text-sky-400 shrink-0">
+                  <Bot className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
+                    Auto-Harvest Drone Pass
+                  </div>
+                  <div className="text-xs text-stone-500 dark:text-stone-400">
+                    {droneActive
+                      ? `Active · ${hrsLeft}h ${minLeft}m left · Collects eggs automatically`
+                      : 'Automatically collects full baskets using Coins or Eggs'}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="clay-inset !rounded-xl grid grid-cols-2 gap-1 p-1">
+              {(
+                [
+                  { id: 'coins', label: 'Pay with Coins' },
+                  { id: 'eggs', label: 'Pay with Eggs' },
+                ] as const
+              ).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setDroneCurrency(opt.id)}
+                  className={`clay-btn min-h-[38px] rounded-lg text-xs font-extrabold flex items-center justify-center gap-1.5 ${
+                    droneCurrency === opt.id
+                      ? 'clay-btn-amber'
+                      : 'text-stone-600 dark:text-stone-300'
+                  }`}
+                >
+                  {opt.id === 'coins' ? <CoinIcon className="w-3.5 h-3.5" /> : <EggIcon className="w-3.5 h-3.5" />}
+                  <span>{opt.label}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {AUTO_HARVEST_DRONE_TIERS.map((tier) => {
+                const cost = droneCurrency === 'eggs' ? tier.eggCost : tier.coinCost;
+                const available = droneCurrency === 'eggs' ? profile.eggs : profile.coins;
+                const canAfford = available >= cost;
+                return (
+                  <button
+                    key={tier.id}
+                    type="button"
+                    disabled={!canAfford}
+                    onClick={() => onPurchaseAutoHarvestDrone(tier.id, droneCurrency)}
+                    className={`clay-btn rounded-2xl p-2.5 text-left flex flex-col justify-between gap-1 border disabled:opacity-55 ${
+                      canAfford
+                        ? 'clay-btn-neutral hover:border-sky-400/60 border-transparent'
+                        : 'clay-btn-neutral border-transparent'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-xs font-extrabold text-stone-900 dark:text-stone-100">
+                        {tier.label}
+                      </span>
+                      {tier.badge && (
+                        <span className="text-[10px] font-extrabold text-sky-700 dark:text-sky-300">
+                          {tier.badge}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1 text-xs font-mono-num tabular-nums font-extrabold text-amber-700 dark:text-amber-300">
+                      {droneCurrency === 'coins' ? (
+                        <CoinIcon className="w-3.5 h-3.5 shrink-0" />
+                      ) : (
+                        <EggIcon className="w-3.5 h-3.5 shrink-0" />
+                      )}
+                      <span>{cost.toLocaleString()}</span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* GRAM Token Mining Output & Payout Telemetry */}
       {(() => {
@@ -780,6 +891,40 @@ export function YourFarmView({
               />
             </button>
           </div>
+
+          {onToggleTelegramReminders && (
+            <div className="clay-inset px-3.5 py-3 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-xl clay-icon-well-sky text-sky-700 dark:text-sky-300 flex items-center justify-center shrink-0">
+                  <Send className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-extrabold text-stone-900 dark:text-stone-100">
+                    Telegram Bot Push Reminders
+                  </div>
+                  <div className="text-[11px] text-stone-500 dark:text-stone-400 truncate">
+                    Alerts for basket full, 2× feed, 3× fever &amp; drone expiry
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={telegramRemindersEnabled}
+                aria-label="Toggle Telegram bot push reminders"
+                onClick={onToggleTelegramReminders}
+                className={`w-12 h-7 rounded-full p-1 transition-colors shrink-0 cursor-pointer ${
+                  telegramRemindersEnabled ? 'bg-emerald-500' : 'bg-stone-300 dark:bg-stone-700'
+                }`}
+              >
+                <span
+                  className={`block w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                    telegramRemindersEnabled ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -792,11 +937,13 @@ interface SettingsModalProps {
   soundsEnabled: boolean;
   notificationsEnabled: boolean;
   notificationPermission: BrowserNotificationPermission;
+  telegramRemindersEnabled?: boolean;
   themeMode: ThemeMode;
   onChangeLanguage: (lang: LanguageCode) => void;
   onToggleMusic: () => void;
   onToggleSounds: () => void;
   onToggleNotifications: () => void;
+  onToggleTelegramReminders?: () => void;
   onToggleTheme: () => void;
   onClose: () => void;
 }
@@ -807,11 +954,13 @@ export function SettingsModal({
   soundsEnabled,
   notificationsEnabled,
   notificationPermission,
+  telegramRemindersEnabled = true,
   themeMode,
   onChangeLanguage,
   onToggleMusic,
   onToggleSounds,
   onToggleNotifications,
+  onToggleTelegramReminders,
   onToggleTheme,
   onClose,
 }: SettingsModalProps) {
@@ -971,6 +1120,36 @@ export function SettingsModal({
               />
             </button>
           </div>
+
+          {onToggleTelegramReminders && (
+            <div className="px-4 py-3 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2.5 text-sm font-bold text-stone-800 dark:text-stone-100">
+                  <Send className="w-4 h-4 text-sky-600 dark:text-sky-400 shrink-0" />
+                  <span>Telegram Push Reminders</span>
+                </div>
+                <div className="text-[11px] text-stone-500 dark:text-stone-400 pl-6">
+                  Basket full &amp; boost expiry bot DMs
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={telegramRemindersEnabled}
+                aria-label="Toggle Telegram bot reminders"
+                onClick={onToggleTelegramReminders}
+                className={`w-12 h-7 rounded-full p-1 transition-colors shrink-0 cursor-pointer ${
+                  telegramRemindersEnabled ? 'bg-emerald-500' : 'bg-stone-300 dark:bg-stone-700'
+                }`}
+              >
+                <span
+                  className={`block w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                    telegramRemindersEnabled ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+          )}
         </div>
 
         <PWAInstallButton />

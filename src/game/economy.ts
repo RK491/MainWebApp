@@ -2721,6 +2721,37 @@ export function buildEarningsChartSeries(
   return orderedKeys.map((k) => buckets.get(k)!);
 }
 
+export const SEASON_TOP10_PRIZE_WEIGHTS = [
+  0.25,
+  0.18,
+  0.14,
+  0.10,
+  0.08,
+  0.07,
+  0.06,
+  0.05,
+  0.04,
+  0.03,
+] as const;
+
+export function formatSeasonCountdown(endsAtMs: number, nowMs = Date.now()): string {
+  const diffMs = Math.max(0, Math.floor(endsAtMs - nowMs));
+  if (diffMs <= 0) {
+    return 'Ended';
+  }
+  const totalMinutes = Math.ceil(diffMs / 60_000);
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+  const mins = totalMinutes % 60;
+  if (days > 0) {
+    return `${days}d ${hours}h left`;
+  }
+  if (hours > 0) {
+    return `${hours}h ${mins}m left`;
+  }
+  return `${Math.max(1, mins)}m left`;
+}
+
 export function createDefaultSeasonConfig(nowMs = Date.now()): SeasonConfig {
   return {
     seasonNumber: 1,

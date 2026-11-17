@@ -263,6 +263,12 @@ function toFirestoreProfilePayload(profile: UserFarmProfile, isCreate: boolean) 
     claimedAchievementIds: encodeAchievementsWithAds(
       profile.claimedAchievementIds ?? [],
       cumulativeAds,
+      {
+        coopFeverUntilMs: profile.coopFeverUntilMs,
+        coopFeverBaselineAds: profile.coopFeverBaselineAds,
+        autoHarvestUntilMs: profile.autoHarvestUntilMs,
+        telegramRemindersEnabled: profile.telegramRemindersEnabled,
+      },
     ),
     claimedReferralMilestones: (profile.claimedReferralMilestones ?? []).slice(0, 20),
     updatedAt: serverTimestamp(),
@@ -295,7 +301,14 @@ function toLeaderboardPayload(profile: UserFarmProfile) {
 }
 
 function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFarmProfile {
-  const { claimedAchievementIds, totalAdsWatched } = decodeAchievementsAndAds(
+  const {
+    claimedAchievementIds,
+    totalAdsWatched,
+    coopFeverUntilMs,
+    coopFeverBaselineAds,
+    autoHarvestUntilMs,
+    telegramRemindersEnabled,
+  } = decodeAchievementsAndAds(
     d.claimedAchievementIds,
     d.totalAdsWatched,
     d.watchedAdsCount,
@@ -326,6 +339,10 @@ function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFa
     claimedPromoCodes: Array.isArray(d.claimedPromoCodes) ? (d.claimedPromoCodes as string[]) : [],
     watchedAdsCount: Number(d.watchedAdsCount ?? 0),
     totalAdsWatched,
+    coopFeverUntilMs,
+    coopFeverBaselineAds,
+    autoHarvestUntilMs,
+    telegramRemindersEnabled,
     referralCode: String(d.referralCode ?? `CL-${fallbackId.slice(-6).toUpperCase()}`),
     referredBy: String(d.referredBy ?? ''),
     referralActivated: Boolean(d.referralActivated),
@@ -1264,6 +1281,7 @@ export function subscribeToLeaderboard(
 ): () => void {
   let buyerEntries: LeaderboardEntry[] = [];
   let inviterEntries: LeaderboardEntry[] = [];
+  let minerEntries: LeaderboardEntry[] = [];
 
   const emitMerged = () => {
     const merged = new Map<string, LeaderboardEntry>();
@@ -1273,6 +1291,12 @@ export function subscribeToLeaderboard(
     for (const entry of inviterEntries) {
       const existing = merged.get(entry.uid);
       if (!existing || entry.inviterCount > existing.inviterCount) {
+        merged.set(entry.uid, entry);
+      }
+    }
+    for (const entry of minerEntries) {
+      const existing = merged.get(entry.uid);
+      if (!existing || (entry.totalEggsCollected ?? entry.eggs) > (existing.totalEggsCollected ?? existing.eggs)) {
         merged.set(entry.uid, entry);
       }
     }
@@ -1287,6 +1311,11 @@ export function subscribeToLeaderboard(
   const inviterQuery = query(
     collection(db, 'leaderboard'),
     orderBy('inviterCount', 'desc'),
+    limit(50),
+  );
+  const minerQuery = query(
+    collection(db, 'leaderboard'),
+    orderBy('eggs', 'desc'),
     limit(50),
   );
 
@@ -1308,9 +1337,19 @@ export function subscribeToLeaderboard(
     (err) => logSubscriptionError('leaderboard(inviters)', err),
   );
 
+  const unsubMiners = onSnapshot(
+    minerQuery,
+    (snap) => {
+      minerEntries = snap.docs.map(parseLeaderboardEntryDoc);
+      emitMerged();
+    },
+    (err) => logSubscriptionError('leaderboard(miners)', err),
+  );
+
   return () => {
     unsubBuyers();
     unsubInviters();
+    unsubMiners();
   };
 }
 
@@ -1676,6 +1715,186 @@ export async function createPaidCustomTaskInFirestore(params: {
     });
 
     return result;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `tasks/${taskId}`);
+  }
+}
+
+export async function topUpPaidCustomTaskInFirestore(params: {
+  profile: UserFarmProfile;
+  taskId: string;
+  addedSlots: number;
+  addedPaidCoins: number;
+  transaction: TransactionEntry;
+}): Promise<{ task: TaskDefinition; profile: UserFarmProfile } | { error: string }> {
+  const uid = params.profile.uid;
+  const { taskId } = params;
+  const addedPaidCoins = Math.max(0, Math.round(params.addedPaidCoins));
+  const addedSlots = Math.max(1, Math.round(params.addedSlots));
+  const txId = params.transaction.id.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+  const playerRef = doc(db, 'players', uid);
+  const lbRef = doc(db, 'leaderboard', uid);
+  const taskRef = doc(db, 'tasks', taskId);
+  const txRef = doc(db, 'players', uid, 'transactions', txId);
+
+  try {
+    return await runTransaction(db, async (tx) => {
+      const [playerSnap, taskSnap] = await Promise.all([tx.get(playerRef), tx.get(taskRef)]);
+      if (!playerSnap.exists()) {
+        return { error: 'Player profile not synced yet.' } as const;
+      }
+      if (!taskSnap.exists()) {
+        return { error: 'Campaign task no longer exists.' } as const;
+      }
+
+      const d = taskSnap.data();
+      const parsed = parseCustomTaskDoc(taskSnap.id, d);
+      if (parsed.creatorUid !== uid) {
+        return { error: 'Only the campaign owner can top up this task.' } as const;
+      }
+
+      const liveCoins = Number(playerSnap.data().coins ?? 0);
+      if (liveCoins < addedPaidCoins) {
+        return {
+          error: `Need ${addedPaidCoins.toLocaleString()} coins to top up (you have ${liveCoins.toLocaleString()}).`,
+        } as const;
+      }
+
+      const nextTotalSlots = Math.min(1_000_000, Math.max(0, (parsed.totalSlots ?? 0) + addedSlots));
+      const nextPaidCoins = Math.max(0, (parsed.paidCoins ?? 0) + addedPaidCoins);
+      const nextClaimed = Math.max(0, Math.floor(Number(parsed.claimedCount ?? 0)));
+
+      const encodedSubtitle = encodeTaskSubtitleMeta({
+        subtitle: parsed.subtitle,
+        totalSlots: nextTotalSlots,
+        claimedCount: nextClaimed,
+        creatorUid: uid,
+        paidCoins: nextPaidCoins,
+      });
+
+      const syncedProfile: UserFarmProfile = {
+        ...params.profile,
+        coins: liveCoins - addedPaidCoins,
+      };
+
+      tx.update(playerRef, toFirestoreProfilePayload(syncedProfile, false));
+      tx.set(lbRef, toLeaderboardPayload(syncedProfile));
+      tx.set(txRef, {
+        userId: uid,
+        type: params.transaction.type,
+        title: params.transaction.title.slice(0, 80),
+        amount: params.transaction.amount,
+        currency: params.transaction.currency,
+        usdValue: params.transaction.usdValue,
+        status: params.transaction.status,
+        createdAtMs: params.transaction.createdAtMs,
+        createdAt: serverTimestamp(),
+      });
+      tx.update(taskRef, {
+        isActive: true,
+        ...(encodedSubtitle ? { subtitle: encodedSubtitle } : {}),
+        ...(d.totalSlots !== undefined ? { totalSlots: nextTotalSlots } : {}),
+      });
+
+      return {
+        task: {
+          ...parsed,
+          totalSlots: nextTotalSlots,
+          paidCoins: nextPaidCoins,
+          isActive: true,
+        },
+        profile: syncedProfile,
+      } as const;
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `tasks/${taskId}`);
+  }
+}
+
+export async function refundPaidCustomTaskInFirestore(params: {
+  profile: UserFarmProfile;
+  taskId: string;
+  transaction: TransactionEntry;
+}): Promise<{ task: TaskDefinition; profile: UserFarmProfile; refundCoins: number } | { error: string }> {
+  const uid = params.profile.uid;
+  const { taskId } = params;
+  const txId = params.transaction.id.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+  const playerRef = doc(db, 'players', uid);
+  const lbRef = doc(db, 'leaderboard', uid);
+  const taskRef = doc(db, 'tasks', taskId);
+  const txRef = doc(db, 'players', uid, 'transactions', txId);
+
+  try {
+    return await runTransaction(db, async (tx) => {
+      const [playerSnap, taskSnap] = await Promise.all([tx.get(playerRef), tx.get(taskRef)]);
+      if (!playerSnap.exists()) {
+        return { error: 'Player profile not synced yet.' } as const;
+      }
+      if (!taskSnap.exists()) {
+        return { error: 'Campaign task no longer exists.' } as const;
+      }
+
+      const d = taskSnap.data();
+      const parsed = parseCustomTaskDoc(taskSnap.id, d);
+      if (parsed.creatorUid !== uid) {
+        return { error: 'Only the campaign owner can refund this task.' } as const;
+      }
+
+      const claimed = Math.max(0, Math.floor(Number(parsed.claimedCount ?? 0)));
+      const totalSlots = Math.max(0, Math.floor(Number(parsed.totalSlots ?? 0)));
+      const remainingSlots = Math.max(0, totalSlots - claimed);
+      if (!parsed.isActive || remainingSlots <= 0) {
+        return { error: 'No refundable unused slots remaining on this campaign.' } as const;
+      }
+
+      const refundCoins = remainingSlots * parsed.rewardCoins;
+      const nextPaidCoins = Math.max(0, (parsed.paidCoins ?? totalSlots * parsed.rewardCoins) - refundCoins);
+      const encodedSubtitle = encodeTaskSubtitleMeta({
+        subtitle: parsed.subtitle,
+        totalSlots: claimed,
+        claimedCount: claimed,
+        creatorUid: uid,
+        paidCoins: nextPaidCoins,
+      });
+
+      const liveCoins = Number(playerSnap.data().coins ?? 0);
+      const syncedProfile: UserFarmProfile = {
+        ...params.profile,
+        coins: liveCoins + refundCoins,
+      };
+
+      tx.update(playerRef, toFirestoreProfilePayload(syncedProfile, false));
+      tx.set(lbRef, toLeaderboardPayload(syncedProfile));
+      tx.set(txRef, {
+        userId: uid,
+        type: params.transaction.type,
+        title: params.transaction.title.slice(0, 80),
+        amount: refundCoins,
+        currency: 'coins',
+        usdValue: coinsToUsd(refundCoins),
+        status: params.transaction.status,
+        createdAtMs: params.transaction.createdAtMs,
+        createdAt: serverTimestamp(),
+      });
+      tx.update(taskRef, {
+        isActive: false,
+        ...(encodedSubtitle ? { subtitle: encodedSubtitle } : {}),
+        ...(d.totalSlots !== undefined ? { totalSlots: claimed } : {}),
+      });
+
+      return {
+        task: {
+          ...parsed,
+          totalSlots: claimed,
+          paidCoins: nextPaidCoins,
+          isActive: false,
+        },
+        profile: syncedProfile,
+        refundCoins,
+      } as const;
+    });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `tasks/${taskId}`);
   }
