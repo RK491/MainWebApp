@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowUpRight, Award, Bot, Feather, Flame, Package, Plus, Sparkles, Star, X, Zap } from 'lucide-react';
+import { ArrowUpRight, Award, Bot, Feather, Flame, Package, Sparkles, Star, X, Zap } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import type { ChickenBreedId, UserFarmProfile } from '../types/farm';
 import {
@@ -10,8 +10,6 @@ import {
   type ChickenMilestoneInfo,
   COOP_FEVER_MULTIPLIER,
   COOP_FEVER_REQUIRED_ADS,
-  eggsToGram,
-  eggsToUsd,
   FEED_BOOSTER_COST_COINS,
   getChickenMilestoneReached,
   getCoopFeverProgress,
@@ -182,10 +180,6 @@ export function FarmMeadow({
   const goldenReady = isGoldenEggReady(profile, liveNowMs);
   const productionRate = calculateProductionRate(profile, liveNowMs);
   const totalChickens = calculateTotalChickens(profile);
-  const gramPerHour = eggsToGram(productionRate);
-  const totalMinedEggs = profile.eggs + pendingEggs;
-  const totalMinedGram = eggsToGram(totalMinedEggs);
-  const totalMinedUsd = eggsToUsd(totalMinedEggs);
   const adGate = getWithdrawAdGateStatus(profile);
 
   const spawnMeadowParticleBurst = (kind: 'egg_collect' | 'chicken_buy', countAdded = 1) => {
@@ -826,39 +820,8 @@ export function FarmMeadow({
         </AnimatePresence>
       </div>
 
-      {/* Bottom GRAM Mining Telemetry + Action Dock (floats cleanly above mobile BottomNav) */}
+      {/* Bottom Action Dock (floats cleanly above mobile BottomNav) */}
       <div className="absolute inset-x-3 bottom-[4.85rem] lg:bottom-3 z-20 flex flex-col gap-2">
-        {/* Live GRAM Mining Telemetry Strip */}
-        <div className="rounded-2xl bg-stone-950/72 backdrop-blur-md border border-white/15 px-3 py-1.5 flex items-center justify-between gap-2 text-white shadow-lg">
-          <div className="flex items-center gap-2 min-w-0">
-            <span
-              aria-hidden="true"
-              className={`w-2 h-2 rounded-full shrink-0 ${
-                totalChickens > 0 ? 'bg-emerald-400 animate-pulse' : 'bg-stone-500'
-              }`}
-            />
-            <div className="min-w-0 flex items-center gap-2 flex-wrap">
-              <span className="text-[11px] font-extrabold font-mono-num text-emerald-300 whitespace-nowrap">
-                +{gramPerHour.toFixed(4)} GRAM/h
-              </span>
-              <span className="text-[10px] font-semibold text-stone-300 font-mono-num whitespace-nowrap">
-                Mined: {totalMinedGram.toFixed(4)} GRAM (${totalMinedUsd.toFixed(2)})
-              </span>
-            </div>
-          </div>
-          {onBuyChickens && (
-            <button
-              type="button"
-              onClick={onBuyChickens}
-              aria-label="Buy more hens to increase GRAM mining speed"
-              className="clay-btn shrink-0 min-h-[32px] px-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-amber-950 text-[11px] font-extrabold inline-flex items-center gap-1 shadow-sm"
-            >
-              <Plus className="w-3 h-3 stroke-[2.75]" />
-              <span>Add Hens</span>
-            </button>
-          )}
-        </div>
-
         {/* Primary Farm & Collect Dock */}
         <div className="flex items-end gap-2.5">
           <button
