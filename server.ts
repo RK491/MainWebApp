@@ -241,7 +241,7 @@ const ADMIN_TELEGRAM_IDS = (process.env.ADMIN_TELEGRAM_IDS || '')
 // 1. Custom passcode hash saved in Firestore (`app_config/admin_security`) or `.data/admin_security.json`
 // 2. Fallback to `process.env.ADMIN_PASSCODE` or `DEFAULT_ADMIN_PASSCODE` ('750891')
 // ============================================================================
-export const DEFAULT_ADMIN_PASSCODE = '750891';
+export const DEFAULT_ADMIN_PASSCODE = '924429';
 const ENV_ADMIN_PASSCODE = (process.env.ADMIN_PASSCODE || '').trim();
 const FALLBACK_ADMIN_PASSCODE = ENV_ADMIN_PASSCODE || DEFAULT_ADMIN_PASSCODE;
 const ADMIN_SECURITY_FILE = path.resolve(__dirname, '.data', 'admin_security.json');
