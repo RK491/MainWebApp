@@ -236,141 +236,11 @@ const ADMIN_TELEGRAM_IDS = (process.env.ADMIN_TELEGRAM_IDS || '')
   .filter(Boolean);
 
 // ============================================================================
-// ADMIN PASSCODE CONFIGURATION & PERSISTENT STORAGE
-// Passcode checks:
-// 1. Custom passcode hash saved in Firestore (`app_config/admin_security`) or `.data/admin_security.json`
-// 2. Fallback to `process.env.ADMIN_PASSCODE` or `DEFAULT_ADMIN_PASSCODE` ('750891')
+// ADMIN PASSCODE CONFIGURATION (LOCKED IN CODE)
+// Passcode is strictly locked in `/server.ts` -> `DEFAULT_ADMIN_PASSCODE` ('924429').
+// Admin Panel passcode modifications are disabled.
 // ============================================================================
 export const DEFAULT_ADMIN_PASSCODE = '924429';
-const ENV_ADMIN_PASSCODE = (process.env.ADMIN_PASSCODE || '').trim();
-const FALLBACK_ADMIN_PASSCODE = ENV_ADMIN_PASSCODE || DEFAULT_ADMIN_PASSCODE;
-const ADMIN_SECURITY_FILE = path.resolve(__dirname, '.data', 'admin_security.json');
-
-interface StoredAdminSecurityRecord {
-  passcodeHash: string;
-  updatedBy: string;
-  updatedAtMs: number;
-  source: 'database' | 'server_file';
-}
-
-let cachedCustomAdminSecurity: StoredAdminSecurityRecord | null | undefined = undefined;
-let localFilePersistFailed = false;
-let dbSeedAttempted = false;
-
-function hashAdminPasscode(rawPasscode: string): string {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const derived = crypto.scryptSync(rawPasscode.trim(), salt, 32).toString('hex');
-  return `scrypt$${salt}$${derived}`;
-}
-
-function hashCompactAdminPasscode(rawPasscode: string): {
-  saltB64: string;
-  hashB64: string;
-  combined: string;
-} {
-  const saltB64 = crypto.randomBytes(16).toString('base64url');
-  const hashB64 = crypto.scryptSync(rawPasscode.trim(), saltB64, 32).toString('base64url');
-  return {
-    saltB64,
-    hashB64,
-    combined: `s1$${saltB64}$${hashB64}`,
-  };
-}
-
-function verifyScryptPasscode(provided: string, storedHash: string): boolean {
-  const parts = storedHash.split('$');
-  if (parts.length !== 3) return false;
-  const [scheme, salt, expectedEncoded] = parts;
-  if (!salt || !expectedEncoded) return false;
-  try {
-    const derived = crypto.scryptSync(provided.trim(), salt, 32);
-    if (scheme === 'scrypt') {
-      const expected = Buffer.from(expectedEncoded, 'hex');
-      return derived.length === expected.length && crypto.timingSafeEqual(derived, expected);
-    }
-    if (scheme === 's1') {
-      const expected = Buffer.from(expectedEncoded, 'base64url');
-      return derived.length === expected.length && crypto.timingSafeEqual(derived, expected);
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-function extractPasscodeRecordFromAdminsDoc(
-  d: Record<string, unknown> | undefined,
-): StoredAdminSecurityRecord | null {
-  if (!d || !Array.isArray(d.admins)) return null;
-  for (const item of d.admins) {
-    if (!item || typeof item !== 'object') continue;
-    const rec = item as Record<string, unknown>;
-    if (String(rec.uid || '') !== ADMIN_PASSCODE_VAULT_UID) continue;
-    const dn = String(rec.displayName || '').trim();
-    const h = String(rec.handle || '').trim();
-    if (dn.startsWith('s1$') && h.startsWith('salt$')) {
-      const hashB64 = dn.slice(3);
-      const saltB64 = h.slice(5);
-      if (hashB64.length >= 20 && saltB64.length >= 12) {
-        return {
-          passcodeHash: `s1$${saltB64}$${hashB64}`,
-          updatedBy: String(rec.addedBy || PRIMARY_ADMIN_TELEGRAM_ID),
-          updatedAtMs: Number(rec.addedAtMs || d.updatedAtMs || 0),
-          source: 'database',
-        };
-      }
-    }
-  }
-  return null;
-}
-
-function readLocalAdminSecurityFile(): StoredAdminSecurityRecord | null {
-  try {
-    if (!fs.existsSync(ADMIN_SECURITY_FILE)) return null;
-    const raw = fs.readFileSync(ADMIN_SECURITY_FILE, 'utf8');
-    const parsed = JSON.parse(raw) as Partial<StoredAdminSecurityRecord>;
-    if (
-      typeof parsed.passcodeHash === 'string' &&
-      (parsed.passcodeHash.startsWith('scrypt$') || parsed.passcodeHash.startsWith('s1$'))
-    ) {
-      return {
-        passcodeHash: parsed.passcodeHash,
-        updatedBy: String(parsed.updatedBy || PRIMARY_ADMIN_TELEGRAM_ID),
-        updatedAtMs: Number(parsed.updatedAtMs || 0),
-        source: 'server_file',
-      };
-    }
-  } catch {
-    // Ignore local file errors
-  }
-  return null;
-}
-
-function writeLocalAdminSecurityFile(record: Omit<StoredAdminSecurityRecord, 'source'>): boolean {
-  try {
-    const dir = path.dirname(ADMIN_SECURITY_FILE);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    fs.writeFileSync(
-      ADMIN_SECURITY_FILE,
-      JSON.stringify(
-        {
-          passcodeHash: record.passcodeHash,
-          updatedBy: record.updatedBy,
-          updatedAtMs: record.updatedAtMs,
-        },
-        null,
-        2,
-      ),
-      'utf8',
-    );
-    return true;
-  } catch {
-    // Ignore filesystem errors on read-only containers
-    return false;
-  }
-}
 
 async function getFreshDoc(ref: DocumentReference<DocumentData>): Promise<DocumentSnapshot<DocumentData>> {
   try {
@@ -380,243 +250,57 @@ async function getFreshDoc(ref: DocumentReference<DocumentData>): Promise<Docume
   }
 }
 
-async function writePasscodeToFirestore(params: {
-  compactSaltB64: string;
-  compactHashB64: string;
-  scryptHexHash: string;
-  canonicalActor: string;
-  nowMs: number;
-}): Promise<boolean> {
-  if (!serverDb) return false;
-  let savedToAdmins = false;
-  let savedToSecurity = false;
-
-  try {
-    const adminsRef = doc(serverDb, 'app_config', 'admins');
-    const snap = await getFreshDoc(adminsRef);
-    const existingData = snap.exists() ? (snap.data() as Record<string, unknown>) : {};
-    const rawAdmins = Array.isArray(existingData.admins) ? existingData.admins : [];
-    const realAdmins = rawAdmins
-      .filter(
-        (item): item is Record<string, unknown> =>
-          Boolean(
-            item &&
-              typeof item === 'object' &&
-              String((item as Record<string, unknown>).uid || '') !== ADMIN_PASSCODE_VAULT_UID,
-          ),
-      )
-      .slice(0, 29);
-
-    const existingAdminIds = Array.isArray(existingData.adminIds)
-      ? existingData.adminIds
-          .map((id) => String(id || '').trim())
-          .filter((id) => Boolean(id) && id !== ADMIN_PASSCODE_VAULT_UID)
-          .slice(0, 30)
-      : [];
-
-    const vaultEntry = {
-      uid: ADMIN_PASSCODE_VAULT_UID,
-      displayName: `s1$${params.compactHashB64}`.slice(0, 60),
-      handle: `salt$${params.compactSaltB64}`.slice(0, 40),
-      addedBy: params.canonicalActor,
-      addedAtMs: params.nowMs,
-    };
-
-    await setDoc(adminsRef, {
-      adminIds: existingAdminIds,
-      admins: [...realAdmins, vaultEntry],
-      updatedAtMs: params.nowMs,
-      updatedAt: serverTimestamp(),
-    });
-    savedToAdmins = true;
-  } catch {
-    savedToAdmins = false;
-  }
-
-  try {
-    await setDoc(doc(serverDb, 'app_config', 'admin_security'), {
-      passcodeHash: params.scryptHexHash,
-      updatedBy: params.canonicalActor,
-      updatedAtMs: params.nowMs,
-      updatedAt: serverTimestamp(),
-    });
-    savedToSecurity = true;
-  } catch {
-    savedToSecurity = false;
-  }
-
-  return savedToAdmins || savedToSecurity;
-}
-
-async function ensureAdminPasscodeSeededInDatabase(): Promise<StoredAdminSecurityRecord | null> {
-  if (!serverDb || dbSeedAttempted) return null;
-  dbSeedAttempted = true;
-  try {
-    const [secSnap, adminsSnap] = await Promise.all([
-      getFreshDoc(doc(serverDb, 'app_config', 'admin_security')).catch(() => null),
-      getFreshDoc(doc(serverDb, 'app_config', 'admins')).catch(() => null),
-    ]);
-    if (secSnap?.exists() && typeof secSnap.data().passcodeHash === 'string') {
-      return null;
-    }
-    if (adminsSnap?.exists() && extractPasscodeRecordFromAdminsDoc(adminsSnap.data())) {
-      return null;
-    }
-    const nowMs = Date.now();
-    const compact = hashCompactAdminPasscode(FALLBACK_ADMIN_PASSCODE);
-    const scryptHex = hashAdminPasscode(FALLBACK_ADMIN_PASSCODE);
-    const ok = await writePasscodeToFirestore({
-      compactSaltB64: compact.saltB64,
-      compactHashB64: compact.hashB64,
-      scryptHexHash: scryptHex,
-      canonicalActor: `tg_${PRIMARY_ADMIN_TELEGRAM_ID}`,
-      nowMs,
-    });
-    if (ok) {
-      const seeded: StoredAdminSecurityRecord = {
-        passcodeHash: compact.combined,
-        updatedBy: `tg_${PRIMARY_ADMIN_TELEGRAM_ID}`,
-        updatedAtMs: nowMs,
-        source: 'database',
-      };
-      cachedCustomAdminSecurity = seeded;
-      return seeded;
-    }
-  } catch {
-    // Non-fatal seed failure
-  }
-  return null;
-}
-
 async function loadActiveAdminSecurity(): Promise<{
-  custom: StoredAdminSecurityRecord | null;
-  source: 'database' | 'server_file' | 'env' | 'default';
+  custom: null;
+  source: 'default';
   updatedAtMs: number;
 }> {
-  if (serverDb) {
-    try {
-      const snap = await getFreshDoc(doc(serverDb, 'app_config', 'admin_security'));
-      if (snap.exists()) {
-        const d = snap.data();
-        if (
-          typeof d.passcodeHash === 'string' &&
-          (d.passcodeHash.startsWith('scrypt$') || d.passcodeHash.startsWith('s1$'))
-        ) {
-          const rec: StoredAdminSecurityRecord = {
-            passcodeHash: d.passcodeHash,
-            updatedBy: String(d.updatedBy || PRIMARY_ADMIN_TELEGRAM_ID),
-            updatedAtMs: Number(d.updatedAtMs || 0),
-            source: 'database',
-          };
-          cachedCustomAdminSecurity = rec;
-          return { custom: rec, source: 'database', updatedAtMs: rec.updatedAtMs };
-        }
-      }
-    } catch {
-      // Fall through to app_config/admins vault
-    }
-
-    try {
-      const adminsSnap = await getFreshDoc(doc(serverDb, 'app_config', 'admins'));
-      if (adminsSnap.exists()) {
-        const vaultRec = extractPasscodeRecordFromAdminsDoc(adminsSnap.data());
-        if (vaultRec) {
-          cachedCustomAdminSecurity = vaultRec;
-          return { custom: vaultRec, source: 'database', updatedAtMs: vaultRec.updatedAtMs };
-        }
-      }
-    } catch {
-      // Fall through
-    }
-
-    const seeded = await ensureAdminPasscodeSeededInDatabase();
-    if (seeded) {
-      return { custom: seeded, source: 'database', updatedAtMs: seeded.updatedAtMs };
-    }
-  }
-
-  const localRec = readLocalAdminSecurityFile();
-  if (localRec) {
-    cachedCustomAdminSecurity = localRec;
-    return { custom: localRec, source: 'server_file', updatedAtMs: localRec.updatedAtMs };
-  }
-
-  if (localFilePersistFailed && cachedCustomAdminSecurity) {
-    return {
-      custom: cachedCustomAdminSecurity,
-      source: cachedCustomAdminSecurity.source,
-      updatedAtMs: cachedCustomAdminSecurity.updatedAtMs,
-    };
-  }
-
   return {
     custom: null,
-    source: ENV_ADMIN_PASSCODE ? 'env' : 'default',
+    source: 'default',
     updatedAtMs: 0,
   };
 }
 
-async function saveNewAdminPasscode(
-  newPasscode: string,
-  updatedBy: string,
-): Promise<{ source: 'database' | 'server_file'; updatedAtMs: number }> {
-  const nowMs = Date.now();
-  const compact = hashCompactAdminPasscode(newPasscode);
-  const scryptHex = hashAdminPasscode(newPasscode);
-  const canonicalActor =
-    String(updatedBy || `tg_${PRIMARY_ADMIN_TELEGRAM_ID}`)
-      .trim()
-      .replace(/[^a-zA-Z0-9_-]/g, '')
-      .slice(0, 64) || `tg_${PRIMARY_ADMIN_TELEGRAM_ID}`;
-
-  const wroteLocal = writeLocalAdminSecurityFile({
-    passcodeHash: compact.combined,
-    updatedBy: canonicalActor,
-    updatedAtMs: nowMs,
-  });
-  localFilePersistFailed = !wroteLocal;
-
-  const savedToFirestore = await writePasscodeToFirestore({
-    compactSaltB64: compact.saltB64,
-    compactHashB64: compact.hashB64,
-    scryptHexHash: scryptHex,
-    canonicalActor,
-    nowMs,
-  });
-
-  const source: 'database' | 'server_file' = savedToFirestore ? 'database' : 'server_file';
-  cachedCustomAdminSecurity = {
-    passcodeHash: compact.combined,
-    updatedBy: canonicalActor,
-    updatedAtMs: nowMs,
-    source,
-  };
-  return { source, updatedAtMs: nowMs };
+function normalizePasscodeInput(raw: string): string {
+  const withoutSpaces = String(raw || '').replace(/[\s\u200B-\u200D\uFEFF]+/g, '');
+  let out = '';
+  for (const ch of withoutSpaces) {
+    const code = ch.charCodeAt(0);
+    // Full-width digits ０-９
+    if (code >= 0xff10 && code <= 0xff19) {
+      out += String(code - 0xff10);
+    // Arabic-Indic digits ٠-٩
+    } else if (code >= 0x0660 && code <= 0x0669) {
+      out += String(code - 0x0660);
+    // Extended Arabic-Indic digits ۰-۹
+    } else if (code >= 0x06f0 && code <= 0x06f9) {
+      out += String(code - 0x06f0);
+    // Devanagari digits ०-९
+    } else if (code >= 0x0966 && code <= 0x096f) {
+      out += String(code - 0x0966);
+    } else {
+      out += ch;
+    }
+  }
+  return out;
 }
 
 async function verifyAdminPasscodeAsync(provided: string): Promise<{
   ok: boolean;
-  source: 'database' | 'server_file' | 'env' | 'default';
+  source: 'default';
   updatedAtMs: number;
 }> {
-  const cleanProvided = provided.trim();
-  const security = await loadActiveAdminSecurity();
+  const cleanProvided = normalizePasscodeInput(provided);
   if (!cleanProvided) {
-    return { ok: false, source: security.source, updatedAtMs: security.updatedAtMs };
-  }
-  if (security.custom) {
-    return {
-      ok: verifyScryptPasscode(cleanProvided, security.custom.passcodeHash),
-      source: security.source,
-      updatedAtMs: security.updatedAtMs,
-    };
+    return { ok: false, source: 'default', updatedAtMs: 0 };
   }
   const a = Buffer.from(cleanProvided, 'utf8');
-  const b = Buffer.from(FALLBACK_ADMIN_PASSCODE, 'utf8');
+  const b = Buffer.from(DEFAULT_ADMIN_PASSCODE, 'utf8');
   return {
     ok: a.length === b.length && crypto.timingSafeEqual(a, b),
-    source: security.source,
-    updatedAtMs: security.updatedAtMs,
+    source: 'default',
+    updatedAtMs: 0,
   };
 }
 
@@ -719,6 +403,7 @@ function verifySessionToken(token: string): Record<string, unknown> | null {
 function verifyTelegramInitData(
   rawInitData: string,
   botToken: string,
+  options?: { allowClockSkew?: boolean },
 ): { valid: boolean; playerId?: string; user?: Record<string, unknown>; reason?: string } {
   const trimmed = rawInitData.trim();
   if (!trimmed || !botToken) {
@@ -728,17 +413,6 @@ function verifyTelegramInitData(
   const hash = params.get('hash') || '';
   if (!hash) {
     return { valid: false, reason: 'missing_hash' };
-  }
-
-  const authDateSec = Number(params.get('auth_date') || 0);
-  const nowSec = Math.floor(Date.now() / 1000);
-  if (
-    !Number.isFinite(authDateSec) ||
-    authDateSec <= 0 ||
-    nowSec - authDateSec > 86_400 ||
-    authDateSec > nowSec + 300
-  ) {
-    return { valid: false, reason: 'expired_or_invalid_auth_date' };
   }
 
   const entries: string[] = [];
@@ -763,6 +437,21 @@ function verifyTelegramInitData(
   const b = Buffer.from(hash.toLowerCase(), 'utf8');
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
     return { valid: false, reason: 'hash_mismatch' };
+  }
+
+  const authDateSec = Number(params.get('auth_date') || 0);
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (!options?.allowClockSkew) {
+    if (
+      !Number.isFinite(authDateSec) ||
+      authDateSec <= 0 ||
+      nowSec - authDateSec > 86_400 ||
+      authDateSec > nowSec + 300
+    ) {
+      return { valid: false, reason: 'expired_or_invalid_auth_date' };
+    }
+  } else if (!Number.isFinite(authDateSec) || authDateSec <= 0) {
+    return { valid: false, reason: 'expired_or_invalid_auth_date' };
   }
 
   let parsedUser: Record<string, unknown> | undefined;
@@ -805,7 +494,9 @@ function resolveVerifiedAdminActor(params: {
 
   const rawInitData = String(params.initData || '').trim();
   if (rawInitData && TELEGRAM_BOT_TOKEN) {
-    const verifiedInit = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN);
+    const verifiedInit = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN, {
+      allowClockSkew: true,
+    });
     if (
       verifiedInit.valid &&
       verifiedInit.playerId &&
@@ -841,7 +532,9 @@ function resolveVerifiedPlayerActor(params: {
 
   const rawInitData = String(params.initData || '').trim();
   if (rawInitData && TELEGRAM_BOT_TOKEN) {
-    const verifiedInit = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN);
+    const verifiedInit = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN, {
+      allowClockSkew: true,
+    });
     if (verifiedInit.valid && verifiedInit.playerId && isValidSafeId(verifiedInit.playerId)) {
       return verifiedInit.playerId;
     }
@@ -1591,7 +1284,9 @@ async function startServer() {
       return;
     }
 
-    const check = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN);
+    const check = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN, {
+      allowClockSkew: true,
+    });
     if (!check.valid || !check.playerId) {
       res.status(401).json({
         ok: false,
@@ -1641,27 +1336,37 @@ async function startServer() {
     }
 
     const sockAddr = String(req.socket?.remoteAddress || 'unknown').slice(0, 64);
-    const rl = checkRateLimit(`admin_auth:${ip}:${sockAddr}`, 8, 15 * 60_000);
-    if (!rl.allowed) {
+    const failIpKey = `admin_auth_fail:${ip}:${sockAddr}`;
+    const existingIpFails = (rateLimitBuckets.get(failIpKey) || []).filter(
+      (ts) => ts > Date.now() - 15 * 60_000,
+    );
+    if (existingIpFails.length >= 15) {
+      const retryAfterSec = Math.max(
+        1,
+        Math.ceil(((existingIpFails[0] ?? Date.now()) + 15 * 60_000 - Date.now()) / 1000),
+      );
       res.status(429).json({
         ok: false,
         requiresPasscode: true,
-        error: `Too many login attempts. Wait ${rl.retryAfterSec}s before trying again.`,
+        error: `Too many wrong passcode attempts. Wait ${retryAfterSec}s before trying again.`,
       });
       return;
     }
 
     let resolvedPlayerId = rawPlayerId;
     if (rawInitData && TELEGRAM_BOT_TOKEN) {
-      const verifiedInit = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN);
-      if (!verifiedInit.valid || !verifiedInit.playerId) {
+      const verifiedInit = verifyTelegramInitData(rawInitData, TELEGRAM_BOT_TOKEN, {
+        allowClockSkew: true,
+      });
+      if (verifiedInit.valid && verifiedInit.playerId) {
+        resolvedPlayerId = verifiedInit.playerId;
+      } else if (!isValidSafeId(resolvedPlayerId) || !isAdminPlayerId(resolvedPlayerId, effectiveExtraAdmins)) {
         res.status(401).json({
           ok: false,
           error: 'Invalid or expired Telegram session signature.',
         });
         return;
       }
-      resolvedPlayerId = verifiedInit.playerId;
     }
 
     if (!isValidSafeId(resolvedPlayerId) || !isAdminPlayerId(resolvedPlayerId, effectiveExtraAdmins)) {
@@ -1672,12 +1377,19 @@ async function startServer() {
       return;
     }
 
-    const idRl = checkRateLimit(`admin_auth_id:${resolvedPlayerId}`, 8, 15 * 60_000);
-    if (!idRl.allowed) {
+    const failIdKey = `admin_auth_fail_id:${resolvedPlayerId}`;
+    const existingIdFails = (rateLimitBuckets.get(failIdKey) || []).filter(
+      (ts) => ts > Date.now() - 15 * 60_000,
+    );
+    if (existingIdFails.length >= 15) {
+      const retryAfterSec = Math.max(
+        1,
+        Math.ceil(((existingIdFails[0] ?? Date.now()) + 15 * 60_000 - Date.now()) / 1000),
+      );
       res.status(429).json({
         ok: false,
         requiresPasscode: true,
-        error: `Too many attempts for this Admin ID. Wait ${idRl.retryAfterSec}s.`,
+        error: `Too many wrong passcode attempts for this Admin ID. Wait ${retryAfterSec}s.`,
       });
       return;
     }
@@ -1693,6 +1405,8 @@ async function startServer() {
 
     const authResult = await verifyAdminPasscodeAsync(rawPasscode);
     if (!authResult.ok) {
+      checkRateLimit(failIpKey, 15, 15 * 60_000);
+      checkRateLimit(failIdKey, 15, 15 * 60_000);
       res.status(403).json({
         ok: false,
         requiresPasscode: true,
@@ -1701,6 +1415,9 @@ async function startServer() {
       });
       return;
     }
+
+    rateLimitBuckets.delete(failIpKey);
+    rateLimitBuckets.delete(failIdKey);
 
     const token = signSessionToken({
       role: 'admin',
@@ -1716,80 +1433,10 @@ async function startServer() {
     });
   });
 
-  app.post('/api/admin/change-passcode', async (req, res) => {
-    const ip = getClientIp(req);
-    const rl = checkRateLimit(`admin_chpass:${ip}`, 6, 15 * 60_000);
-    if (!rl.allowed) {
-      res.status(429).json({
-        ok: false,
-        error: `Too many passcode change attempts. Wait ${rl.retryAfterSec}s.`,
-      });
-      return;
-    }
-
-    const body = req.body as {
-      initData?: string;
-      token?: string;
-      currentPasscode?: string;
-      newPasscode?: string;
-    };
-    const currentPasscode = String(body.currentPasscode || '').trim();
-    const newPasscode = String(body.newPasscode || '').trim();
-
-    const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
-    const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
-    const resolvedPlayerId = resolveVerifiedAdminActor({
-      req,
-      token: body.token,
-      initData: body.initData,
-      extraAdminIds: effectiveExtraAdmins,
-    });
-
-    if (!resolvedPlayerId) {
-      res.status(403).json({
-        ok: false,
-        error: 'Verified Admin session required to update Admin Passcode.',
-      });
-      return;
-    }
-
-    if (!currentPasscode) {
-      res.status(400).json({
-        ok: false,
-        error: 'Enter your current Admin Passcode.',
-      });
-      return;
-    }
-
-    if (newPasscode.length < 4 || newPasscode.length > 64) {
-      res.status(400).json({
-        ok: false,
-        error: 'New passcode must be between 4 and 64 characters.',
-      });
-      return;
-    }
-
-    const verifyCurrent = await verifyAdminPasscodeAsync(currentPasscode);
-    if (!verifyCurrent.ok) {
-      res.status(403).json({
-        ok: false,
-        error: 'Current Admin Passcode is incorrect.',
-      });
-      return;
-    }
-
-    const saved = await saveNewAdminPasscode(newPasscode, resolvedPlayerId);
-    const freshToken = signSessionToken({
-      role: 'admin',
-      playerId: resolvedPlayerId,
-      method: 'passcode',
-    });
-
-    res.json({
-      ok: true,
-      token: freshToken,
-      passcodeSource: saved.source,
-      passcodeUpdatedAtMs: saved.updatedAtMs,
+  app.post('/api/admin/change-passcode', async (_req, res) => {
+    res.status(403).json({
+      ok: false,
+      error: 'Admin passcode is locked in server.ts and cannot be changed from the Admin Panel.',
     });
   });
 
@@ -2582,7 +2229,6 @@ async function startServer() {
     }
   });
 
-  void ensureAdminPasscodeSeededInDatabase();
   const reminderInterval = setInterval(() => {
     void processDueReminders();
   }, 30_000);

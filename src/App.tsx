@@ -172,9 +172,11 @@ import {
   computeMuteAllToggle,
   getStoredAudioSettings,
   isAllAudioMuted,
+  playChickenCluckSound,
   playClaimSound,
   playCoinChimeSound,
   playGoldenEggSound,
+  playPurchaseSuccessSound,
   playSoftTapSound,
   playTabTapSound,
   setStoredAudioSettings,
@@ -452,12 +454,16 @@ export default function App() {
       }
     };
 
-    window.addEventListener('pointerdown', handleFirstGesture, { once: true });
-    window.addEventListener('keydown', handleFirstGesture, { once: true });
+    window.addEventListener('pointerdown', handleFirstGesture, { passive: true });
+    window.addEventListener('touchend', handleFirstGesture, { passive: true });
+    window.addEventListener('click', handleFirstGesture, { passive: true });
+    window.addEventListener('keydown', handleFirstGesture, { passive: true });
     document.addEventListener('visibilitychange', handleVisibility);
 
     return () => {
       window.removeEventListener('pointerdown', handleFirstGesture);
+      window.removeEventListener('touchend', handleFirstGesture);
+      window.removeEventListener('click', handleFirstGesture);
       window.removeEventListener('keydown', handleFirstGesture);
       document.removeEventListener('visibilitychange', handleVisibility);
       stopAmbientMusic();
@@ -1723,16 +1729,22 @@ export default function App() {
     passcode: string,
   ): Promise<{ ok: boolean; error?: string }> => {
     try {
+      const effectivePlayerId = detectedIdentity.playerId || profile.uid || activePlayerId;
       const response = await fetch('/api/admin/auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          playerId: profile.uid,
+          playerId: effectivePlayerId,
           initData: getTelegramInitData(),
-          passcode,
+          passcode: passcode.trim(),
         }),
       });
-      const payload = (await response.json().catch(() => ({}))) as {
+      const contentType = (response.headers.get('content-type') || '').toLowerCase();
+      const payload = (
+        contentType.includes('application/json')
+          ? await response.json().catch(() => ({}))
+          : {}
+      ) as {
         ok?: boolean;
         token?: string;
         passcodeSource?: 'database' | 'server_file' | 'env' | 'default';
@@ -1750,6 +1762,8 @@ export default function App() {
           setAdminSessionToken(payload.token);
         }
         setAdminUnlocked(true);
+        playClaimSound(soundsEnabled);
+        triggerHapticFeedback('success');
         showToast('Admin Console unlocked!');
         return { ok: true };
       }
@@ -1757,65 +1771,16 @@ export default function App() {
         ok: false,
         error:
           payload.error ||
-          (response.status >= 500
-            ? 'Server error while verifying Admin Passcode.'
-            : 'Incorrect Admin Passcode. Please try again.'),
+          (!contentType.includes('application/json')
+            ? `Verification endpoint returned HTTP ${response.status}. Please refresh the app.`
+            : response.status >= 500
+              ? 'Server error while verifying Admin Passcode.'
+              : 'Incorrect Admin Passcode. Please try again.'),
       };
     } catch {
       return {
         ok: false,
         error: 'Unable to reach verification server. Please check your connection.',
-      };
-    }
-  };
-
-  const handleChangeAdminPasscode = async (input: {
-    currentPasscode: string;
-    newPasscode: string;
-  }): Promise<{ ok: boolean; error?: string }> => {
-    try {
-      const response = await fetch('/api/admin/change-passcode', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          playerId: profile.uid,
-          initData: getTelegramInitData(),
-          token: adminSessionToken,
-          currentPasscode: input.currentPasscode,
-          newPasscode: input.newPasscode,
-        }),
-      });
-      const payload = (await response.json().catch(() => ({}))) as {
-        ok?: boolean;
-        token?: string;
-        passcodeSource?: 'database' | 'server_file' | 'env' | 'default';
-        passcodeUpdatedAtMs?: number;
-        error?: string;
-      };
-      if (response.ok && payload.ok) {
-        if (payload.token) {
-          setAdminSessionToken(payload.token);
-        }
-        if (payload.passcodeSource) {
-          setAdminPasscodeSource(payload.passcodeSource);
-        }
-        if (typeof payload.passcodeUpdatedAtMs === 'number') {
-          setAdminPasscodeUpdatedAtMs(payload.passcodeUpdatedAtMs);
-        }
-        playClaimSound(soundsEnabled);
-        triggerHapticFeedback('success');
-        showToast('Admin Passcode saved to database! Reloading...');
-        scheduleAppReload();
-        return { ok: true };
-      }
-      return {
-        ok: false,
-        error: payload.error || 'Failed to update Admin Passcode.',
-      };
-    } catch {
-      return {
-        ok: false,
-        error: 'Network error while updating Admin Passcode.',
       };
     }
   };
@@ -2359,7 +2324,7 @@ export default function App() {
       showToast(res.error);
       return;
     }
-    playCoinChimeSound(soundsEnabled);
+    playPurchaseSuccessSound(soundsEnabled);
     triggerHapticFeedback('medium');
     void persistMutation({
       nextProfile: res.profile,
@@ -2376,7 +2341,7 @@ export default function App() {
       showToast(res.error);
       return;
     }
-    playCoinChimeSound(soundsEnabled);
+    playPurchaseSuccessSound(soundsEnabled);
     triggerHapticFeedback('medium');
     void persistMutation({
       nextProfile: res.profile,
@@ -2468,7 +2433,7 @@ export default function App() {
       showToast(res.error);
       return;
     }
-    playCoinChimeSound(soundsEnabled);
+    playPurchaseSuccessSound(soundsEnabled);
     triggerHapticFeedback('success');
     triggerRewardConfetti();
     void persistMutation({
@@ -2697,13 +2662,12 @@ export default function App() {
     if (subView === 'admin') {
       return (
         <AdminPanelView
-          playerId={profile.uid}
+          playerId={detectedIdentity.playerId || profile.uid}
           adminUnlocked={adminUnlocked}
           adminPasscodeSource={adminPasscodeSource}
           adminPasscodeUpdatedAtMs={adminPasscodeUpdatedAtMs}
           serverBotConfigured={serverBotConfigured}
           onVerifyAdminPasscode={handleVerifyAdminPasscode}
-          onChangeAdminPasscode={handleChangeAdminPasscode}
           onTestChannels={handleTestChannelsDiagnostic}
           onLockAdmin={handleLockAdmin}
           withdrawRequests={allWithdrawRequests}
@@ -3202,7 +3166,7 @@ export default function App() {
               onOpenYourFarm={() => openSubView('your_farm')}
               onOpenWithdraw={() => openSubView('withdraw')}
               onChickenTap={() => {
-                playSoftTapSound(soundsEnabled);
+                playChickenCluckSound(soundsEnabled);
                 triggerHapticFeedback('light');
               }}
               onGoldenEggDrop={handleGoldenEggTap}

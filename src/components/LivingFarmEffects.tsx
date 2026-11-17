@@ -181,12 +181,14 @@ interface SmokeWisp {
 interface LivingFarmEffectsProps {
   boosterActive: boolean;
   droneActive: boolean;
+  isPaused?: boolean;
   children?: React.ReactNode;
 }
 
 export function LivingFarmEffects({
   boosterActive,
   droneActive,
+  isPaused = false,
   children,
 }: LivingFarmEffectsProps) {
   const prefersReducedMotion = useReducedMotion();
@@ -194,6 +196,36 @@ export function LivingFarmEffects({
   const stageOuterRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [coverBox, setCoverBox] = useState<{ width: number; height: number } | null>(null);
+  const [isInViewport, setIsInViewport] = useState(true);
+  const [isDocVisible, setIsDocVisible] = useState(
+    () => (typeof document === 'undefined' ? true : document.visibilityState === 'visible'),
+  );
+
+  useEffect(() => {
+    const el = stageOuterRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (!entry) return;
+        setIsInViewport(entry.isIntersecting && entry.intersectionRatio > 0);
+      },
+      { threshold: 0.01 },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const onVisibility = () => {
+      setIsDocVisible(document.visibilityState === 'visible');
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+
+  const effectivePaused = Boolean(isPaused) || !isInViewport || !isDocVisible;
 
   useEffect(() => {
     const el = stageOuterRef.current;
@@ -458,7 +490,7 @@ export function LivingFarmEffects({
       }
     };
 
-    if (prefersReducedMotion) {
+    if (prefersReducedMotion || effectivePaused) {
       drawFrame(0);
       return;
     }
@@ -474,11 +506,12 @@ export function LivingFarmEffects({
 
     rafId = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(rafId);
-  }, [boosterActive, coverBox, prefersReducedMotion]);
+  }, [boosterActive, coverBox, effectivePaused, prefersReducedMotion]);
 
   return (
     <div
       ref={stageOuterRef}
+      data-farm-paused={effectivePaused || prefersReducedMotion ? 'true' : undefined}
       className="absolute inset-0 overflow-hidden pointer-events-none"
     >
       {/* Exact pixel-locked 2:3 isometric stage: zero camera shake, zero zoom, buildings/walls/roads completely static */}
@@ -521,7 +554,7 @@ export function LivingFarmEffects({
                   clipPath: zone.clipPath,
                   WebkitClipPath: zone.clipPath,
                 }}
-                className="absolute inset-0 pointer-events-none overflow-hidden"
+                className="absolute inset-0 pointer-events-none overflow-hidden will-change-transform"
               >
                 <img
                   src={STATIC_FARM_IMAGE_PATH}
@@ -531,7 +564,7 @@ export function LivingFarmEffects({
                     animationDelay: zone.delay,
                     animationDuration: zone.duration,
                   }}
-                  className={`${zone.animClass} w-full h-full object-cover object-center select-none pointer-events-none`}
+                  className={`${zone.animClass} will-change-transform w-full h-full object-cover object-center select-none pointer-events-none`}
                 />
               </div>
             ))}
@@ -552,13 +585,13 @@ export function LivingFarmEffects({
                   className="absolute inset-0 rounded-full"
                 />
                 <motion.span
-                  animate={{ rotate: 360 }}
+                  animate={effectivePaused ? false : { rotate: 360 }}
                   transition={{
                     duration: t.dur,
                     repeat: Infinity,
                     ease: 'linear',
                   }}
-                  className="absolute inset-0"
+                  className="absolute inset-0 will-change-transform"
                 >
                   <span className="absolute left-1/2 top-0 -translate-x-1/2 w-[1.4px] h-2.5 bg-white/95 rounded-full shadow-[0_0_4px_rgba(255,255,255,0.85)]" />
                   <span className="absolute left-1/2 bottom-[2px] -translate-x-1/2 rotate-[120deg] origin-top w-[1.4px] h-2.5 bg-white/90 rounded-full" />
@@ -572,16 +605,16 @@ export function LivingFarmEffects({
           {!prefersReducedMotion && (
             <>
               <motion.div
-                animate={{ opacity: [0, 0.42, 0], x: [-28, 32] }}
+                animate={effectivePaused ? false : { opacity: [0, 0.42, 0], x: [-28, 32] }}
                 transition={{ duration: 4.8, repeat: Infinity, repeatDelay: 3.0, ease: 'easeInOut' }}
                 style={{ left: '52%', top: '23%', transform: 'rotate(-22deg)' }}
-                className="absolute w-28 h-8 rounded-full bg-gradient-to-r from-transparent via-amber-100/55 to-transparent blur-sm"
+                className="will-change-transform absolute w-28 h-8 rounded-full bg-gradient-to-r from-transparent via-amber-100/55 to-transparent blur-sm"
               />
               <motion.div
-                animate={{ opacity: [0, 0.38, 0], x: [-16, 18] }}
+                animate={effectivePaused ? false : { opacity: [0, 0.38, 0], x: [-16, 18] }}
                 transition={{ duration: 4.2, delay: 1.9, repeat: Infinity, repeatDelay: 3.4, ease: 'easeInOut' }}
                 style={{ left: '77%', top: '36.5%', transform: 'rotate(-22deg)' }}
-                className="absolute w-16 h-5 rounded-full bg-gradient-to-r from-transparent via-sky-100/55 to-transparent blur-sm"
+                className="will-change-transform absolute w-16 h-5 rounded-full bg-gradient-to-r from-transparent via-sky-100/55 to-transparent blur-sm"
               />
 
               {/* Tiny distant swallows soaring smoothly over the forest & lake */}
@@ -590,12 +623,16 @@ export function LivingFarmEffects({
                   key={`swallow-${idx}`}
                   viewBox="0 0 24 12"
                   initial={{ x: -30, y: 0, opacity: 0 }}
-                  animate={{
-                    x: [-30 + idx * 18, 130 + idx * 24, 300],
-                    y: [0, -10 - idx * 3, -3],
-                    scaleY: [1, 0.55, 1.15, 0.65, 1],
-                    opacity: [0, 0.78, 0.78, 0],
-                  }}
+                  animate={
+                    effectivePaused
+                      ? false
+                      : {
+                          x: [-30 + idx * 18, 130 + idx * 24, 300],
+                          y: [0, -10 - idx * 3, -3],
+                          scaleY: [1, 0.55, 1.15, 0.65, 1],
+                          opacity: [0, 0.78, 0.78, 0],
+                        }
+                  }
                   transition={{
                     duration: 15 + idx * 2.4,
                     delay: idx * 3.8,
@@ -603,7 +640,7 @@ export function LivingFarmEffects({
                     ease: 'linear',
                   }}
                   style={{ left: `${10 + idx * 5}%`, top: `${8.2 + idx * 2.1}%` }}
-                  className="absolute w-3.5 h-2 text-stone-800/70"
+                  className="will-change-transform absolute w-3.5 h-2 text-stone-800/70"
                 >
                   <path
                     d="M1 8 Q6 2 12 7 Q18 2 23 8"
@@ -623,11 +660,15 @@ export function LivingFarmEffects({
               ].map((bf, idx) => (
                 <motion.div
                   key={`crop-butterfly-${idx}`}
-                  animate={{
-                    x: [0, bf.dx, bf.dx * 0.4, -bf.dx * 0.5, 0],
-                    y: [0, bf.dy, -3, bf.dy * 0.7, 0],
-                    scaleX: [1, 0.38, 1, 0.42, 1],
-                  }}
+                  animate={
+                    effectivePaused
+                      ? false
+                      : {
+                          x: [0, bf.dx, bf.dx * 0.4, -bf.dx * 0.5, 0],
+                          y: [0, bf.dy, -3, bf.dy * 0.7, 0],
+                          scaleX: [1, 0.38, 1, 0.42, 1],
+                        }
+                  }
                   transition={{
                     duration: bf.dur,
                     delay: idx * 0.9,
@@ -635,7 +676,7 @@ export function LivingFarmEffects({
                     ease: 'easeInOut',
                   }}
                   style={{ left: bf.left, top: bf.top }}
-                  className={`absolute w-2.5 h-2.5 ${bf.color} drop-shadow-[0_1px_2px_rgba(0,0,0,0.45)]`}
+                  className={`will-change-transform absolute w-2.5 h-2.5 ${bf.color} drop-shadow-[0_1px_2px_rgba(0,0,0,0.45)]`}
                 >
                   <svg viewBox="0 0 16 12" className="w-full h-full fill-current">
                     <path d="M8 6 C5 1, 1 2, 2 6 C1 9, 5 11, 8 7 C11 11, 15 9, 14 6 C15 2, 11 1, 8 6 Z" />
@@ -647,11 +688,15 @@ export function LivingFarmEffects({
               {SWIMMING_WATERFOWL.map((bird, idx) => (
                 <motion.div
                   key={`pond-waterfowl-${idx}`}
-                  animate={{
-                    x: [0, bird.rx, bird.rx * 0.45, -bird.rx * 0.45, 0],
-                    y: [0, bird.ry, -bird.ry * 0.55, bird.ry * 0.4, 0],
-                    rotate: [-1.5, 1.5, -1, 1.5, -1.5],
-                  }}
+                  animate={
+                    effectivePaused
+                      ? false
+                      : {
+                          x: [0, bird.rx, bird.rx * 0.45, -bird.rx * 0.45, 0],
+                          y: [0, bird.ry, -bird.ry * 0.55, bird.ry * 0.4, 0],
+                          rotate: [-1.5, 1.5, -1, 1.5, -1.5],
+                        }
+                  }
                   transition={{
                     duration: bird.dur,
                     delay: bird.delay,
@@ -659,12 +704,12 @@ export function LivingFarmEffects({
                     ease: 'easeInOut',
                   }}
                   style={{ left: bird.left, top: bird.top }}
-                  className="absolute -translate-x-1/2 -translate-y-1/2"
+                  className="will-change-transform absolute -translate-x-1/2 -translate-y-1/2"
                 >
                   <motion.span
-                    animate={{ scale: [0.85, 1.35, 0.85], opacity: [0.55, 0.16, 0.55] }}
+                    animate={effectivePaused ? false : { scale: [0.85, 1.35, 0.85], opacity: [0.55, 0.16, 0.55] }}
                     transition={{ duration: 2.3, delay: idx * 0.45, repeat: Infinity, ease: 'easeInOut' }}
-                    className="absolute -bottom-0.5 left-1/2 -translate-x-1/2 w-5 h-1.5 rounded-full border border-sky-100/70"
+                    className="will-change-transform absolute -bottom-0.5 left-1/2 -translate-x-1/2 w-5 h-1.5 rounded-full border border-sky-100/70"
                   />
                   {bird.isSwan ? (
                     <svg viewBox="0 0 20 16" className="w-4 h-3.5 drop-shadow-[0_2px_3px_rgba(12,35,48,0.45)]">
@@ -701,23 +746,27 @@ export function LivingFarmEffects({
           {/* 5. Real-Time Physics Canvas: Fountain spray, pond ripples, lake shimmer, smoke, floating pollen & leaves */}
           <canvas
             ref={canvasRef}
-            className="absolute inset-0 w-full h-full pointer-events-none"
+            className="will-change-transform absolute inset-0 w-full h-full pointer-events-none"
           />
 
           {/* 5. Active Auto-Harvest Drone patrolling smoothly above the yard */}
           {droneActive && !prefersReducedMotion && (
             <motion.div
-              animate={{
-                x: [-54, 52, 38, -42, -54],
-                y: [-8, -20, 6, -4, -8],
-              }}
+              animate={
+                effectivePaused
+                  ? false
+                  : {
+                      x: [-54, 52, 38, -42, -54],
+                      y: [-8, -20, 6, -4, -8],
+                    }
+              }
               transition={{
                 duration: 11,
                 repeat: Infinity,
                 ease: 'easeInOut',
               }}
               style={{ left: '50%', top: '39%' }}
-              className="absolute -translate-x-1/2 -translate-y-1/2 flex flex-col items-center"
+              className="will-change-transform absolute -translate-x-1/2 -translate-y-1/2 flex flex-col items-center"
             >
               <div className="w-8 h-8 rounded-full bg-sky-500/20 border border-sky-300/70 backdrop-blur-sm flex items-center justify-center shadow-[0_6px_14px_rgba(14,165,233,0.45)]">
                 <Bot className="w-4 h-4 text-sky-100" />

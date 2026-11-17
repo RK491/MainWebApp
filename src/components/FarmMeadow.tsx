@@ -150,6 +150,11 @@ export function FarmMeadow({
   const [poppedHen, setPoppedHen] = useState<{ id: string; seq: number } | null>(null);
   const [activeMilestone, setActiveMilestone] = useState<ChickenMilestoneInfo | null>(null);
 
+  const [isInViewport, setIsInViewport] = useState(true);
+  const [isDocVisible, setIsDocVisible] = useState(
+    () => (typeof document === 'undefined' ? true : document.visibilityState === 'visible'),
+  );
+  const sectionRef = useRef<HTMLElement | null>(null);
   const prevUidRef = useRef<string>(profile.uid);
   const prevTotalChickensRef = useRef<number | null>(null);
   const pendingChickenBurstCountRef = useRef(0);
@@ -164,11 +169,39 @@ export function FarmMeadow({
   const effectTimersRef = useRef<number[]>([]);
 
   useEffect(() => {
+    const el = sectionRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (!entry) return;
+        setIsInViewport(entry.isIntersecting && entry.intersectionRatio > 0);
+      },
+      { threshold: 0.01 },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const onVisibility = () => {
+      setIsDocVisible(document.visibilityState === 'visible');
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+
+  const isFarmActive = isInViewport && isDocVisible;
+
+  useEffect(() => {
+    if (!isFarmActive) return;
+    setLiveNowMs(Date.now());
     const id = window.setInterval(() => {
       setLiveNowMs(Date.now());
     }, 1000);
     return () => window.clearInterval(id);
-  }, []);
+  }, [isFarmActive]);
 
   const boosterActive = isFeedBoosterActive(profile, liveNowMs);
   const boostRemainingMs = Math.max(0, Number(profile.feedBoostUntilMs ?? 0) - liveNowMs);
@@ -317,11 +350,17 @@ export function FarmMeadow({
   }, [profile.australorpCount, profile.orpingtonCount, profile.rhodeCount, profile.leghornCount]);
 
   useEffect(() => {
+    if (!isFarmActive) return;
     const id = window.setInterval(() => {
       setStepTick((t) => t + 1);
     }, 2600);
     return () => {
       window.clearInterval(id);
+    };
+  }, [isFarmActive]);
+
+  useEffect(() => {
+    return () => {
       if (popTimerRef.current) window.clearTimeout(popTimerRef.current);
       if (collectPopTimerRef.current) window.clearTimeout(collectPopTimerRef.current);
       if (harvestTimerRef.current) window.clearTimeout(harvestTimerRef.current);
@@ -421,11 +460,17 @@ export function FarmMeadow({
 
   return (
     <section
+      ref={sectionRef}
+      data-farm-paused={!isFarmActive ? 'true' : undefined}
       aria-label="Live Isometric Sustainable Poultry Estate"
       className="animate-clay-enter relative w-full flex-1 lg:flex-none overflow-hidden rounded-none lg:rounded-[2rem] lg:clay-card bg-gradient-to-b from-amber-200 via-emerald-800 to-stone-950 min-h-[540px] h-full lg:h-auto lg:aspect-[9/14] lg:min-h-[600px] lg:max-h-[760px]"
     >
       {/* Locked-camera isometric farm stage: buildings/walls/roads completely static, internal natural elements alive */}
-      <LivingFarmEffects boosterActive={boosterActive} droneActive={droneActive}>
+      <LivingFarmEffects
+        boosterActive={boosterActive}
+        droneActive={droneActive}
+        isPaused={!isFarmActive}
+      >
         {/* Animated Roaming Chickens placed strictly on the lawn around the coops */}
         <div className="absolute inset-0 z-10 pointer-events-none">
         {roamingHens.map((hen, idx) => {

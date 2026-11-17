@@ -440,6 +440,7 @@
 }
 
 .animate-chicken-bob {
+  will-change: transform;
   animation: chickenBob 1.3s ease-in-out infinite;
 }
 
@@ -533,10 +534,12 @@
 }
 
 .animate-pollen-drift {
+  will-change: transform, opacity;
   animation: pollenDrift 5.4s ease-in-out infinite;
 }
 
 .animate-collect-halo {
+  will-change: transform, opacity;
   animation: collectHaloPulse 2.1s ease-in-out infinite;
 }
 
@@ -710,10 +713,12 @@
 }
 
 .animate-sunbeam {
+  will-change: transform, opacity;
   animation: sunbeamDrift 7.5s ease-in-out infinite;
 }
 
 .animate-golden-ring {
+  will-change: transform;
   animation: goldenRingSpin 5.5s linear infinite;
 }
 
@@ -828,6 +833,12 @@
   transform-origin: center bottom;
   will-change: transform;
   animation: reedBreezeSway 4.2s ease-in-out infinite;
+}
+
+[data-farm-paused="true"] *,
+[data-farm-paused="true"] *::before,
+[data-farm-paused="true"] *::after {
+  animation-play-state: paused !important;
 }
 
 @media (prefers-reduced-motion: reduce) {
