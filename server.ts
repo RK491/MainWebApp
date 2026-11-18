@@ -1287,6 +1287,114 @@ function toServerFirestorePlayerCreatePayload(
   };
 }
 
+function toServerFirestorePlayerUpdatePayload(
+  raw: Record<string, unknown>,
+  uid: string,
+  overrides: {
+    coins?: number;
+    referredBy?: string;
+    referralActivated?: boolean;
+    referralCount?: number;
+    referralCoinsEarned?: number;
+  } = {},
+) {
+  const safeName = String(raw.displayName || '').trim().slice(0, 60) || 'Farmer';
+  const safeHandle = formatReferralHandle(String(raw.handle || ''), uid).slice(0, 40) || '@farmer';
+  const rawColor = String(raw.avatarColor || '').trim().slice(0, 20);
+  const safeColor = rawColor.length >= 4 ? rawColor : '#EF4444';
+  const safeCompletedTasks = Array.isArray(raw.completedTaskIds)
+    ? raw.completedTaskIds.filter((v): v is string => typeof v === 'string' && v.length <= 64).slice(0, 50)
+    : [];
+  const safeClaimedPromos = Array.isArray(raw.claimedPromoCodes)
+    ? raw.claimedPromoCodes.filter((v): v is string => typeof v === 'string' && v.length <= 64).slice(0, 50)
+    : [];
+  const safeAchievements = Array.isArray(raw.claimedAchievementIds)
+    ? raw.claimedAchievementIds.filter((v): v is string => typeof v === 'string' && v.length <= 64).slice(0, 50)
+    : [];
+  const safeMilestones = Array.isArray(raw.claimedReferralMilestones)
+    ? raw.claimedReferralMilestones.filter((v): v is number => typeof v === 'number' && Number.isFinite(v)).slice(0, 20)
+    : [];
+
+  return {
+    displayName: safeName,
+    handle: safeHandle,
+    photoUrl: String(raw.photoUrl || '').slice(0, 512),
+    avatarColor: safeColor,
+    level: Math.max(1, Math.min(999, Math.floor(Number(raw.level ?? 1) || 1))),
+    xp: Math.max(0, Math.min(100_000_000, Number(raw.xp ?? 0) || 0)),
+    coins: Math.max(0, Math.min(100_000_000, Number(overrides.coins ?? raw.coins ?? 0) || 0)),
+    eggs: Math.max(0, Math.min(100_000_000, Number(raw.eggs ?? 0) || 0)),
+    totalEggsCollected: Math.max(0, Math.min(500_000_000, Number(raw.totalEggsCollected ?? 0) || 0)),
+    totalCashEarnedUsd: Math.max(0, Math.min(10_000_000, Number(raw.totalCashEarnedUsd ?? 0) || 0)),
+    totalWithdrawnUsd: Math.max(0, Math.min(10_000_000, Number(raw.totalWithdrawnUsd ?? 0) || 0)),
+    basketCapacity: Math.max(300, Math.min(1_000_000, Number(raw.basketCapacity ?? 300) || 300)),
+    basketTierHours: Math.max(8, Math.min(72, Number(raw.basketTierHours ?? 8) || 8)),
+    leghornCount: Math.max(0, Math.min(100_000, Math.floor(Number(raw.leghornCount ?? 0) || 0))),
+    rhodeCount: Math.max(0, Math.min(100_000, Math.floor(Number(raw.rhodeCount ?? 0) || 0))),
+    orpingtonCount: Math.max(0, Math.min(100_000, Math.floor(Number(raw.orpingtonCount ?? 0) || 0))),
+    australorpCount: Math.max(0, Math.min(100_000, Math.floor(Number(raw.australorpCount ?? 0) || 0))),
+    boughtThisWeek: Math.max(0, Math.min(100_000, Math.floor(Number(raw.boughtThisWeek ?? 0) || 0))),
+    dailyStreak: Math.max(0, Math.min(7, Math.floor(Number(raw.dailyStreak ?? 0) || 0))),
+    lastDailyClaimDate: String(raw.lastDailyClaimDate || '').slice(0, 20),
+    completedTaskIds: safeCompletedTasks,
+    claimedPromoCodes: safeClaimedPromos,
+    watchedAdsCount: Math.max(0, Math.min(10, Math.floor(Number(raw.watchedAdsCount ?? 0) || 0))),
+    referredBy: String(overrides.referredBy ?? raw.referredBy ?? '').slice(0, 64),
+    referralActivated: Boolean(overrides.referralActivated ?? raw.referralActivated),
+    referralCount: Math.max(
+      0,
+      Math.min(1_000_000, Math.floor(Number(overrides.referralCount ?? raw.referralCount ?? 0) || 0)),
+    ),
+    referralCoinsEarned: Math.max(
+      0,
+      Math.min(100_000_000, Number(overrides.referralCoinsEarned ?? raw.referralCoinsEarned ?? 0) || 0),
+    ),
+    firstDepositBonusUsed: Boolean(raw.firstDepositBonusUsed),
+    language: String(raw.language || 'en').slice(0, 16) || 'en',
+    lastCollectedAt: Math.max(0, Number(raw.lastCollectedAt ?? Date.now()) || Date.now()),
+    feedBoostUntilMs: Math.max(0, Number(raw.feedBoostUntilMs ?? 0) || 0),
+    lastGoldenEggAtMs: Math.max(0, Number(raw.lastGoldenEggAtMs ?? 0) || 0),
+    goldenEggsFound: Math.max(0, Math.min(10_000_000, Math.floor(Number(raw.goldenEggsFound ?? 0) || 0))),
+    claimedAchievementIds: safeAchievements,
+    claimedReferralMilestones: safeMilestones,
+    updatedAt: serverTimestamp(),
+  };
+}
+
+function toServerFirestoreLeaderboardUpdatePayload(
+  existingLb: Record<string, unknown>,
+  rawPlayer: Record<string, unknown>,
+  uid: string,
+  overrides: {
+    inviterCount: number;
+    buyerPoints: number;
+    chickensCount: number;
+  },
+) {
+  const safeName =
+    String(existingLb.displayName || rawPlayer.displayName || '').trim().slice(0, 60) || 'Farmer';
+  const safeHandle =
+    formatReferralHandle(String(existingLb.handle || rawPlayer.handle || ''), uid).slice(0, 40) ||
+    '@farmer';
+  const rawColor = String(existingLb.avatarColor || rawPlayer.avatarColor || '').trim().slice(0, 20);
+  const safeColor = rawColor.length >= 4 ? rawColor : '#EF4444';
+  return {
+    displayName: safeName,
+    handle: safeHandle,
+    photoUrl: String(existingLb.photoUrl ?? rawPlayer.photoUrl ?? '').slice(0, 512),
+    avatarColor: safeColor,
+    buyerPoints: Math.max(0, Math.min(10_000_000, Number(overrides.buyerPoints) || 0)),
+    inviterCount: Math.max(0, Math.min(1_000_000, Math.floor(Number(overrides.inviterCount) || 0))),
+    eggs: Math.max(0, Math.min(100_000_000, Number(rawPlayer.eggs ?? existingLb.eggs ?? 0) || 0)),
+    totalEggsCollected: Math.max(
+      0,
+      Math.min(500_000_000, Number(rawPlayer.totalEggsCollected ?? existingLb.totalEggsCollected ?? 0) || 0),
+    ),
+    chickensCount: Math.max(0, Math.min(1_000_000, Math.floor(Number(overrides.chickensCount) || 0))),
+    updatedAt: serverTimestamp(),
+  };
+}
+
 async function applyReferralInServerDb(params: {
   referredUid: string;
   refCode: string;
@@ -1486,12 +1594,14 @@ async function applyReferralInServerDb(params: {
           referredUid,
         ).slice(0, 40);
         nextReferredCoins = Math.max(0, Number(rd.coins ?? 0)) + REFERRED_WELCOME_BONUS_COINS;
-        tx.update(referredPlayerRef, {
-          referredBy: referrerUid,
-          referralActivated: true,
-          coins: nextReferredCoins,
-          updatedAt: serverTimestamp(),
-        });
+        tx.update(
+          referredPlayerRef,
+          toServerFirestorePlayerUpdatePayload(rd, referredUid, {
+            referredBy: referrerUid,
+            referralActivated: true,
+            coins: nextReferredCoins,
+          }),
+        );
       } else {
         const seeded = createDefaultProfile(
           referredUid,
@@ -1567,27 +1677,32 @@ async function applyReferralInServerDb(params: {
       const nextBuyerPoints = Math.max(0, calculateBuyerPoints(referrerFakeProfile as Parameters<typeof calculateBuyerPoints>[0]));
       const nextChickensCount = Math.max(0, calculateTotalChickens(referrerFakeProfile as Parameters<typeof calculateTotalChickens>[0]));
 
-      tx.update(referrerPlayerRef, {
-        coins: nextReferrerCoins,
-        referralCount: nextReferrerCount,
-        referralCoinsEarned: nextReferrerCoinsEarned,
-        updatedAt: serverTimestamp(),
-      });
+      tx.update(
+        referrerPlayerRef,
+        toServerFirestorePlayerUpdatePayload(rp, referrerUid, {
+          coins: nextReferrerCoins,
+          referralCount: nextReferrerCount,
+          referralCoinsEarned: nextReferrerCoinsEarned,
+        }),
+      );
 
       if (referrerLbSnap.exists()) {
-        tx.update(referrerLbRef, {
-          inviterCount: nextReferrerCount,
-          buyerPoints: nextBuyerPoints,
-          updatedAt: serverTimestamp(),
-        });
+        tx.update(
+          referrerLbRef,
+          toServerFirestoreLeaderboardUpdatePayload(referrerLbSnap.data(), rp, referrerUid, {
+            inviterCount: nextReferrerCount,
+            buyerPoints: nextBuyerPoints,
+            chickensCount: nextChickensCount,
+          }),
+        );
       } else {
         tx.set(referrerLbRef, {
           uid: referrerUid,
-          displayName: String(rp.displayName || referrerName || 'Farmer').slice(0, 60),
-          handle: String(rp.handle || '@farmer').slice(0, 40),
+          displayName: String(rp.displayName || referrerName || 'Farmer').trim().slice(0, 60) || 'Farmer',
+          handle: formatReferralHandle(String(rp.handle || ''), referrerUid).slice(0, 40) || '@farmer',
           photoUrl: String(rp.photoUrl || '').slice(0, 512),
-          avatarColor: String(rp.avatarColor || '#EF4444').slice(0, 20),
-          referralCode: String(rp.referralCode || referrerUid).slice(0, 32),
+          avatarColor: String(rp.avatarColor || '#EF4444').trim().length >= 4 ? String(rp.avatarColor).slice(0, 20) : '#EF4444',
+          referralCode: String(rp.referralCode || referrerUid).slice(0, 32) || referrerUid.slice(0, 32),
           buyerPoints: nextBuyerPoints,
           inviterCount: nextReferrerCount,
           eggs: Math.max(0, Number(rp.eggs ?? 0)),
@@ -1628,7 +1743,7 @@ async function applyReferralInServerDb(params: {
         rewardCoins,
       });
       try {
-        const tgRes = await fetch(
+        let tgRes = await fetch(
           `https://api.telegram.org/bot${activeBotToken}/sendMessage`,
           {
             method: 'POST',
@@ -1641,11 +1756,26 @@ async function applyReferralInServerDb(params: {
             signal: AbortSignal.timeout(7000),
           },
         );
-        const tgData = (await tgRes.json()) as {
+        let tgData = (await tgRes.json()) as {
           ok?: boolean;
           error_code?: number;
           description?: string;
         };
+        if (!tgData.ok && tgData.error_code === 400 && String(tgData.description || '').toLowerCase().includes('parse')) {
+          tgRes = await fetch(
+            `https://api.telegram.org/bot${activeBotToken}/sendMessage`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: numericReferrerId,
+                text: messageText.replace(/<\/?[^>]+>/g, ''),
+              }),
+              signal: AbortSignal.timeout(7000),
+            },
+          );
+          tgData = (await tgRes.json()) as typeof tgData;
+        }
         botDmSent = Boolean(tgData.ok);
         if (tgData.ok) {
           referralNotifyDedup.set(dedupKey, Date.now());
@@ -2296,28 +2426,53 @@ const ALLOWED_BROADCAST_MIME_EXT: Record<string, string> = {
   'image/png': 'png',
   'image/webp': 'webp',
   'image/gif': 'gif',
+  'image/heic': 'heic',
   'video/mp4': 'mp4',
   'video/webm': 'webm',
   'video/quicktime': 'mov',
+  'video/x-m4v': 'm4v',
+  'video/3gpp': '3gp',
 };
 
-function parseBroadcastMediaDataUrl(dataUrl: string): {
+const EXT_TO_BROADCAST_MIME: Record<string, string> = {
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+  gif: 'image/gif',
+  heic: 'image/heic',
+  mp4: 'video/mp4',
+  m4v: 'video/mp4',
+  webm: 'video/webm',
+  mov: 'video/quicktime',
+  '3gp': 'video/3gpp',
+};
+
+function parseBroadcastMediaDataUrl(
+  dataUrl: string,
+  filenameHint?: string,
+): {
   ok: true;
   mime: string;
   buffer: Buffer;
   ext: string;
 } | { ok: false; error: string } {
   const trimmed = String(dataUrl || '').trim();
-  const match = trimmed.match(/^data:([a-z0-9/+.-]+);base64,([A-Za-z0-9+/=\s]+)$/i);
+  const match = trimmed.match(/^data:([a-z0-9/+.-]*)(?:;[^,;]+=[^,;]*)*;base64,([A-Za-z0-9+/=\s]+)$/i);
   if (!match) {
     return { ok: false, error: 'Invalid uploaded media payload format.' };
   }
-  const mime = match[1].toLowerCase();
+  let mime = (match[1] || '').toLowerCase().trim();
+  if (!mime || mime === 'application/octet-stream') {
+    const extMatch = String(filenameHint || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+    const extMime = extMatch ? EXT_TO_BROADCAST_MIME[extMatch[1]] : undefined;
+    if (extMime) mime = extMime;
+  }
   const ext = ALLOWED_BROADCAST_MIME_EXT[mime];
   if (!ext) {
     return {
       ok: false,
-      error: `Unsupported media file type (${mime}). Use JPG, PNG, WebP, GIF, or MP4.`,
+      error: `Unsupported media file type (${mime || 'unknown'}). Use JPG, PNG, WebP, GIF, or MP4.`,
     };
   }
   const buffer = Buffer.from(match[2].replace(/\s+/g, ''), 'base64');
@@ -2437,7 +2592,7 @@ async function startServer() {
     let uploadedMedia: { mime: string; buffer: Buffer; ext: string; filename: string } | null = null;
     if (mediaType !== 'none') {
       if (mediaDataUrl) {
-        const parsedMedia = parseBroadcastMediaDataUrl(mediaDataUrl);
+        const parsedMedia = parseBroadcastMediaDataUrl(mediaDataUrl, body.mediaFilename);
         if (!parsedMedia.ok) {
           res.status(400).json({ ok: false, error: parsedMedia.error });
           return;
@@ -2475,6 +2630,10 @@ async function startServer() {
     if (rawTitle) htmlParts.push(`📢 <b>${escapeHtml(rawTitle)}</b>`);
     if (rawMessage) htmlParts.push(escapeHtml(rawMessage));
     const formattedText = htmlParts.join('\n\n').slice(0, mediaType === 'none' ? 4096 : 1024);
+    const plainFallbackText = [rawTitle ? `📢 ${rawTitle}` : '', rawMessage]
+      .filter(Boolean)
+      .join('\n\n')
+      .slice(0, mediaType === 'none' ? 4096 : 1024);
 
     const botUsername = await resolveTelegramBotUsername();
     const defaultMiniAppUrl = `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}`;
@@ -2508,6 +2667,7 @@ async function startServer() {
     let blockedCount = 0;
     let sampleError = '';
     let cachedTelegramFileId = '';
+    let attemptedRemoteMediaFetch = false;
 
     const endpoint =
       mediaType === 'photo'
@@ -2525,71 +2685,126 @@ async function startServer() {
           ? 'video'
           : 'animation';
 
-    const dispatchSingleBroadcast = async (chatId: string) => {
-      if (mediaType !== 'none' && uploadedMedia && !cachedTelegramFileId) {
+    type TgSendResp = {
+      ok?: boolean;
+      error_code?: number;
+      description?: string;
+      parameters?: { retry_after?: number };
+      result?: {
+        photo?: Array<{ file_id?: string }>;
+        video?: { file_id?: string };
+        animation?: { file_id?: string };
+      };
+    };
+
+    const dispatchSingleBroadcast = async (chatId: string): Promise<TgSendResp> => {
+      const sendMultipart = async (
+        mediaBlob: { mime: string; buffer: Buffer; filename: string },
+        useHtml: boolean,
+      ): Promise<TgSendResp> => {
         const form = new FormData();
         form.append('chat_id', chatId);
         form.append(
           mediaField,
-          new Blob([new Uint8Array(uploadedMedia.buffer)], { type: uploadedMedia.mime }),
-          uploadedMedia.filename,
+          new Blob([new Uint8Array(mediaBlob.buffer)], { type: mediaBlob.mime }),
+          mediaBlob.filename,
         );
-        form.append('caption', formattedText);
-        form.append('parse_mode', 'HTML');
+        if (useHtml) {
+          form.append('caption', formattedText);
+          form.append('parse_mode', 'HTML');
+        } else {
+          form.append('caption', plainFallbackText);
+        }
         form.append('reply_markup', JSON.stringify(replyMarkup));
 
         const tgRes = await fetch(`https://api.telegram.org/bot${activeBotToken}/${endpoint}`, {
           method: 'POST',
           body: form,
-          signal: AbortSignal.timeout(20_000),
+          signal: AbortSignal.timeout(25_000),
         });
-        return (await tgRes.json()) as {
-          ok?: boolean;
-          error_code?: number;
-          description?: string;
-          parameters?: { retry_after?: number };
-          result?: {
-            photo?: Array<{ file_id?: string }>;
-            video?: { file_id?: string };
-            animation?: { file_id?: string };
-          };
-        };
+        return (await tgRes.json()) as TgSendResp;
+      };
+
+      if (mediaType !== 'none' && uploadedMedia && !cachedTelegramFileId) {
+        let tgData = await sendMultipart(uploadedMedia, true);
+        if (!tgData.ok && tgData.error_code === 400 && String(tgData.description || '').toLowerCase().includes('parse')) {
+          tgData = await sendMultipart(uploadedMedia, false);
+        }
+        return tgData;
       }
 
-      const mediaValue = cachedTelegramFileId || mediaUrl;
-      const payload: Record<string, unknown> =
-        mediaType === 'none'
-          ? {
-              chat_id: chatId,
-              text: formattedText,
-              parse_mode: 'HTML',
-              reply_markup: replyMarkup,
-            }
-          : {
-              chat_id: chatId,
-              [mediaField]: mediaValue,
-              caption: formattedText,
-              parse_mode: 'HTML',
-              reply_markup: replyMarkup,
-            };
+      const sendJsonPayload = async (useHtml: boolean): Promise<TgSendResp> => {
+        const mediaValue = cachedTelegramFileId || mediaUrl;
+        const payload: Record<string, unknown> =
+          mediaType === 'none'
+            ? {
+                chat_id: chatId,
+                text: useHtml ? formattedText : plainFallbackText,
+                ...(useHtml ? { parse_mode: 'HTML' } : {}),
+                reply_markup: replyMarkup,
+              }
+            : {
+                chat_id: chatId,
+                [mediaField]: mediaValue,
+                caption: useHtml ? formattedText : plainFallbackText,
+                ...(useHtml ? { parse_mode: 'HTML' } : {}),
+                reply_markup: replyMarkup,
+              };
 
-      const tgRes = await fetch(`https://api.telegram.org/bot${activeBotToken}/${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(10_000),
-      });
-      return (await tgRes.json()) as {
-        ok?: boolean;
-        error_code?: number;
-        description?: string;
-        parameters?: { retry_after?: number };
-        result?: {
-          photo?: Array<{ file_id?: string }>;
-          video?: { file_id?: string };
-          animation?: { file_id?: string };
-        };
+        const tgRes = await fetch(`https://api.telegram.org/bot${activeBotToken}/${endpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(12_000),
+        });
+        return (await tgRes.json()) as TgSendResp;
       };
+
+      let tgData = await sendJsonPayload(true);
+      if (!tgData.ok && tgData.error_code === 400 && String(tgData.description || '').toLowerCase().includes('parse')) {
+        tgData = await sendJsonPayload(false);
+      }
+
+      // If Telegram couldn't fetch a remote HTTPS media URL directly, download once to buffer & upload via FormData
+      if (
+        !tgData.ok &&
+        mediaType !== 'none' &&
+        !cachedTelegramFileId &&
+        !uploadedMedia &&
+        !attemptedRemoteMediaFetch &&
+        mediaUrl &&
+        tgData.error_code === 400
+      ) {
+        attemptedRemoteMediaFetch = true;
+        try {
+          const mediaFetch = await fetch(mediaUrl, { signal: AbortSignal.timeout(12_000) });
+          if (mediaFetch.ok) {
+            const arr = await mediaFetch.arrayBuffer();
+            if (arr.byteLength > 0 && arr.byteLength <= 10 * 1024 * 1024) {
+              const rawCt = (mediaFetch.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+              const defaultMime =
+                mediaType === 'video' ? 'video/mp4' : mediaType === 'animation' ? 'image/gif' : 'image/jpeg';
+              const resolvedMime = ALLOWED_BROADCAST_MIME_EXT[rawCt] ? rawCt : defaultMime;
+              const resolvedExt = ALLOWED_BROADCAST_MIME_EXT[resolvedMime] || 'bin';
+              uploadedMedia = {
+                mime: resolvedMime,
+                buffer: Buffer.from(arr),
+                ext: resolvedExt,
+                filename: `broadcast.${resolvedExt}`,
+              };
+              let formRetry = await sendMultipart(uploadedMedia, true);
+              if (!formRetry.ok && formRetry.error_code === 400 && String(formRetry.description || '').toLowerCase().includes('parse')) {
+                formRetry = await sendMultipart(uploadedMedia, false);
+              }
+              return formRetry;
+            }
+          }
+        } catch {
+          // Return original Telegram error
+        }
+      }
+
+      return tgData;
     };
 
     for (const chatId of targetChatIds) {
@@ -2953,7 +3168,12 @@ async function startServer() {
       token?: string;
       playerId?: string;
       actionUrl?: string;
+      requireChannelCheck?: boolean;
     };
+    if (body.requireChannelCheck === false) {
+      res.json({ ok: true, enforced: false, joined: true, reason: 'channel_check_disabled_by_sponsor' });
+      return;
+    }
     const actionUrl = String(body.actionUrl || '').trim();
     if (!actionUrl || !getTelegramBotToken()) {
       res.json({ ok: true, enforced: false, joined: true, reason: 'not_applicable' });
@@ -4262,7 +4482,7 @@ async function startServer() {
     });
 
     try {
-      const tgRes = await fetch(
+      let tgRes = await fetch(
         `https://api.telegram.org/bot${activeBotToken}/sendMessage`,
         {
           method: 'POST',
@@ -4275,11 +4495,26 @@ async function startServer() {
           signal: AbortSignal.timeout(7000),
         },
       );
-      const tgData = (await tgRes.json()) as {
+      let tgData = (await tgRes.json()) as {
         ok?: boolean;
         error_code?: number;
         description?: string;
       };
+      if (!tgData.ok && tgData.error_code === 400 && String(tgData.description || '').toLowerCase().includes('parse')) {
+        tgRes = await fetch(
+          `https://api.telegram.org/bot${activeBotToken}/sendMessage`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: numericReferrerId,
+              text: messageText.replace(/<\/?[^>]+>/g, ''),
+            }),
+            signal: AbortSignal.timeout(7000),
+          },
+        );
+        tgData = (await tgRes.json()) as typeof tgData;
+      }
       if (tgData.ok) {
         if (referralNotifyDedup.size > 1000) referralNotifyDedup.clear();
         referralNotifyDedup.set(dedupKey, Date.now());
@@ -4573,25 +4808,39 @@ async function startServer() {
         return;
       }
       try {
-        const wdSnap = await getFreshDoc(doc(serverDb, 'withdraw_requests', withdrawalId));
-        if (!wdSnap.exists()) {
+        let wdSnap = await getFreshDoc(doc(serverDb, 'withdraw_requests', withdrawalId));
+        if (
+          (!wdSnap.exists() || String(wdSnap.data()?.status || '') !== status) &&
+          (status === 'approved' || status === 'rejected')
+        ) {
+          await new Promise((r) => setTimeout(r, 350));
+          wdSnap = await getFreshDoc(doc(serverDb, 'withdraw_requests', withdrawalId));
+        }
+
+        let wdData: Record<string, unknown> | null = wdSnap.exists() ? wdSnap.data() : null;
+        if (!wdData && authUserId && isValidSafeId(authUserId)) {
+          const userWdSnap = await getFreshDoc(doc(serverDb, 'players', authUserId, 'withdrawals', withdrawalId));
+          if (userWdSnap.exists()) {
+            wdData = userWdSnap.data();
+          }
+        }
+        if (!wdData) {
           res.status(403).json({ ok: false, sent: false, reason: 'Withdrawal record not found in database.' });
           return;
         }
-        const d = wdSnap.data();
-        if (String(d.status || '') !== status) {
+        if (String(wdData.status || '') !== status) {
           res.status(403).json({ ok: false, sent: false, reason: 'Withdrawal status mismatch.' });
           return;
         }
-        authUserId = String(d.userId || authUserId);
-        authTxId = String(d.txId || withdrawalId || authTxId);
-        authDisplayName = String(d.displayName || authDisplayName);
-        authHandle = String(d.handle || authHandle);
-        authEggs = Number(d.eggsAmount ?? authEggs);
-        authGram = String(d.gramAmount || authGram);
-        authUsd = Number(d.usdValue ?? authUsd);
-        authWallet = String(d.walletAddress || authWallet);
-        authMemo = String(d.memo || authMemo);
+        authUserId = String(wdData.userId || authUserId);
+        authTxId = String(wdData.txId || withdrawalId || authTxId);
+        authDisplayName = String(wdData.displayName || authDisplayName);
+        authHandle = String(wdData.handle || authHandle);
+        authEggs = Number(wdData.eggsAmount ?? authEggs);
+        authGram = String(wdData.gramAmount || authGram);
+        authUsd = Number(wdData.usdValue ?? authUsd);
+        authWallet = String(wdData.walletAddress || authWallet);
+        authMemo = String(wdData.memo || authMemo);
       } catch {
         res.status(503).json({
           ok: false,
@@ -4695,6 +4944,7 @@ async function startServer() {
     if ((status === 'approved' || status === 'rejected') && userNumericId) {
       try {
         let dmPayload: Record<string, unknown>;
+        let plainFallbackText = '';
         if (status === 'approved') {
           const activeTemplate = await loadWithdrawApproveTemplate();
           const rendered = renderWithdrawApproveMessage({
@@ -4709,11 +4959,12 @@ async function startServer() {
             memo: authMemo,
             adminNote: rawAdminNote,
           });
+          plainFallbackText = rendered.plainText;
           dmPayload = {
             chat_id: userNumericId,
             text: rendered.htmlText,
             parse_mode: 'HTML',
-            ...(rendered.buttonText
+            ...(rendered.buttonText && /^https:\/\//i.test(rendered.buttonUrl)
               ? {
                   reply_markup: {
                     inline_keyboard: [[{ text: rendered.buttonText, url: rendered.buttonUrl }]],
@@ -4730,6 +4981,7 @@ async function startServer() {
             `Your withdrawal request of <b>${gramAmount} GRAM</b> could not be processed and <b>${eggsAmount.toLocaleString()} Eggs</b> have been refunded to your farm balance.`,
             ...(adminNote ? ['', `💬 <b>Note:</b> ${adminNote}`] : []),
           ];
+          plainFallbackText = rejLines.join('\n').replace(/<\/?[^>]+>/g, '');
           dmPayload = {
             chat_id: userNumericId,
             text: rejLines.join('\n'),
@@ -4740,13 +4992,26 @@ async function startServer() {
           };
         }
 
-        const dmRes = await fetch(`https://api.telegram.org/bot${activeBotToken}/sendMessage`, {
+        let dmRes = await fetch(`https://api.telegram.org/bot${activeBotToken}/sendMessage`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(dmPayload),
           signal: AbortSignal.timeout(7000),
         });
-        const dmData = (await dmRes.json()) as { ok?: boolean; error_code?: number; description?: string };
+        let dmData = (await dmRes.json()) as { ok?: boolean; error_code?: number; description?: string };
+        if (!dmData.ok && dmData.error_code === 400) {
+          // Retry with plain text and without reply_markup in case HTML entities or button URL caused Telegram 400
+          dmRes = await fetch(`https://api.telegram.org/bot${activeBotToken}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: userNumericId,
+              text: plainFallbackText || String(dmPayload.text || '').replace(/<\/?[^>]+>/g, ''),
+            }),
+            signal: AbortSignal.timeout(7000),
+          });
+          dmData = (await dmRes.json()) as { ok?: boolean; error_code?: number; description?: string };
+        }
         userDmSent = Boolean(dmData.ok);
         if (!dmData.ok) {
           userDmReason = redactBotToken(dmData.description || 'User DM failed');

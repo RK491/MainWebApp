@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertCircle,
   ArrowDown,
   ArrowLeft,
   ArrowUpDown,
@@ -47,8 +48,8 @@ import {
   getTaskRemainingSlots,
   getWithdrawAdGateStatus,
   mergeTaskDefinitions,
-  REQUIRED_TELEGRAM_CHANNELS,
   sortTasks,
+  USER_TASK_CHANNEL_CHECK_FEE_COINS,
   USER_TASK_MAX_REWARD_COINS,
   USER_TASK_MIN_REWARD_COINS,
   USER_TASK_MIN_TOPUP_COINS,
@@ -66,11 +67,10 @@ import type {
 } from '../types/farm';
 import { getTelegramChannelUrl, notifyTelegramOpenLink } from '../utils/telegram';
 import { hasConfiguredAdNetworkSdk, hasConfiguredAdsgramTaskSdk } from '../utils/ads';
-import { ChannelCheckCard } from './ChannelCheckPanel';
 import { CoinIcon, EggIcon } from './GameIcons';
 
 type FilterTab = 'social' | 'daily' | 'exclusive' | 'partner';
-type TaskCheckStage = 'idle' | 'checking' | 'ready';
+type TaskCheckStage = 'idle' | 'checking' | 'ready' | 'verifying' | 'retry';
 
 interface TasksViewProps {
   profile: UserFarmProfile;
@@ -89,7 +89,10 @@ interface TasksViewProps {
   channelCheckError?: string | null;
   onCheckChannels?: () => Promise<ChannelVerificationResult | null> | void;
   onRetryCheckChannels?: () => Promise<ChannelVerificationResult | null> | void;
-  onVerifyTaskChannel?: (actionUrl: string) => Promise<{ joined: boolean; handle?: string }>;
+  onVerifyTaskChannel?: (
+    actionUrl: string,
+    options?: { requireChannelCheck?: boolean },
+  ) => Promise<{ joined: boolean; handle?: string }>;
   onTabTap?: () => void;
   onClaimPromo: (code: string) => void;
   onClaimDaily: () => void;
@@ -107,6 +110,7 @@ interface TasksViewProps {
     icon: string;
     actionUrl: string;
     totalSlots: number;
+    requireChannelCheck?: boolean;
   }) => Promise<boolean>;
   onTopUpTask?: (taskId: string, budgetCoins: number) => Promise<boolean>;
   onRefundTask?: (taskId: string) => Promise<boolean>;
@@ -153,15 +157,12 @@ export function TasksView({
     (getCodeChannelUrl || '').trim() ||
     (payoutChannelUrl || '').trim() ||
     DEFAULT_GET_CODE_CHANNEL_URL;
-  const activeRequiredChannels = (requiredChannels ?? REQUIRED_TELEGRAM_CHANNELS).filter(
-    (ch) => ch.enabled !== false && Boolean(ch.handle),
-  );
-  const channelGateActive = channelsGateEnabled && activeRequiredChannels.length > 0;
   const [filterTab, setFilterTab] = useState<FilterTab>('daily');
   const [sortBy, setSortBy] = useState<TaskSortOption>('most_reward');
   const [promoInput, setPromoInput] = useState('');
   const [openPreviewId, setOpenPreviewId] = useState<string | null>(null);
   const [taskStages, setTaskStages] = useState<Record<string, TaskCheckStage>>({});
+  const [taskRetryHandles, setTaskRetryHandles] = useState<Record<string, string>>({});
   const checkTimersRef = useRef<Record<string, number>>({});
 
   // Pull-to-refresh & 60s auto-refresh state
@@ -180,6 +181,7 @@ export function TasksView({
   const [newRewardCoins, setNewRewardCoins] = useState(String(USER_TASK_MIN_REWARD_COINS));
   const [newIcon, setNewIcon] = useState('send');
   const [newActionUrl, setNewActionUrl] = useState('');
+  const [newRequireChannelCheck, setNewRequireChannelCheck] = useState(false);
   const [creatingTask, setCreatingTask] = useState(false);
 
   const triggerRefresh = useCallback(
@@ -364,7 +366,7 @@ export function TasksView({
     if (remainingSlots !== null && remainingSlots <= 0) return;
 
     const currentStage = taskStages[task.id] ?? 'idle';
-    if (currentStage !== 'idle') return;
+    if (currentStage !== 'idle' && currentStage !== 'retry') return;
 
     onTabTap?.();
 
@@ -387,35 +389,40 @@ export function TasksView({
 
   const handleClaimCheckedTask = async (task: TaskDefinition) => {
     if (profile.completedTaskIds.includes(task.id)) return;
-    if (channelGateActive && onCheckChannels) {
-      const normalizedUrl = (task.actionUrl || '').toLowerCase();
-      const matchesRequired = activeRequiredChannels.some((ch) => {
-        const cleanSlug = ch.handle.replace(/^@/, '').toLowerCase();
-        const cleanUrl = (ch.url || '').trim().toLowerCase();
-        return (
-          (cleanSlug.length >= 2 && normalizedUrl.includes(cleanSlug)) ||
-          (cleanUrl.length >= 8 && normalizedUrl.includes(cleanUrl))
-        );
-      });
-      if (
-        matchesRequired ||
-        !channelVerification ||
-        (channelVerification.verificationMode === 'telegram_bot' && !channelVerification.allJoined)
-      ) {
-        const fresh = (await onCheckChannels()) || channelVerification;
-        if (fresh?.verificationMode === 'telegram_bot' && !fresh.allJoined) {
+
+    const isPaidTask = Boolean(task.creatorUid || (task.paidCoins ?? 0) > 0);
+    const shouldCheckChannel =
+      Boolean(onVerifyTaskChannel && task.actionUrl) &&
+      (!isPaidTask || Boolean(task.requireChannelCheck));
+
+    if (shouldCheckChannel && onVerifyTaskChannel && task.actionUrl) {
+      setTaskStages((prev) => ({ ...prev, [task.id]: 'verifying' }));
+      try {
+        const taskCheck = await onVerifyTaskChannel(task.actionUrl, {
+          requireChannelCheck: isPaidTask
+            ? Boolean(task.requireChannelCheck)
+            : task.requireChannelCheck,
+        });
+        if (!taskCheck.joined) {
+          setTaskStages((prev) => ({ ...prev, [task.id]: 'retry' }));
+          if (taskCheck.handle) {
+            setTaskRetryHandles((prev) => ({ ...prev, [task.id]: taskCheck.handle! }));
+          }
           return;
         }
-      }
-    }
-    if (onVerifyTaskChannel && task.actionUrl) {
-      const taskCheck = await onVerifyTaskChannel(task.actionUrl);
-      if (!taskCheck.joined) {
+      } catch {
+        setTaskStages((prev) => ({ ...prev, [task.id]: 'retry' }));
         return;
       }
     }
+
     onCompleteTask(task.id);
     setTaskStages((prev) => {
+      const next = { ...prev };
+      delete next[task.id];
+      return next;
+    });
+    setTaskRetryHandles((prev) => {
       const next = { ...prev };
       delete next[task.id];
       return next;
@@ -454,7 +461,7 @@ export function TasksView({
       );
     }
 
-    if (stage === 'checking') {
+    if (stage === 'checking' || stage === 'verifying') {
       return (
         <button
           type="button"
@@ -462,7 +469,7 @@ export function TasksView({
           className="clay-btn clay-btn-neutral min-h-[42px] min-w-[96px] px-3 rounded-2xl text-xs font-extrabold text-amber-700 dark:text-amber-300 inline-flex items-center justify-center gap-1.5 shrink-0 cursor-wait opacity-90"
         >
           <Loader2 className="w-3.5 h-3.5 animate-spin" />
-          <span>Checking</span>
+          <span>{stage === 'verifying' ? 'Verifying' : 'Checking'}</span>
         </button>
       );
     }
@@ -480,13 +487,39 @@ export function TasksView({
       );
     }
 
+    if (stage === 'retry') {
+      return (
+        <div className="flex items-center gap-1.5 shrink-0">
+          {task.actionUrl && (
+            <button
+              type="button"
+              onClick={() => startCheckingFlow(task)}
+              aria-label={`Join ${task.title}`}
+              className="clay-btn clay-btn-sky min-h-[42px] px-2.5 rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1 shrink-0"
+            >
+              <span>Join</span>
+              <ExternalLink className="w-3 h-3" />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => void handleClaimCheckedTask(task)}
+            className="clay-btn clay-btn-amber min-h-[42px] px-3.5 rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1 shrink-0"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>Retry</span>
+          </button>
+        </div>
+      );
+    }
+
     return (
       <button
         type="button"
         onClick={() => startCheckingFlow(task)}
         className="clay-btn clay-btn-amber min-h-[42px] min-w-[78px] px-4 rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1 shrink-0"
       >
-        <span>{task.actionUrl ? 'Go' : 'Start'}</span>
+        <span>{task.actionUrl ? 'Join' : 'Start'}</span>
         {task.actionUrl && <ExternalLink className="w-3 h-3" />}
       </button>
     );
@@ -604,6 +637,11 @@ export function TasksView({
                     Paid
                   </span>
                 )}
+                {task.requireChannelCheck && (
+                  <span className="rounded-md bg-sky-100/80 dark:bg-sky-950/60 border border-sky-300/70 dark:border-sky-800/60 px-1.5 py-0.5 text-[10px] font-extrabold text-sky-800 dark:text-sky-300 shrink-0">
+                    Verified
+                  </span>
+                )}
               </div>
               {task.subtitle && (
                 <div className="text-[11px] text-stone-500 dark:text-stone-400 truncate mt-0.5">
@@ -694,13 +732,27 @@ export function TasksView({
             {stage === 'checking' && (
               <div className="text-[11px] font-bold text-amber-700 dark:text-amber-300 flex items-center gap-1.5 px-0.5">
                 <Loader2 className="w-3 h-3 animate-spin" />
-                <span>Checking completion... claim unlocks in a moment</span>
+                <span>Opening link... tap Claim once you have joined</span>
+              </div>
+            )}
+            {stage === 'verifying' && (
+              <div className="text-[11px] font-bold text-amber-700 dark:text-amber-300 flex items-center gap-1.5 px-0.5">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                <span>Checking channel membership...</span>
               </div>
             )}
             {stage === 'ready' && !done && (
               <div className="text-[11px] font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5 px-0.5">
                 <Check className="w-3 h-3" />
-                <span>Verified! Tap Claim to receive +{task.rewardCoins.toLocaleString()} coins</span>
+                <span>Tap Claim to receive +{task.rewardCoins.toLocaleString()} coins</span>
+              </div>
+            )}
+            {stage === 'retry' && !done && (
+              <div className="text-[11px] font-bold text-rose-600 dark:text-rose-400 flex items-center gap-1.5 px-0.5">
+                <AlertCircle className="w-3 h-3 shrink-0" />
+                <span>
+                  Not joined {taskRetryHandles[task.id] || 'this channel'} yet — tap Join, then Retry.
+                </span>
               </div>
             )}
           </div>
@@ -711,14 +763,21 @@ export function TasksView({
 
   const parsedBudgetCoins = Math.floor(Number(newBudgetCoins) || 0);
   const parsedRewardCoins = Math.floor(Number(newRewardCoins) || 0);
-  const budgetPreview = calculatePaidTaskFromBudget(parsedBudgetCoins, parsedRewardCoins);
+  const minBudgetWithChannelOpt =
+    USER_TASK_MIN_TOTAL_COST_COINS +
+    (newRequireChannelCheck ? USER_TASK_CHANNEL_CHECK_FEE_COINS : 0);
+  const budgetPreview = calculatePaidTaskFromBudget(
+    parsedBudgetCoins,
+    parsedRewardCoins,
+    newRequireChannelCheck,
+  );
   const requiredCoins = Math.max(
-    USER_TASK_MIN_TOTAL_COST_COINS,
-    budgetPreview.valid ? budgetPreview.totalCostCoins : parsedBudgetCoins || USER_TASK_MIN_TOTAL_COST_COINS,
+    minBudgetWithChannelOpt,
+    budgetPreview.valid ? budgetPreview.totalCostCoins : parsedBudgetCoins || minBudgetWithChannelOpt,
   );
   const canAffordTask =
     budgetPreview.valid &&
-    profile.coins >= USER_TASK_MIN_TOTAL_COST_COINS &&
+    profile.coins >= minBudgetWithChannelOpt &&
     profile.coins >= budgetPreview.totalCostCoins;
   const coinsShort = Math.max(0, requiredCoins - profile.coins);
   const canProceedToPreview = newTitle.trim().length >= 2 && budgetPreview.valid;
@@ -746,6 +805,7 @@ export function TasksView({
         icon: newIcon,
         actionUrl: newActionUrl.trim(),
         totalSlots: budgetPreview.totalSlots,
+        requireChannelCheck: newRequireChannelCheck,
       });
       if (ok) {
         setFilterTab('partner');
@@ -754,6 +814,7 @@ export function TasksView({
         setNewActionUrl('');
         setNewBudgetCoins(String(USER_TASK_MIN_TOTAL_COST_COINS));
         setNewRewardCoins(String(USER_TASK_MIN_REWARD_COINS));
+        setNewRequireChannelCheck(false);
         setAddModalStep('form');
         setShowAddModal(false);
       }
@@ -914,23 +975,6 @@ export function TasksView({
         </div>
       )}
 
-      {onCheckChannels && channelGateActive && (
-        <ChannelCheckCard
-          requiredChannels={activeRequiredChannels}
-          verification={channelVerification}
-          checking={checkingChannels}
-          checkError={channelCheckError}
-          onCheckChannels={() => {
-            onTabTap?.();
-            void onCheckChannels();
-          }}
-          onRetryCheck={() => {
-            onTabTap?.();
-            void (onRetryCheckChannels ?? onCheckChannels)();
-          }}
-        />
-      )}
-
       {/* Promo Code Card */}
       <div className="clay-card p-4 space-y-3">
         <div className="flex items-start justify-between gap-2">
@@ -1064,7 +1108,7 @@ export function TasksView({
               Social &amp; Community Tasks
             </h3>
             <span className="text-[11px] font-bold text-stone-500 dark:text-stone-400">
-              Checking → Claim
+              Join → Claim
             </span>
           </div>
           {socialTasks.length === 0 ? (
@@ -1545,7 +1589,7 @@ export function TasksView({
               Exclusive Limited-Slot Quests
             </h3>
             <span className="text-[11px] font-bold text-stone-500 dark:text-stone-400">
-              Checking → Claim
+              Join → Claim
             </span>
           </div>
           {exclusiveTasks.length === 0 ? (
@@ -1568,7 +1612,7 @@ export function TasksView({
               Sponsors Tasks
             </h3>
             <span className="text-[11px] font-bold text-stone-500 dark:text-stone-400">
-              Checking → Claim
+              Join → Claim
             </span>
           </div>
           {partnerTasks.length === 0 ? (
@@ -1675,17 +1719,17 @@ export function TasksView({
 
                 <div className="space-y-1">
                   <label htmlFor="new-task-budget" className="text-xs font-bold text-stone-700 dark:text-stone-300">
-                    Coins Budget (min {USER_TASK_MIN_TOTAL_COST_COINS.toLocaleString()})
+                    Coins Budget (min {minBudgetWithChannelOpt.toLocaleString()})
                   </label>
                   <input
                     id="new-task-budget"
                     type="number"
-                    min={USER_TASK_MIN_TOTAL_COST_COINS}
+                    min={minBudgetWithChannelOpt}
                     step={50}
                     required
                     value={newBudgetCoins}
                     onChange={(e) => setNewBudgetCoins(e.target.value)}
-                    placeholder="5000"
+                    placeholder={String(minBudgetWithChannelOpt)}
                     className="clay-inset w-full min-h-[42px] px-3 text-sm font-mono-num font-bold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-400"
                   />
                 </div>
@@ -1727,6 +1771,42 @@ export function TasksView({
                     </select>
                   </div>
                 </div>
+
+                {/* Optional Telegram Channel Membership Verification (+1,000 coins) */}
+                <label
+                  htmlFor="new-task-channel-check"
+                  className={`clay-inset !rounded-2xl p-3 flex items-start gap-3 cursor-pointer border transition-colors ${
+                    newRequireChannelCheck
+                      ? 'border-sky-400 bg-sky-50/70 dark:bg-sky-950/40'
+                      : 'border-transparent'
+                  }`}
+                >
+                  <input
+                    id="new-task-channel-check"
+                    type="checkbox"
+                    checked={newRequireChannelCheck}
+                    onChange={(e) => {
+                      onTabTap?.();
+                      setNewRequireChannelCheck(e.target.checked);
+                    }}
+                    className="mt-0.5 w-4.5 h-4.5 accent-sky-600 rounded cursor-pointer shrink-0"
+                  />
+                  <div className="min-w-0 flex-1 space-y-0.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-extrabold text-stone-900 dark:text-stone-100 inline-flex items-center gap-1">
+                        <ShieldCheck className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
+                        <span>Enable Channel Check</span>
+                      </span>
+                      <span className="rounded-md bg-amber-100 dark:bg-amber-950/70 border border-amber-300/70 dark:border-amber-800/60 px-1.5 py-0.5 text-[10px] font-extrabold font-mono-num text-amber-800 dark:text-amber-300 shrink-0">
+                        +{USER_TASK_CHANNEL_CHECK_FEE_COINS.toLocaleString()} coins
+                      </span>
+                    </div>
+                    <p className="text-[11px] leading-snug text-stone-500 dark:text-stone-400">
+                      Tick to verify users actually joined your Telegram channel before claiming (extra{' '}
+                      {USER_TASK_CHANNEL_CHECK_FEE_COINS.toLocaleString()} coins). Leave unticked to allow Claim without verification.
+                    </p>
+                  </div>
+                </label>
 
                 {!budgetPreview.valid && budgetPreview.error && (
                   <div className="rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 px-3 py-2 text-xs font-bold text-amber-800 dark:text-amber-300">
@@ -1812,6 +1892,20 @@ export function TasksView({
                       -{budgetPreview.platformFeeCoins.toLocaleString()} coins
                     </span>
                   </div>
+                  <div className="flex items-center justify-between text-stone-600 dark:text-stone-300">
+                    <span>Channel Join Check</span>
+                    <span
+                      className={`font-mono-num font-bold ${
+                        budgetPreview.requireChannelCheck
+                          ? 'text-sky-700 dark:text-sky-300'
+                          : 'text-stone-400 dark:text-stone-500'
+                      }`}
+                    >
+                      {budgetPreview.requireChannelCheck
+                        ? `-${budgetPreview.channelCheckFeeCoins.toLocaleString()} coins (On)`
+                        : '0 coins (Off)'}
+                    </span>
+                  </div>
                   <div className="flex items-center justify-between text-stone-700 dark:text-stone-200 font-bold">
                     <span>Slots Unlocked ({budgetPreview.rewardCoins.toLocaleString()}/user)</span>
                     <span className="font-mono-num font-extrabold text-emerald-700 dark:text-emerald-300">
@@ -1819,7 +1913,7 @@ export function TasksView({
                     </span>
                   </div>
                   <div className="border-t border-amber-300/60 dark:border-amber-800/50 pt-2 flex items-center justify-between font-extrabold text-stone-900 dark:text-stone-100">
-                    <span>Total Coins Deducted (Slots + Fee)</span>
+                    <span>Total Coins Deducted</span>
                     <span className="inline-flex items-center gap-1 font-mono-num text-amber-800 dark:text-amber-300">
                       <CoinIcon className="w-4 h-4" />
                       <span>-{budgetPreview.totalCostCoins.toLocaleString()} coins</span>

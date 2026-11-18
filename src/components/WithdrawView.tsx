@@ -12,11 +12,9 @@ import {
 import {
   eggsToGram,
   eggsToUsd,
-  formatChannelsHandleSummary,
   getWithdrawalStatusMeta,
   getWithdrawAdGateStatus,
   MIN_WITHDRAW_EGGS,
-  REQUIRED_TELEGRAM_CHANNELS,
   validateWithdrawalInput,
 } from '../game/economy';
 import type {
@@ -25,7 +23,6 @@ import type {
   UserFarmProfile,
   WithdrawalOrder,
 } from '../types/farm';
-import { ChannelCheckCard } from './ChannelCheckPanel';
 import { EggIcon } from './GameIcons';
 
 interface WithdrawViewProps {
@@ -67,17 +64,8 @@ export function WithdrawView({
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  const activeChannels = (requiredChannels ?? REQUIRED_TELEGRAM_CHANNELS).filter(
-    (ch) => ch.enabled !== false && Boolean(ch.handle),
-  );
-  const channelGateActive = channelsGateEnabled && activeChannels.length > 0;
   const adGate = getWithdrawAdGateStatus(profile);
   const adGatePct = Math.min(100, Math.round((adGate.watched / adGate.required) * 100));
-  const channelGatePending = Boolean(channelGateActive && checkingChannels && !channelVerification);
-  const channelGateBlocked =
-    channelGateActive &&
-    channelVerification?.verificationMode === 'telegram_bot' &&
-    !channelVerification.allJoined;
   const numericEggs = Math.max(0, Math.floor(Number(amountInput) || 0));
   const receiveGram = eggsToGram(numericEggs).toFixed(4);
   const receiveUsd = eggsToUsd(numericEggs).toFixed(4);
@@ -100,20 +88,6 @@ export function WithdrawView({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setSuccessMsg(null);
-    if (channelGatePending) {
-      setErrorMsg('Verifying channel membership, please wait a second...');
-      return;
-    }
-    if (channelGateBlocked) {
-      const summary = formatChannelsHandleSummary(activeChannels);
-      setErrorMsg(`Join ${summary} and tap Check Channels before withdrawing.`);
-      return;
-    }
-    if (channelGateActive && !channelVerification && onCheckChannels) {
-      onCheckChannels();
-      setErrorMsg('Checking required channel membership first — please tap Withdraw again once verified.');
-      return;
-    }
     const err = validateWithdrawalInput(profile, numericEggs, walletAddress);
     if (err) {
       setErrorMsg(err);
@@ -249,19 +223,6 @@ export function WithdrawView({
         )}
       </div>
 
-      {/* Required Channels Verification Gate */}
-      {onCheckChannels && channelGateActive && (
-        <ChannelCheckCard
-          variant="compact"
-          requiredChannels={activeChannels}
-          verification={channelVerification}
-          checking={checkingChannels}
-          checkError={channelCheckError}
-          onCheckChannels={onCheckChannels}
-          onRetryCheck={onRetryCheckChannels ?? onCheckChannels}
-        />
-      )}
-
       {/* Withdraw Form */}
       <form
         onSubmit={handleSubmit}
@@ -387,20 +348,16 @@ export function WithdrawView({
 
         <button
           type="submit"
-          disabled={!adGate.unlocked || channelGateBlocked || channelGatePending}
+          disabled={!adGate.unlocked}
           className={`clay-btn w-full min-h-[50px] rounded-2xl font-extrabold text-sm ${
-            adGate.unlocked && !channelGateBlocked && !channelGatePending
+            adGate.unlocked
               ? 'clay-btn-sky'
               : 'clay-inset text-stone-500 dark:text-stone-400 cursor-not-allowed shadow-none'
           }`}
         >
           {!adGate.unlocked
             ? `Watch ${adGate.remaining} More Ad${adGate.remaining === 1 ? '' : 's'} to Withdraw`
-            : channelGatePending
-              ? 'Verifying Channel Membership...'
-              : channelGateBlocked
-                ? 'Join Required Channels to Withdraw'
-                : 'Withdraw'}
+            : 'Withdraw'}
         </button>
       </form>
 

@@ -19,6 +19,7 @@ import {
   AD_NETWORK_TASKS,
   ADSGRAM_BOT_JOIN_TASK,
   applyAutoHarvestIfDue,
+  buildReferralBotNotificationMessage,
   buyChickens,
   calculatePendingEggs,
   calculateProductionRate,
@@ -58,13 +59,16 @@ import {
   getUnifiedUserId,
   isAdminPlayerId,
   isAutoHarvestDroneActive,
+  isTelegramMemberStatusJoined,
   MIN_WITHDRAW_ADS_WATCHED,
+  normalizeTelegramChannelHandle,
   purchaseAutoHarvestDrone,
   recordCompletedGateAd,
   recordCoopFeverAd,
   REFERRAL_DEPOSIT_COMMISSION_RATE,
   REFERRER_SIGNUP_BONUS_COINS,
   reinvestEggs,
+  renderWithdrawApproveMessage,
   upgradeBasket,
   watchAdStep,
 } from './game/economy';
@@ -1085,7 +1089,7 @@ export default function App() {
     skipWelcome,
   ]);
 
-  // Reliably link pending referral once player is synced (handles late Telegram SDK start_param & server-side atomic linking + Bot DM)
+  // Reliably link pending referral once player is synced (waits for Telegram SDK hydration and sends Bot DM fallback)
   useEffect(() => {
     const refCode = (pendingRefCode || '').trim();
     if (!refCode || !isPlayerSynced || isBanned) return;
@@ -1120,131 +1124,180 @@ export default function App() {
       return;
     }
 
-    const attemptKey = `${targetUid}::${refCode.toUpperCase()}`;
-    if (referralAttemptedKeysRef.current.has(attemptKey)) return;
-    referralAttemptedKeysRef.current.add(attemptKey);
-
-    const applyReferral = async () => {
-      const isStillSamePlayer = () => activePlayerIdRef.current === targetUid;
+    const sendLocalReferralDmFallback = async (referrerUid: string, coinsRewarded: number) => {
+      const localBot = getLocalAdminBotConfig();
+      const numericReferrerId = extractTelegramNumericUserId(referrerUid);
+      if (!localBot || !numericReferrerId) return;
       try {
-        const response = await fetch(resolveApiUrl('/api/referrals/apply'), {
+        const msg = buildReferralBotNotificationMessage({
+          event: 'referral_joined',
+          referredName: currentProfile.displayName,
+          referredHandle: currentProfile.handle,
+          rewardCoins: coinsRewarded,
+        });
+        await fetch(`https://api.telegram.org/bot${localBot.token}/sendMessage`, {
           method: 'POST',
-          cache: 'no-store',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            playerId: targetUid,
-            refCode,
-            displayName: currentProfile.displayName,
-            handle: currentProfile.handle,
-            photoUrl: currentProfile.photoUrl,
-            initData: getTelegramInitData(),
-            token: playerSessionTokenRef.current,
+            chat_id: numericReferrerId,
+            text: msg,
+            parse_mode: 'HTML',
           }),
         });
-        const contentType = (response.headers.get('content-type') || '').toLowerCase();
-        const payload = (
-          contentType.includes('application/json') ? await response.json().catch(() => null) : null
-        ) as {
-          ok?: boolean;
-          applied?: boolean;
-          reason?: string;
-          referrerUid?: string;
-          referrerName?: string;
-          coinsRewarded?: number;
-          referredBonusCoins?: number;
-          nextReferredCoins?: number;
-        } | null;
-
-        if (!isStillSamePlayer()) return;
-
-        if (response.ok && payload?.ok) {
-          if (payload.applied) {
-            const bonus = Number(payload.referredBonusCoins ?? 100);
-            const serverNextCoins = Number(payload.nextReferredCoins);
-            setProfile((prev) => {
-              if (prev.uid !== targetUid || prev.referredBy) return prev;
-              const next: UserFarmProfile = {
-                ...prev,
-                referredBy: payload.referrerUid || prev.referredBy,
-                referralActivated: true,
-                coins: Number.isFinite(serverNextCoins) ? serverNextCoins : prev.coins + bonus,
-              };
-              latestProfileRef.current = next;
-              saveCachedPlayerProfile(next);
-              return next;
-            });
-            showToast(
-              `+${bonus} welcome coins! Joined via ${payload.referrerName || 'a friend'}'s referral!`,
-            );
-            clearPendingRef();
-            return;
-          }
-          if (
-            payload.reason === 'already_linked' ||
-            payload.reason === 'self_referral' ||
-            payload.reason === 'invalid_code'
-          ) {
-            clearPendingRef();
-            return;
-          }
-        }
       } catch {
-        // Fall through to client-side Firestore transaction fallback
+        // Ignore browser preview DM errors
       }
+    };
 
-      if (!isStillSamePlayer()) {
-        referralAttemptedKeysRef.current.delete(attemptKey);
-        return;
-      }
+    const runAttempt = () => {
+      const attemptKey = `${targetUid}::${refCode.toUpperCase()}`;
+      if (referralAttemptedKeysRef.current.has(attemptKey)) return;
+      referralAttemptedKeysRef.current.add(attemptKey);
 
-      try {
-        const snapshotProfile =
-          latestProfileRef.current.uid === targetUid ? latestProfileRef.current : currentProfile;
-        const refRes = await applyReferralCodeInFirestore(snapshotProfile, refCode);
-        if (!isStillSamePlayer()) return;
-        if (!('error' in refRes)) {
-          latestProfileRef.current = refRes.profile;
-          setProfile(refRes.profile);
-          saveCachedPlayerProfile(refRes.profile);
-          showToast(`+100 welcome coins! Joined via ${refRes.referrerName}'s referral!`);
-          await safeFetchJson('/api/referrals/notify', {
+      const applyReferral = async () => {
+        const isStillSamePlayer = () => activePlayerIdRef.current === targetUid;
+        try {
+          const response = await fetch(resolveApiUrl('/api/referrals/apply'), {
             method: 'POST',
+            cache: 'no-store',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              event: 'referral_joined',
-              referrerUid: refRes.referrerUid,
-              referredUid: refRes.profile.uid,
-              referredName: refRes.profile.displayName,
-              referredHandle: refRes.profile.handle,
-              rewardCoins: refRes.coinsRewarded,
+              playerId: targetUid,
+              refCode,
+              displayName: currentProfile.displayName,
+              handle: currentProfile.handle,
+              photoUrl: currentProfile.photoUrl,
               initData: getTelegramInitData(),
               token: playerSessionTokenRef.current,
             }),
           });
-          clearPendingRef();
+          const contentType = (response.headers.get('content-type') || '').toLowerCase();
+          const payload = (
+            contentType.includes('application/json') ? await response.json().catch(() => null) : null
+          ) as {
+            ok?: boolean;
+            applied?: boolean;
+            reason?: string;
+            referrerUid?: string;
+            referrerName?: string;
+            coinsRewarded?: number;
+            referredBonusCoins?: number;
+            nextReferredCoins?: number;
+            botDmSent?: boolean;
+          } | null;
+
+          if (!isStillSamePlayer()) return;
+
+          if (response.ok && payload?.ok) {
+            if (payload.applied) {
+              const bonus = Number(payload.referredBonusCoins ?? 100);
+              const serverNextCoins = Number(payload.nextReferredCoins);
+              setProfile((prev) => {
+                if (prev.uid !== targetUid || prev.referredBy) return prev;
+                const next: UserFarmProfile = {
+                  ...prev,
+                  referredBy: payload.referrerUid || prev.referredBy,
+                  referralActivated: true,
+                  coins: Number.isFinite(serverNextCoins) ? serverNextCoins : prev.coins + bonus,
+                };
+                latestProfileRef.current = next;
+                saveCachedPlayerProfile(next);
+                return next;
+              });
+              if (!payload.botDmSent && payload.referrerUid) {
+                void sendLocalReferralDmFallback(
+                  payload.referrerUid,
+                  Number(payload.coinsRewarded ?? REFERRER_SIGNUP_BONUS_COINS),
+                );
+              }
+              showToast(
+                `+${bonus} welcome coins! Joined via ${payload.referrerName || 'a friend'}'s referral!`,
+              );
+              clearPendingRef();
+              return;
+            }
+            if (
+              payload.reason === 'already_linked' ||
+              payload.reason === 'self_referral' ||
+              payload.reason === 'invalid_code'
+            ) {
+              clearPendingRef();
+              return;
+            }
+          }
+        } catch {
+          // Fall through to client-side Firestore transaction fallback
+        }
+
+        if (!isStillSamePlayer()) {
+          referralAttemptedKeysRef.current.delete(attemptKey);
           return;
         }
 
-        const errLow = refRes.error.toLowerCase();
-        if (
-          errLow.includes('already') ||
-          errLow.includes('own') ||
-          errLow.includes('yourself') ||
-          errLow.includes('invalid') ||
-          errLow.includes('not found')
-        ) {
-          clearPendingRef();
-        } else {
+        try {
+          const snapshotProfile =
+            latestProfileRef.current.uid === targetUid ? latestProfileRef.current : currentProfile;
+          const refRes = await applyReferralCodeInFirestore(snapshotProfile, refCode);
+          if (!isStillSamePlayer()) return;
+          if (!('error' in refRes)) {
+            latestProfileRef.current = refRes.profile;
+            setProfile(refRes.profile);
+            saveCachedPlayerProfile(refRes.profile);
+            showToast(`+100 welcome coins! Joined via ${refRes.referrerName}'s referral!`);
+            const notifyPayload = await safeFetchJson<{ ok?: boolean; sent?: boolean }>('/api/referrals/notify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                event: 'referral_joined',
+                referrerUid: refRes.referrerUid,
+                referredUid: refRes.profile.uid,
+                referredName: refRes.profile.displayName,
+                referredHandle: refRes.profile.handle,
+                rewardCoins: refRes.coinsRewarded,
+                initData: getTelegramInitData(),
+                token: playerSessionTokenRef.current,
+              }),
+            });
+            if (!notifyPayload?.sent) {
+              await sendLocalReferralDmFallback(refRes.referrerUid, refRes.coinsRewarded);
+            }
+            clearPendingRef();
+            return;
+          }
+
+          const errLow = refRes.error.toLowerCase();
+          if (
+            errLow.includes('already') ||
+            errLow.includes('own') ||
+            errLow.includes('yourself') ||
+            errLow.includes('invalid') ||
+            errLow.includes('not found')
+          ) {
+            clearPendingRef();
+          } else {
+            referralAttemptedKeysRef.current.delete(attemptKey);
+          }
+        } catch {
           referralAttemptedKeysRef.current.delete(attemptKey);
         }
-      } catch {
-        referralAttemptedKeysRef.current.delete(attemptKey);
-      }
+      };
+
+      void applyReferral();
     };
 
-    void applyReferral();
+    const inTelegramWebApp =
+      typeof window !== 'undefined' &&
+      Boolean((window as { Telegram?: { WebApp?: unknown } }).Telegram?.WebApp);
+    if (inTelegramWebApp && !detectedIdentity.isTelegramDetected && !/^tg_/.test(targetUid)) {
+      const hydrationTimer = window.setTimeout(runAttempt, 900);
+      return () => window.clearTimeout(hydrationTimer);
+    }
+
+    runAttempt();
+    return undefined;
   }, [
     activePlayerId,
+    detectedIdentity.isTelegramDetected,
     isBanned,
     isPlayerSynced,
     pendingRefCode,
@@ -1572,8 +1625,18 @@ export default function App() {
   );
 
   const handleVerifyTaskChannel = useCallback(
-    async (actionUrl: string): Promise<{ joined: boolean; handle?: string }> => {
-      if (!actionUrl || !extractTelegramNumericUserId(latestProfileRef.current.uid)) {
+    async (
+      actionUrl: string,
+      options?: { requireChannelCheck?: boolean },
+    ): Promise<{ joined: boolean; handle?: string }> => {
+      if (options?.requireChannelCheck === false) {
+        return { joined: true };
+      }
+      const numericUserId = extractTelegramNumericUserId(latestProfileRef.current.uid);
+      if (!actionUrl || !numericUserId) {
+        return { joined: true };
+      }
+      if (/[?&]start(app)?=/i.test(actionUrl) || /t\.me\/(\+|joinchat\/)/i.test(actionUrl)) {
         return { joined: true };
       }
       try {
@@ -1585,8 +1648,51 @@ export default function App() {
             initData: getTelegramInitData(),
             token: playerSessionTokenRef.current,
             actionUrl,
+            requireChannelCheck: options?.requireChannelCheck,
           }),
         });
+        const contentType = (res.headers.get('content-type') || '').toLowerCase();
+        if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
+          const localBot = getLocalAdminBotConfig();
+          const normalized = normalizeTelegramChannelHandle(actionUrl);
+          if (localBot && normalized.handle) {
+            const targetChatId = /^-?\d+$/.test(normalized.handle)
+              ? normalized.handle
+              : `@${normalized.handle.replace(/^@+/, '')}`;
+            const tgRes = await fetch(
+              `https://api.telegram.org/bot${localBot.token}/getChatMember?chat_id=${encodeURIComponent(targetChatId)}&user_id=${encodeURIComponent(numericUserId)}`,
+              { cache: 'no-store' },
+            );
+            const tgJson = (await tgRes.json().catch(() => ({}))) as {
+              ok?: boolean;
+              error_code?: number;
+              description?: string;
+              result?: { status?: string; is_member?: boolean };
+            };
+            const descLow = String(tgJson.description || '').toLowerCase();
+            const userNotFound =
+              !tgJson.ok &&
+              tgJson.error_code === 400 &&
+              (descLow.includes('user not found') || descLow.includes('participant_id_invalid'));
+            if (userNotFound) {
+              triggerHapticFeedback('warning');
+              showToast(`Join ${normalized.handle} first, then tap Retry!`);
+              return { joined: false, handle: normalized.handle };
+            }
+            if (tgJson.ok && tgJson.result) {
+              const joined = isTelegramMemberStatusJoined(
+                String(tgJson.result.status || 'left'),
+                tgJson.result.is_member,
+              );
+              if (!joined) {
+                triggerHapticFeedback('warning');
+                showToast(`Join ${normalized.handle} first, then tap Retry!`);
+                return { joined: false, handle: normalized.handle };
+              }
+            }
+          }
+          return { joined: true };
+        }
         const data = (await res.json().catch(() => null)) as {
           ok?: boolean;
           enforced?: boolean;
@@ -1595,7 +1701,7 @@ export default function App() {
         } | null;
         if (res.ok && data?.ok && data.enforced && !data.joined) {
           triggerHapticFeedback('warning');
-          showToast(`Join ${data.handle || 'the channel'} first to claim this task!`);
+          showToast(`Join ${data.handle || 'the channel'} first, then tap Retry!`);
           return { joined: false, handle: data.handle };
         }
       } catch {
@@ -1631,56 +1737,6 @@ export default function App() {
       return prev;
     });
   }, [activeChannelsSignature, channelsGateEnabled, executeClaimPromo]);
-
-  // Automatically check membership on startup, when opening Tasks/Withdraw, and on foreground return
-  useEffect(() => {
-    if (!channelsGateEnabled) return;
-    const numericId = extractTelegramNumericUserId(profile.uid);
-    if (!numericId) return;
-
-    const shouldAutoVerify =
-      activeTab === 'tasks' || subView === 'withdraw' || showChannelGateModal || !channelVerification;
-    if (!shouldAutoVerify) return;
-
-    const currentSig = (channelVerification?.channels || [])
-      .map((c) => c.handle.trim().toLowerCase())
-      .sort()
-      .join(',');
-    const freshVerifiedForCurrent =
-      channelVerification?.verificationMode === 'telegram_bot' &&
-      channelVerification.allJoined &&
-      currentSig === activeChannelsSignature &&
-      Date.now() - Number(channelVerification.checkedAtMs || 0) < 60_000;
-
-    if (!freshVerifiedForCurrent && Date.now() - lastAutoChannelCheckAtRef.current >= 4000) {
-      lastAutoChannelCheckAtRef.current = Date.now();
-      void handleCheckChannels({ silent: true });
-    }
-
-    const handleReturnRefresh = () => {
-      if (document.visibilityState !== 'visible') return;
-      if (activeTab !== 'tasks' && subView !== 'withdraw' && !showChannelGateModal) return;
-      if (Date.now() - lastAutoChannelCheckAtRef.current >= 3000) {
-        lastAutoChannelCheckAtRef.current = Date.now();
-        void handleCheckChannels({ silent: true });
-      }
-    };
-    document.addEventListener('visibilitychange', handleReturnRefresh);
-    window.addEventListener('focus', handleReturnRefresh);
-    return () => {
-      document.removeEventListener('visibilitychange', handleReturnRefresh);
-      window.removeEventListener('focus', handleReturnRefresh);
-    };
-  }, [
-    activeChannelsSignature,
-    activeTab,
-    channelVerification,
-    channelsGateEnabled,
-    handleCheckChannels,
-    profile.uid,
-    showChannelGateModal,
-    subView,
-  ]);
 
   const pendingEggs = useMemo(
     () => calculatePendingEggs(profile, nowMs),
@@ -1955,43 +2011,188 @@ export default function App() {
     decision: 'approved' | 'rejected',
     adminNote: string,
   ) => {
+    const sendWithdrawNotifyDirectPreview = async (): Promise<{
+      userDmSent: boolean;
+      userDmReason?: string;
+    }> => {
+      const localBot = getLocalAdminBotConfig();
+      const userNumericId = extractTelegramNumericUserId(request.userId);
+      if (!localBot) {
+        return { userDmSent: false, userDmReason: 'Bot Token not configured on server or browser.' };
+      }
+      if (!userNumericId) {
+        return { userDmSent: false, userDmReason: 'User has no Telegram numeric ID.' };
+      }
+      try {
+        if (payoutChannel) {
+          const chTarget = payoutChannel.startsWith('@') || /^-?\d+$/.test(payoutChannel)
+            ? payoutChannel
+            : `@${payoutChannel}`;
+          const statusLabel =
+            decision === 'approved' ? '✅ Approved &amp; Paid' : '❌ Rejected (Eggs Refunded)';
+          const chText = [
+            decision === 'approved' ? '💸 <b>Alpha Gram Payout Approved</b>' : '⚠️ <b>Alpha Gram Payout Rejected</b>',
+            '',
+            `👤 <b>User:</b> ${request.displayName} (${request.handle})`,
+            `🥚 <b>Eggs:</b> ${request.eggsAmount.toLocaleString()}`,
+            `💎 <b>Amount:</b> ${request.gramAmount} GRAM`,
+            `<b>Status:</b> ${statusLabel}`,
+          ].join('\n');
+          await fetch(`https://api.telegram.org/bot${localBot.token}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chTarget, text: chText, parse_mode: 'HTML' }),
+          }).catch(() => {});
+        }
+
+        let dmPayload: Record<string, unknown>;
+        let plainTextFallback = '';
+        if (decision === 'approved') {
+          const rendered = renderWithdrawApproveMessage({
+            template: withdrawApproveTemplate,
+            gramAmount: request.gramAmount,
+            eggsAmount: request.eggsAmount,
+            walletAddress: request.walletAddress,
+            usdValue: request.usdValue,
+            displayName: request.displayName,
+            handle: request.handle,
+            txId: request.txId || request.id,
+            memo: request.memo,
+            adminNote,
+          });
+          plainTextFallback = rendered.plainText;
+          dmPayload = {
+            chat_id: userNumericId,
+            text: rendered.htmlText,
+            parse_mode: 'HTML',
+            ...(rendered.buttonText && /^https:\/\//i.test(rendered.buttonUrl)
+              ? { reply_markup: { inline_keyboard: [[{ text: rendered.buttonText, url: rendered.buttonUrl }]] } }
+              : {}),
+          };
+        } else {
+          const miniAppUrl = `https://t.me/${telegramBotConfig.botUsername}/${telegramBotConfig.appShortName}`;
+          const rejText = [
+            '❌ <b>Withdrawal Rejected</b>',
+            '',
+            `Your withdrawal request of <b>${request.gramAmount} GRAM</b> could not be processed and <b>${request.eggsAmount.toLocaleString()} Eggs</b> have been refunded to your farm balance.`,
+            ...(adminNote ? ['', `💬 <b>Note:</b> ${adminNote}`] : []),
+          ].join('\n');
+          plainTextFallback = rejText.replace(/<\/?[^>]+>/g, '');
+          dmPayload = {
+            chat_id: userNumericId,
+            text: rejText,
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: [[{ text: '🐔 Open Alpha Gram', url: miniAppUrl }]] },
+          };
+        }
+
+        let dmRes = await fetch(`https://api.telegram.org/bot${localBot.token}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(dmPayload),
+        });
+        let dmJson = (await dmRes.json().catch(() => ({}))) as {
+          ok?: boolean;
+          error_code?: number;
+          description?: string;
+        };
+        if (!dmJson.ok && dmJson.error_code === 400) {
+          dmRes = await fetch(`https://api.telegram.org/bot${localBot.token}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: userNumericId,
+              text: plainTextFallback || String(dmPayload.text || '').replace(/<\/?[^>]+>/g, ''),
+            }),
+          });
+          dmJson = (await dmRes.json().catch(() => ({}))) as typeof dmJson;
+        }
+        return {
+          userDmSent: Boolean(dmJson.ok),
+          userDmReason: dmJson.ok ? undefined : dmJson.description || 'Telegram API error',
+        };
+      } catch (err) {
+        return {
+          userDmSent: false,
+          userDmReason: err instanceof Error ? err.message : 'Telegram request failed',
+        };
+      }
+    };
+
     try {
       await reviewWithdrawalInFirestore({ request, decision, adminNote });
-      const notifyRes = await safeFetchJson<{
-        ok?: boolean;
-        sent?: boolean;
-        userDmSent?: boolean;
-        userDmReason?: string;
-      }>('/api/withdraw/notify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          withdrawalId: request.id,
-          initData: getTelegramInitData(),
-          token: adminSessionToken,
-          displayName: request.displayName,
-          handle: request.handle,
-          playerId: request.userId,
-          eggsAmount: request.eggsAmount,
-          gramAmount: request.gramAmount,
-          usdValue: request.usdValue,
-          walletAddress: request.walletAddress,
-          memo: request.memo,
-          status: decision,
-          adminNote,
-        }),
-      });
+
+      let userDmSent = false;
+      let userDmReason: string | undefined;
+      try {
+        const res = await fetch(resolveApiUrl('/api/withdraw/notify'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            withdrawalId: request.id,
+            initData: getTelegramInitData(),
+            token: adminSessionToken,
+            displayName: request.displayName,
+            handle: request.handle,
+            playerId: request.userId,
+            eggsAmount: request.eggsAmount,
+            gramAmount: request.gramAmount,
+            usdValue: request.usdValue,
+            walletAddress: request.walletAddress,
+            memo: request.memo,
+            status: decision,
+            adminNote,
+          }),
+        });
+        const ct = (res.headers.get('content-type') || '').toLowerCase();
+        if (!ct.includes('application/json') || res.status === 404 || res.status === 405) {
+          const direct = await sendWithdrawNotifyDirectPreview();
+          userDmSent = direct.userDmSent;
+          userDmReason = direct.userDmReason;
+        } else {
+          const payload = (await res.json().catch(() => ({}))) as {
+            ok?: boolean;
+            userDmSent?: boolean;
+            userDmReason?: string;
+            reason?: string;
+          };
+          if (res.ok && payload.ok) {
+            userDmSent = Boolean(payload.userDmSent);
+            userDmReason = payload.userDmReason;
+            if (!userDmSent && getLocalAdminBotConfig()) {
+              const direct = await sendWithdrawNotifyDirectPreview();
+              if (direct.userDmSent) {
+                userDmSent = true;
+                userDmReason = undefined;
+              } else if (direct.userDmReason && !userDmReason) {
+                userDmReason = direct.userDmReason;
+              }
+            }
+          } else if (res.status === 403 && getLocalAdminBotConfig()) {
+            const direct = await sendWithdrawNotifyDirectPreview();
+            userDmSent = direct.userDmSent;
+            userDmReason = direct.userDmReason;
+          } else {
+            userDmReason = payload.userDmReason || payload.reason || `HTTP ${res.status}`;
+          }
+        }
+      } catch {
+        const direct = await sendWithdrawNotifyDirectPreview();
+        userDmSent = direct.userDmSent;
+        userDmReason = direct.userDmReason;
+      }
+
       if (decision === 'approved') {
         showToast(
-          notifyRes?.userDmSent
+          userDmSent
             ? `Approved ${request.gramAmount} GRAM & sent DM to ${request.displayName}!`
-            : `Approved ${request.gramAmount} GRAM for ${request.displayName}!`,
+            : `Approved ${request.gramAmount} GRAM (${userDmReason ? `DM skipped: ${userDmReason}` : 'DM not sent'})`,
         );
       } else {
         showToast(
-          notifyRes?.userDmSent
+          userDmSent
             ? `Rejected, refunded ${request.eggsAmount.toLocaleString()} eggs & notified user!`
-            : `Rejected request & refunded ${request.eggsAmount.toLocaleString()} eggs.`,
+            : `Rejected & refunded ${request.eggsAmount.toLocaleString()} eggs${userDmReason ? ` (${userDmReason})` : ''}`,
         );
       }
     } catch (err) {
@@ -2024,6 +2225,7 @@ export default function App() {
     icon: string;
     actionUrl: string;
     totalSlots: number;
+    requireChannelCheck?: boolean;
   }): Promise<boolean> => {
     await ensurePromiseRef.current;
     const current = latestProfileRef.current;
@@ -2047,6 +2249,7 @@ export default function App() {
           icon: input.icon,
           actionUrl: input.actionUrl,
           totalSlots: order.cost.totalSlots,
+          requireChannelCheck: input.requireChannelCheck,
         },
       });
       if ('error' in committed) {
@@ -3332,7 +3535,7 @@ export default function App() {
       const fullText = [input.title?.trim(), input.message.trim()]
         .filter(Boolean)
         .join('\n\n')
-        .slice(0, 4000);
+        .slice(0, input.mediaType === 'none' ? 4000 : 1024);
       const replyMarkup =
         input.buttonText?.trim() && input.buttonUrl?.trim()
           ? {
@@ -3340,39 +3543,129 @@ export default function App() {
                 [{ text: input.buttonText.trim(), url: input.buttonUrl.trim() }],
               ],
             }
-          : undefined;
+          : {
+              inline_keyboard: [
+                [
+                  {
+                    text: '🐔 Open Alpha Gram',
+                    url: `https://t.me/${telegramBotConfig.botUsername}/${telegramBotConfig.appShortName}`,
+                  },
+                ],
+              ],
+            };
 
+      const dataUrlToBlob = (dataUrl: string): { blob: Blob; filename: string } | null => {
+        const match = String(dataUrl || '')
+          .trim()
+          .match(/^data:([a-z0-9/+.-]*)(?:;[^,;]+=[^,;]*)*;base64,([A-Za-z0-9+/=\s]+)$/i);
+        if (!match) return null;
+        const fallbackMime =
+          input.mediaType === 'video'
+            ? 'video/mp4'
+            : input.mediaType === 'animation'
+              ? 'image/gif'
+              : 'image/jpeg';
+        const mime =
+          match[1] && match[1] !== 'application/octet-stream'
+            ? match[1].toLowerCase()
+            : fallbackMime;
+        const binStr = atob(match[2].replace(/\s+/g, ''));
+        const bytes = new Uint8Array(binStr.length);
+        for (let i = 0; i < binStr.length; i += 1) {
+          bytes[i] = binStr.charCodeAt(i);
+        }
+        const safeName =
+          (input.mediaFilename || '').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 48) ||
+          (input.mediaType === 'video'
+            ? 'broadcast.mp4'
+            : input.mediaType === 'animation'
+              ? 'broadcast.gif'
+              : 'broadcast.jpg');
+        return { blob: new Blob([bytes], { type: mime }), filename: safeName };
+      };
+
+      const parsedBlob =
+        input.mediaType !== 'none' && input.mediaDataUrl
+          ? dataUrlToBlob(input.mediaDataUrl)
+          : null;
+      const endpoint =
+        input.mediaType === 'photo'
+          ? 'sendPhoto'
+          : input.mediaType === 'video'
+            ? 'sendVideo'
+            : input.mediaType === 'animation'
+              ? 'sendAnimation'
+              : 'sendMessage';
+      const mediaField =
+        input.mediaType === 'photo'
+          ? 'photo'
+          : input.mediaType === 'video'
+            ? 'video'
+            : 'animation';
+
+      let cachedFileId = '';
       let sentCount = 0;
       let failedCount = 0;
       let sampleError = '';
       for (const chatId of targets) {
         try {
-          const usePhoto = input.mediaType === 'photo' && Boolean(input.mediaUrl?.trim());
-          const endpoint = usePhoto ? 'sendPhoto' : 'sendMessage';
-          const bodyPayload: Record<string, unknown> = {
-            chat_id: chatId,
-            ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-          };
-          if (usePhoto) {
-            bodyPayload.photo = input.mediaUrl!.trim();
-            bodyPayload.caption = fullText.slice(0, 1024);
-          } else {
-            bodyPayload.text = fullText;
-          }
-          const tgRes = await fetch(
-            `https://api.telegram.org/bot${localBot.token}/${endpoint}`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(bodyPayload),
-            },
-          );
-          const tgJson = (await tgRes.json().catch(() => ({}))) as {
+          let tgJson: {
             ok?: boolean;
             description?: string;
+            result?: {
+              photo?: Array<{ file_id?: string }>;
+              video?: { file_id?: string };
+              animation?: { file_id?: string };
+            };
           };
-          if (tgRes.ok && tgJson.ok) {
+          if (input.mediaType !== 'none' && parsedBlob && !cachedFileId) {
+            const form = new FormData();
+            form.append('chat_id', chatId);
+            form.append(mediaField, parsedBlob.blob, parsedBlob.filename);
+            form.append('caption', fullText);
+            form.append('reply_markup', JSON.stringify(replyMarkup));
+            const tgRes = await fetch(
+              `https://api.telegram.org/bot${localBot.token}/${endpoint}`,
+              { method: 'POST', body: form },
+            );
+            tgJson = (await tgRes.json().catch(() => ({}))) as typeof tgJson;
+          } else {
+            const mediaVal = cachedFileId || input.mediaUrl?.trim() || '';
+            const useMedia = input.mediaType !== 'none' && Boolean(mediaVal);
+            const activeEndpoint = useMedia ? endpoint : 'sendMessage';
+            const bodyPayload: Record<string, unknown> = {
+              chat_id: chatId,
+              reply_markup: replyMarkup,
+              ...(useMedia
+                ? { [mediaField]: mediaVal, caption: fullText }
+                : { text: fullText }),
+            };
+            const tgRes = await fetch(
+              `https://api.telegram.org/bot${localBot.token}/${activeEndpoint}`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(bodyPayload),
+              },
+            );
+            tgJson = (await tgRes.json().catch(() => ({}))) as typeof tgJson;
+          }
+
+          if (tgJson.ok) {
             sentCount += 1;
+            if (!cachedFileId && parsedBlob && tgJson.result) {
+              if (
+                input.mediaType === 'photo' &&
+                Array.isArray(tgJson.result.photo) &&
+                tgJson.result.photo.length > 0
+              ) {
+                cachedFileId = String(tgJson.result.photo[tgJson.result.photo.length - 1]?.file_id || '');
+              } else if (input.mediaType === 'video' && tgJson.result.video?.file_id) {
+                cachedFileId = String(tgJson.result.video.file_id);
+              } else if (input.mediaType === 'animation' && tgJson.result.animation?.file_id) {
+                cachedFileId = String(tgJson.result.animation.file_id);
+              }
+            }
           } else {
             failedCount += 1;
             if (!sampleError) sampleError = tgJson.description || 'Delivery failed';
@@ -3446,6 +3739,10 @@ export default function App() {
       showToast(errMsg);
       return { ok: false, error: errMsg, ...payload };
     } catch {
+      const localBot = getLocalAdminBotConfig();
+      if (localBot) {
+        return sendDirectFromBrowserPreview();
+      }
       const errMsg = 'Network error while sending broadcast.';
       showToast(errMsg);
       return { ok: false, error: errMsg };
@@ -4532,9 +4829,20 @@ export default function App() {
         muteAllLabel={strings.muteAll}
         unmuteAllLabel={strings.unmuteAll}
         isAdmin={isAuthorizedAdmin}
+        isLeaderboardActive={activeTab === 'leaderboard' && subView === 'none'}
+        ranksLabel={strings.ranks}
         onOpenProfile={() => openSubView('profile')}
         onOpenAdmin={() => openSubView('admin')}
         onToggleMuteAll={handleToggleMuteAll}
+        onToggleLeaderboard={() => {
+          playTabTapSound(soundsEnabled);
+          if (activeTab === 'leaderboard' && subView === 'none') {
+            setActiveTab('farm');
+          } else {
+            setSubView('none');
+            setActiveTab('leaderboard');
+          }
+        }}
         onOpenSettings={() => setShowSettings(true)}
         onOpenDeposit={() => openSubView('deposit')}
       />
@@ -4623,7 +4931,6 @@ export default function App() {
           labels={{
             farm: strings.farm,
             packs: strings.packs,
-            ranks: strings.ranks,
             tasks: strings.tasks,
             friends: strings.friends,
             wallet: strings.wallet,

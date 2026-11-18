@@ -5989,7 +5989,19 @@ export function AdminPanelView({
             setBcastFileError('File exceeds 10 MB limit. Choose a smaller image/video/GIF.');
             return;
           }
-          const mime = (file.type || '').toLowerCase();
+          let mime = (file.type || '').toLowerCase().trim();
+          const extMatch = (file.name || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+          const ext = extMatch ? extMatch[1] : '';
+          if (!mime || mime === 'application/octet-stream') {
+            if (ext === 'mp4' || ext === 'm4v') mime = 'video/mp4';
+            else if (ext === 'webm') mime = 'video/webm';
+            else if (ext === 'mov') mime = 'video/quicktime';
+            else if (ext === '3gp') mime = 'video/3gpp';
+            else if (ext === 'gif') mime = 'image/gif';
+            else if (ext === 'png') mime = 'image/png';
+            else if (ext === 'webp') mime = 'image/webp';
+            else if (ext === 'jpg' || ext === 'jpeg') mime = 'image/jpeg';
+          }
           if (mime.startsWith('video/')) {
             setBcastMediaType('video');
           } else if (mime === 'image/gif') {
@@ -6003,7 +6015,14 @@ export function AdminPanelView({
           const reader = new FileReader();
           reader.onload = () => {
             if (typeof reader.result === 'string') {
-              setBcastMediaDataUrl(reader.result);
+              let normalizedDataUrl = reader.result;
+              if (mime && /^data:(?:application\/octet-stream)?;base64,/i.test(normalizedDataUrl)) {
+                normalizedDataUrl = normalizedDataUrl.replace(
+                  /^data:(?:application\/octet-stream)?;base64,/i,
+                  `data:${mime};base64,`,
+                );
+              }
+              setBcastMediaDataUrl(normalizedDataUrl);
               setBcastMediaFilename(file.name);
               setBcastMediaFileSize(file.size);
               setBcastPreviewError(false);

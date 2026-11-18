@@ -203,6 +203,7 @@ export interface TaskDefinition {
   claimedCount?: number;
   creatorUid?: string;
   paidCoins?: number;
+  requireChannelCheck?: boolean;
   isCustom?: boolean;
   isActive?: boolean;
   createdAtMs?: number;

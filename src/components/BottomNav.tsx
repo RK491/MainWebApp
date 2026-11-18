@@ -1,4 +1,4 @@
-import { CheckSquare, Gift, Home, Package, Trophy, Wallet } from 'lucide-react';
+import { CheckSquare, Gift, Home, Package, Wallet } from 'lucide-react';
 import { motion } from 'motion/react';
 import type { NavTab } from '../types/farm';
 
@@ -8,7 +8,7 @@ interface BottomNavProps {
   labels: {
     farm: string;
     packs: string;
-    ranks: string;
+    ranks?: string;
     tasks: string;
     friends: string;
     wallet: string;
@@ -25,7 +25,6 @@ export function BottomNav({
   const items: { id: NavTab; label: string; icon: typeof Home; badge?: boolean }[] = [
     { id: 'farm', label: labels.farm, icon: Home },
     { id: 'packs', label: labels.packs, icon: Package },
-    { id: 'leaderboard', label: labels.ranks, icon: Trophy },
     { id: 'tasks', label: labels.tasks, icon: CheckSquare, badge: hasClaimableTasks },
     { id: 'friends', label: labels.friends, icon: Gift },
     { id: 'wallet', label: labels.wallet, icon: Wallet },
@@ -36,7 +35,7 @@ export function BottomNav({
       aria-label="Primary navigation"
       className="fixed bottom-0 left-0 right-0 z-40 clay-bottom-nav transition-colors"
     >
-      <div className="max-w-xl mx-auto grid grid-cols-6 h-16 px-1 gap-0.5 items-center">
+      <div className="max-w-xl mx-auto grid grid-cols-5 h-16 px-1.5 gap-1 items-center">
         {items.map((item) => {
           const Icon = item.icon;
           const active = activeTab === item.id;

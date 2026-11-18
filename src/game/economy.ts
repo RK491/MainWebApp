@@ -1501,6 +1501,7 @@ export const USER_TASK_MIN_SLOTS = 30;
 export const USER_TASK_MAX_SLOTS = 10_000;
 export const USER_TASK_PLATFORM_FEE_RATE = 0.1;
 export const USER_TASK_MIN_FEE_COINS = 500;
+export const USER_TASK_CHANNEL_CHECK_FEE_COINS = 1000;
 export const USER_TASK_MIN_TOTAL_COST_COINS = 5000;
 
 export interface PaidTaskCostBreakdown {
@@ -1508,12 +1509,15 @@ export interface PaidTaskCostBreakdown {
   totalSlots: number;
   rewardPoolCoins: number;
   platformFeeCoins: number;
+  channelCheckFeeCoins: number;
+  requireChannelCheck: boolean;
   totalCostCoins: number;
 }
 
 export function calculatePaidTaskCost(
   rewardCoins: number,
   totalSlots: number,
+  requireChannelCheck = false,
 ): PaidTaskCostBreakdown {
   const safeReward = Math.max(
     USER_TASK_MIN_REWARD_COINS,
@@ -1528,12 +1532,15 @@ export function calculatePaidTaskCost(
     USER_TASK_MIN_FEE_COINS,
     Math.round(rewardPoolCoins * USER_TASK_PLATFORM_FEE_RATE),
   );
+  const channelCheckFeeCoins = requireChannelCheck ? USER_TASK_CHANNEL_CHECK_FEE_COINS : 0;
   return {
     rewardCoins: safeReward,
     totalSlots: safeSlots,
     rewardPoolCoins,
     platformFeeCoins,
-    totalCostCoins: rewardPoolCoins + platformFeeCoins,
+    channelCheckFeeCoins,
+    requireChannelCheck: Boolean(requireChannelCheck),
+    totalCostCoins: rewardPoolCoins + platformFeeCoins + channelCheckFeeCoins,
   };
 }
 
@@ -1548,6 +1555,7 @@ export interface PaidTaskBudgetPreview extends PaidTaskCostBreakdown {
 export function calculatePaidTaskFromBudget(
   budgetCoins: number,
   rewardCoinsInput: number = USER_TASK_MIN_REWARD_COINS,
+  requireChannelCheck = false,
 ): PaidTaskBudgetPreview {
   const safeBudget = Math.max(0, Math.floor(Number(budgetCoins) || 0));
   const rawReward = Math.floor(Number(rewardCoinsInput) || 0);
@@ -1557,9 +1565,11 @@ export function calculatePaidTaskFromBudget(
     USER_TASK_MIN_REWARD_COINS,
     Math.min(USER_TASK_MAX_REWARD_COINS, rawReward || USER_TASK_MIN_REWARD_COINS),
   );
+  const channelCheckFeeCoins = requireChannelCheck ? USER_TASK_CHANNEL_CHECK_FEE_COINS : 0;
+  const minTotalCostForMode = USER_TASK_MIN_TOTAL_COST_COINS + channelCheckFeeCoins;
   const minBudgetForReward = Math.max(
-    USER_TASK_MIN_TOTAL_COST_COINS,
-    calculatePaidTaskCost(safeReward, USER_TASK_MIN_SLOTS).totalCostCoins,
+    minTotalCostForMode,
+    calculatePaidTaskCost(safeReward, USER_TASK_MIN_SLOTS, requireChannelCheck).totalCostCoins,
   );
 
   const computeRaw = (slots: number) => {
@@ -1571,7 +1581,8 @@ export function calculatePaidTaskFromBudget(
     return {
       rewardPoolCoins,
       platformFeeCoins,
-      totalCostCoins: rewardPoolCoins + platformFeeCoins,
+      channelCheckFeeCoins,
+      totalCostCoins: rewardPoolCoins + platformFeeCoins + channelCheckFeeCoins,
     };
   };
 
@@ -1582,6 +1593,8 @@ export function calculatePaidTaskFromBudget(
       totalSlots: 0,
       rewardPoolCoins: 0,
       platformFeeCoins: USER_TASK_MIN_FEE_COINS,
+      channelCheckFeeCoins,
+      requireChannelCheck: Boolean(requireChannelCheck),
       totalCostCoins: 0,
       unspentCoins: safeBudget,
       minBudgetForReward,
@@ -1590,23 +1603,29 @@ export function calculatePaidTaskFromBudget(
     };
   }
 
-  if (safeBudget < USER_TASK_MIN_TOTAL_COST_COINS) {
+  if (safeBudget < minTotalCostForMode) {
     return {
       budgetCoins: safeBudget,
       rewardCoins: safeReward,
       totalSlots: 0,
       rewardPoolCoins: 0,
       platformFeeCoins: USER_TASK_MIN_FEE_COINS,
+      channelCheckFeeCoins,
+      requireChannelCheck: Boolean(requireChannelCheck),
       totalCostCoins: 0,
       unspentCoins: safeBudget,
       minBudgetForReward,
       valid: false,
-      error: `Minimum ${USER_TASK_MIN_TOTAL_COST_COINS.toLocaleString()} coins required.`,
+      error: requireChannelCheck
+        ? `Minimum ${minTotalCostForMode.toLocaleString()} coins required (includes +${USER_TASK_CHANNEL_CHECK_FEE_COINS.toLocaleString()} channel check fee).`
+        : `Minimum ${USER_TASK_MIN_TOTAL_COST_COINS.toLocaleString()} coins required.`,
     };
   }
 
-  const maxLinear = Math.floor((safeBudget - USER_TASK_MIN_FEE_COINS) / safeReward);
-  const maxRate = Math.floor(safeBudget / (safeReward * (1 + USER_TASK_PLATFORM_FEE_RATE))) + 3;
+  const spendableAfterChannelCheck = Math.max(0, safeBudget - channelCheckFeeCoins);
+  const maxLinear = Math.floor((spendableAfterChannelCheck - USER_TASK_MIN_FEE_COINS) / safeReward);
+  const maxRate =
+    Math.floor(spendableAfterChannelCheck / (safeReward * (1 + USER_TASK_PLATFORM_FEE_RATE))) + 3;
   let slots = Math.max(0, Math.min(USER_TASK_MAX_SLOTS, maxLinear, maxRate));
 
   while (slots > 0 && computeRaw(slots).totalCostCoins > safeBudget) {
@@ -1620,6 +1639,8 @@ export function calculatePaidTaskFromBudget(
       totalSlots: slots,
       rewardPoolCoins: slots * safeReward,
       platformFeeCoins: slots > 0 ? computeRaw(slots).platformFeeCoins : USER_TASK_MIN_FEE_COINS,
+      channelCheckFeeCoins,
+      requireChannelCheck: Boolean(requireChannelCheck),
       totalCostCoins: slots > 0 ? computeRaw(slots).totalCostCoins : 0,
       unspentCoins: safeBudget,
       minBudgetForReward,
@@ -1635,6 +1656,8 @@ export function calculatePaidTaskFromBudget(
     totalSlots: slots,
     rewardPoolCoins: finalized.rewardPoolCoins,
     platformFeeCoins: finalized.platformFeeCoins,
+    channelCheckFeeCoins: finalized.channelCheckFeeCoins,
+    requireChannelCheck: Boolean(requireChannelCheck),
     totalCostCoins: finalized.totalCostCoins,
     unspentCoins: Math.max(0, safeBudget - finalized.totalCostCoins),
     minBudgetForReward,
@@ -1652,6 +1675,7 @@ export function createPaidTaskOrder(
     totalSlots: number;
     icon: string;
     actionUrl: string;
+    requireChannelCheck?: boolean;
   },
   nowMs: number,
 ):
@@ -1678,10 +1702,14 @@ export function createPaidTaskOrder(
     };
   }
 
-  const cost = calculatePaidTaskCost(rawReward, rawSlots);
-  if (profile.coins < USER_TASK_MIN_TOTAL_COST_COINS || profile.coins < cost.totalCostCoins) {
+  const requireChannelCheck = Boolean(input.requireChannelCheck);
+  const cost = calculatePaidTaskCost(rawReward, rawSlots, requireChannelCheck);
+  const minRequiredCost =
+    USER_TASK_MIN_TOTAL_COST_COINS +
+    (requireChannelCheck ? USER_TASK_CHANNEL_CHECK_FEE_COINS : 0);
+  if (profile.coins < minRequiredCost || profile.coins < cost.totalCostCoins) {
     return {
-      error: `Need at least ${Math.max(USER_TASK_MIN_TOTAL_COST_COINS, cost.totalCostCoins).toLocaleString()} coins to post this task (you have ${profile.coins.toLocaleString()}).`,
+      error: `Need at least ${Math.max(minRequiredCost, cost.totalCostCoins).toLocaleString()} coins to post this task (you have ${profile.coins.toLocaleString()}).`,
     };
   }
 
@@ -2987,6 +3015,7 @@ export interface TaskSubtitleMetaInput {
   claimedCount?: number;
   creatorUid?: string;
   paidCoins?: number;
+  requireChannelCheck?: boolean;
 }
 
 export interface DecodedTaskSubtitleMeta {
@@ -2995,6 +3024,7 @@ export interface DecodedTaskSubtitleMeta {
   claimedCount?: number;
   creatorUid?: string;
   paidCoins?: number;
+  requireChannelCheck?: boolean;
 }
 
 export function encodeTaskSubtitleMeta(input: TaskSubtitleMetaInput): string | undefined {
@@ -3003,19 +3033,24 @@ export function encodeTaskSubtitleMeta(input: TaskSubtitleMetaInput): string | u
   const claimedCount = Math.max(0, Math.floor(Number(input.claimedCount ?? 0) || 0));
   const creatorUid = (input.creatorUid || '').replace(/[:\n\r]/g, '').trim();
   const paidCoins = Math.max(0, Math.floor(Number(input.paidCoins ?? 0) || 0));
+  const requireChannelCheck = Boolean(input.requireChannelCheck);
 
-  const hasMeta = totalSlots > 0 || Boolean(creatorUid) || paidCoins > 0;
+  const hasMeta =
+    totalSlots > 0 || Boolean(creatorUid) || paidCoins > 0 || requireChannelCheck;
   if (!hasMeta) {
     return cleanSub ? cleanSub.slice(0, TASK_SUBTITLE_MAX_LEN) : undefined;
   }
 
-  const suffix =
-    creatorUid || paidCoins > 0
+  const suffix = requireChannelCheck
+    ? `${TASK_META_PREFIX}${totalSlots}:${claimedCount}:${creatorUid}:${paidCoins}:1`
+    : creatorUid || paidCoins > 0
       ? `${TASK_META_PREFIX}${totalSlots}:${claimedCount}:${creatorUid}:${paidCoins}`
       : `${TASK_META_PREFIX}${totalSlots}:${claimedCount}`;
 
   if (suffix.length >= TASK_SUBTITLE_MAX_LEN) {
-    const compact = `${TASK_META_PREFIX}${totalSlots}:${claimedCount}:${creatorUid.slice(0, 64)}`;
+    const compact = requireChannelCheck
+      ? `${TASK_META_PREFIX}${totalSlots}:${claimedCount}:${creatorUid.slice(0, 60)}:${paidCoins}:1`
+      : `${TASK_META_PREFIX}${totalSlots}:${claimedCount}:${creatorUid.slice(0, 64)}`;
     return compact.slice(0, TASK_SUBTITLE_MAX_LEN);
   }
 
@@ -3034,7 +3069,9 @@ export function decodeTaskSubtitleMeta(rawSubtitle?: string): DecodedTaskSubtitl
   const raw = (rawSubtitle || '').trim();
   if (!raw) return {};
 
-  const match = raw.match(/(?:^|\n)__m:(\d+):(\d+)(?::([^:\n]*))?(?::(\d+))?\s*$/);
+  const match = raw.match(
+    /(?:^|\n)__m:(\d+):(\d+)(?::([^:\n]*))?(?::(\d+))?(?::([01]))?\s*$/,
+  );
   if (!match) {
     return { subtitle: raw };
   }
@@ -3045,6 +3082,7 @@ export function decodeTaskSubtitleMeta(rawSubtitle?: string): DecodedTaskSubtitl
   const creatorUid = match[3] ? match[3].trim() : undefined;
   const paidCoins =
     match[4] !== undefined ? Math.max(0, Math.floor(Number(match[4]) || 0)) : undefined;
+  const requireChannelCheck = match[5] === '1';
 
   return {
     ...(cleanSub ? { subtitle: cleanSub } : {}),
@@ -3052,6 +3090,7 @@ export function decodeTaskSubtitleMeta(rawSubtitle?: string): DecodedTaskSubtitl
     claimedCount,
     ...(creatorUid ? { creatorUid } : {}),
     ...(paidCoins !== undefined && paidCoins > 0 ? { paidCoins } : {}),
+    ...(requireChannelCheck ? { requireChannelCheck: true } : {}),
   };
 }
 

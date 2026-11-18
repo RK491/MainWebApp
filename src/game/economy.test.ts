@@ -74,6 +74,7 @@ import {
   isCoopFeverActive,
   purchaseAutoHarvestDrone,
   renderWithdrawApproveMessage,
+  USER_TASK_CHANNEL_CHECK_FEE_COINS,
   USER_TASK_MIN_REWARD_COINS,
   filterWithdrawalsByTab,
   formatAdConfigTemplate,
@@ -3208,3 +3209,77 @@ test('bot token sanitization, masking, validation, and case-insensitive @handle 
     ['tg_7474513009'],
   );
 });
+
+test('paid task optional Channel Check adds +1,000 coins surcharge and round-trips inside subtitle metadata', () => {
+  assert.equal(USER_TASK_CHANNEL_CHECK_FEE_COINS, 1000);
+
+  const withoutCheck = calculatePaidTaskFromBudget(6000, 50, false);
+  assert.equal(withoutCheck.valid, true);
+  assert.equal(withoutCheck.requireChannelCheck, false);
+  assert.equal(withoutCheck.channelCheckFeeCoins, 0);
+
+  // With channel check ON, 6,000 budget reserves 1,000 channel check fee -> 5,000 remaining (4,500 pool + 500 platform fee = 90 slots)
+  const withCheck = calculatePaidTaskFromBudget(6000, 50, true);
+  assert.equal(withCheck.valid, true);
+  assert.equal(withCheck.requireChannelCheck, true);
+  assert.equal(withCheck.channelCheckFeeCoins, 1000);
+  assert.equal(withCheck.totalSlots, 90);
+  assert.equal(withCheck.rewardPoolCoins, 4500);
+  assert.equal(withCheck.platformFeeCoins, 500);
+  assert.equal(withCheck.totalCostCoins, 6000);
+
+  // Exact 5,000 budget is insufficient when channel check (+1,000) is ticked (requires >= 6,000)
+  const tooLowWithCheck = calculatePaidTaskFromBudget(5000, 50, true);
+  assert.equal(tooLowWithCheck.valid, false);
+  assert.equal(tooLowWithCheck.minBudgetForReward, 6000);
+
+  const costDirect = calculatePaidTaskCost(50, 90, true);
+  assert.equal(costDirect.channelCheckFeeCoins, 1000);
+  assert.equal(costDirect.totalCostCoins, 6000);
+
+  const { profile } = createDefaultProfile('player_sponsor_chk', 'Sponsor', '@sponsor', NOW);
+  const funded = { ...profile, coins: 10000 };
+  const order = createPaidTaskOrder(
+    funded,
+    {
+      title: 'Join Sponsor Channel',
+      category: 'partner',
+      icon: 'send',
+      actionUrl: 'https://t.me/AlphaGramTestChannel',
+      rewardCoins: 50,
+      totalSlots: 90,
+      requireChannelCheck: true,
+    },
+    NOW,
+  );
+  assert.ok(!('error' in order));
+  assert.equal(order.cost.totalCostCoins, 6000);
+  assert.equal(order.profile.coins, 4000);
+
+  // Metadata encode/decode round-trip stays under 120 chars & preserves channel check flag
+  const encodedOn = encodeTaskSubtitleMeta({
+    subtitle: 'Join & tap Claim',
+    totalSlots: 90,
+    creatorUid: 'tg_7508911853',
+    paidCoins: 6000,
+    requireChannelCheck: true,
+  });
+  assert.ok(encodedOn);
+  assert.ok(encodedOn.length <= 120);
+  const decodedOn = decodeTaskSubtitleMeta(encodedOn);
+  assert.equal(decodedOn.requireChannelCheck, true);
+  assert.equal(decodedOn.totalSlots, 90);
+  assert.equal(decodedOn.paidCoins, 6000);
+  assert.equal(decodedOn.subtitle, 'Join & tap Claim');
+
+  const encodedOff = encodeTaskSubtitleMeta({
+    subtitle: 'Quick link task',
+    totalSlots: 90,
+    creatorUid: 'tg_7508911853',
+    paidCoins: 5000,
+    requireChannelCheck: false,
+  });
+  const decodedOff = decodeTaskSubtitleMeta(encodedOff);
+  assert.equal(Boolean(decodedOff.requireChannelCheck), false);
+});
+

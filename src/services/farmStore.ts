@@ -695,8 +695,10 @@ export async function applyReferralCodeInFirestore(
         createdAt: serverTimestamp(),
       });
 
-      const safeReferredName = (currentProfile.displayName || 'Farmer').trim().slice(0, 60) || 'Farmer';
-      const safeReferredHandle = formatReferralHandle(currentProfile.handle, currentProfile.uid).slice(0, 40);
+      const rawName = (currentProfile.displayName || '').trim();
+      const safeReferredName = (rawName || `Farmer ${currentProfile.uid.slice(-4)}`).slice(0, 60);
+      const rawHandle = formatReferralHandle(currentProfile.handle, currentProfile.uid).trim();
+      const safeReferredHandle = (rawHandle || `@farmer_${currentProfile.uid.slice(-4)}`).slice(0, 40);
 
       // Immediately activate referral and award +150 coins to the referrer upon detection
       transaction.set(referralDocRef, {
@@ -1587,6 +1589,8 @@ function parseCustomTaskDoc(id: string, d: Record<string, unknown>): TaskDefinit
   const creatorUid = d.creatorUid ? String(d.creatorUid) : decoded.creatorUid;
   const paidCoins =
     d.paidCoins !== undefined ? Number(d.paidCoins) : decoded.paidCoins;
+  const requireChannelCheck =
+    d.requireChannelCheck === true || decoded.requireChannelCheck === true;
 
   return {
     id,
@@ -1600,6 +1604,7 @@ function parseCustomTaskDoc(id: string, d: Record<string, unknown>): TaskDefinit
     claimedCount,
     ...(creatorUid ? { creatorUid } : {}),
     ...(paidCoins !== undefined ? { paidCoins } : {}),
+    ...(requireChannelCheck ? { requireChannelCheck: true } : {}),
     isCustom: true,
     isActive: d.isActive !== false,
     createdAtMs: Number(d.createdAtMs ?? 0),
@@ -1705,6 +1710,7 @@ export async function createPaidCustomTaskInFirestore(params: {
     icon: string;
     actionUrl: string;
     totalSlots: number;
+    requireChannelCheck?: boolean;
   };
 }): Promise<{ task: TaskDefinition; profile: UserFarmProfile } | { error: string }> {
   const uid = params.profile.uid;
@@ -1724,12 +1730,14 @@ export async function createPaidCustomTaskInFirestore(params: {
     Math.min(USER_TASK_MAX_SLOTS, Math.round(params.taskInput.totalSlots)),
   );
   const paidCoins = Math.max(USER_TASK_MIN_TOTAL_COST_COINS, Math.round(params.paidCoins));
+  const requireChannelCheck = Boolean(params.taskInput.requireChannelCheck);
   const encodedSubtitle = encodeTaskSubtitleMeta({
     subtitle: displaySubtitle,
     totalSlots: cleanTotalSlots,
     claimedCount: 0,
     creatorUid: uid,
     paidCoins,
+    requireChannelCheck,
   });
   const txId = params.transaction.id.replace(/[^a-zA-Z0-9_-]/g, '_');
 
@@ -1794,6 +1802,7 @@ export async function createPaidCustomTaskInFirestore(params: {
         claimedCount: 0,
         creatorUid: uid,
         paidCoins,
+        ...(requireChannelCheck ? { requireChannelCheck: true } : {}),
         isCustom: true,
         isActive: true,
         createdAtMs: nowMs,
@@ -1859,6 +1868,7 @@ export async function topUpPaidCustomTaskInFirestore(params: {
         claimedCount: nextClaimed,
         creatorUid: uid,
         paidCoins: nextPaidCoins,
+        requireChannelCheck: parsed.requireChannelCheck,
       });
 
       const syncedProfile: UserFarmProfile = {
@@ -1945,6 +1955,7 @@ export async function refundPaidCustomTaskInFirestore(params: {
         claimedCount: claimed,
         creatorUid: uid,
         paidCoins: nextPaidCoins,
+        requireChannelCheck: parsed.requireChannelCheck,
       });
 
       const liveCoins = Number(playerSnap.data().coins ?? 0);
@@ -2015,6 +2026,7 @@ export async function incrementTaskClaimCountInFirestore(taskId: string): Promis
         claimedCount: nextClaimed,
         creatorUid: parsed.creatorUid,
         paidCoins: parsed.paidCoins,
+        requireChannelCheck: parsed.requireChannelCheck,
       });
       if (nextSubtitle) {
         transaction.update(ref, { subtitle: nextSubtitle });

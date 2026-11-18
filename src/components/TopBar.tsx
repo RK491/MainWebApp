@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Globe, Plus, ShieldCheck, Volume2, VolumeX } from 'lucide-react';
+import { Globe, Plus, ShieldCheck, Trophy, Volume2, VolumeX } from 'lucide-react';
 import { motion, useReducedMotion } from 'motion/react';
 import type { UserFarmProfile } from '../types/farm';
 import { CoinIcon, EggIcon, PlayerAvatar } from './GameIcons';
@@ -13,8 +13,11 @@ interface TopBarProps {
   muteAllLabel: string;
   unmuteAllLabel: string;
   isAdmin?: boolean;
+  isLeaderboardActive?: boolean;
+  ranksLabel?: string;
   onOpenProfile: () => void;
   onOpenAdmin?: () => void;
+  onToggleLeaderboard?: () => void;
   onToggleMuteAll: () => void;
   onOpenSettings: () => void;
   onOpenDeposit: () => void;
@@ -28,8 +31,11 @@ export function TopBar({
   muteAllLabel,
   unmuteAllLabel,
   isAdmin = false,
+  isLeaderboardActive = false,
+  ranksLabel = 'Ranks',
   onOpenProfile,
   onOpenAdmin,
+  onToggleLeaderboard,
   onToggleMuteAll,
   onOpenSettings,
   onOpenDeposit,
@@ -108,6 +114,25 @@ export function TopBar({
               >
                 <ShieldCheck className="w-4 h-4 shrink-0" />
                 <span className="hidden sm:inline">Admin Panel</span>
+              </motion.button>
+            )}
+
+            {onToggleLeaderboard && (
+              <motion.button
+                type="button"
+                whileTap={{ scale: 0.94 }}
+                onClick={onToggleLeaderboard}
+                aria-pressed={isLeaderboardActive}
+                aria-label={isLeaderboardActive ? 'Back to Farm' : 'Open Leaderboard'}
+                title={ranksLabel}
+                className={`clay-btn h-10 px-2.5 sm:px-3 rounded-2xl flex items-center justify-center gap-1.5 text-xs font-extrabold whitespace-nowrap ${
+                  isLeaderboardActive
+                    ? 'clay-btn-amber text-amber-950'
+                    : 'clay-btn-neutral text-amber-600 dark:text-amber-400'
+                }`}
+              >
+                <Trophy className="w-4 h-4 shrink-0" />
+                <span className="hidden sm:inline">{ranksLabel}</span>
               </motion.button>
             )}
 
