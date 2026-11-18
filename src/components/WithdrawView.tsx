@@ -35,7 +35,9 @@ interface WithdrawViewProps {
   channelsGateEnabled?: boolean;
   channelVerification?: ChannelVerificationResult | null;
   checkingChannels?: boolean;
+  channelCheckError?: string | null;
   onCheckChannels?: () => void;
+  onRetryCheckChannels?: () => void;
   onBack: () => void;
   onGoToTasks?: () => void;
   onConfirmWithdraw: (eggsAmount: number, walletAddress: string, memo: string) => void;
@@ -48,7 +50,9 @@ export function WithdrawView({
   channelsGateEnabled = true,
   channelVerification = null,
   checkingChannels = false,
+  channelCheckError = null,
   onCheckChannels,
+  onRetryCheckChannels,
   onBack,
   onGoToTasks,
   onConfirmWithdraw,
@@ -252,7 +256,9 @@ export function WithdrawView({
           requiredChannels={activeChannels}
           verification={channelVerification}
           checking={checkingChannels}
+          checkError={channelCheckError}
           onCheckChannels={onCheckChannels}
+          onRetryCheck={onRetryCheckChannels ?? onCheckChannels}
         />
       )}
 

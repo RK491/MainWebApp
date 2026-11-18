@@ -15,16 +15,11 @@ function pwaDevSafeRegisterPlugin(): Plugin {
 function registerDevSW() {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') return;
   if (!('serviceWorker' in navigator)) return;
-  const register = () => {
-    navigator.serviceWorker
-      .register('/dev-sw.js?dev-sw', { scope: '/', type: 'classic' })
-      .catch(() => {});
-  };
-  if (document.readyState === 'complete') {
-    register();
-  } else {
-    window.addEventListener('load', register, { once: true });
-  }
+  navigator.serviceWorker.getRegistrations().then((regs) => {
+    for (const reg of regs) {
+      reg.unregister().catch(() => {});
+    }
+  }).catch(() => {});
 }
 export default registerDevSW;
 `;
@@ -75,10 +70,25 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          skipWaiting: true,
+          clientsClaim: true,
+          cleanupOutdatedCaches: true,
           maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
+          navigateFallback: null,
           navigateFallbackDenylist: [/^\/api\//],
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,jpg,woff,woff2}'],
+          globPatterns: ['**/*.{ico,png,svg,jpg,woff,woff2}'],
           runtimeCaching: [
+            {
+              urlPattern: ({ request }) => request.mode === 'navigate',
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'pages-network-first',
+                networkTimeoutSeconds: 3,
+                cacheableResponse: {
+                  statuses: [200],
+                },
+              },
+            },
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
               handler: 'CacheFirst',
@@ -110,7 +120,7 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: true,
+          enabled: false,
           type: 'classic',
         },
       }),

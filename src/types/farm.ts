@@ -349,3 +349,29 @@ export interface WithdrawApproveMessageTemplate {
   updatedAtMs: number;
 }
 
+export interface ChannelCheckDiagnosticLog {
+  id: string;
+  timestampMs: number;
+  endpoint: 'check-channels' | 'test-channels' | 'check-task-channel';
+  userIdSource?: string;
+  telegramUserId: string | null;
+  verificationMode: string;
+  allJoined: boolean;
+  fromFirestore?: boolean;
+  botConfigured: boolean;
+  botUsername?: string | null;
+  error?: string | null;
+  channels: Array<{
+    handle: string;
+    joined: boolean;
+    status: string;
+    botIsAdmin?: boolean;
+    botStatus?: string;
+    rawTelegramOk?: boolean;
+    errorCode?: number;
+    rawDescription?: string;
+    rawStatus?: string;
+    rawIsMember?: boolean | null;
+    targetChatIdUsed?: string;
+  }>;
+}

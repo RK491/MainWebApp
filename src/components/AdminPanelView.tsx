@@ -60,6 +60,7 @@ import type {
   AdProviderType,
   AdminsConfig,
   BannedUserRecord,
+  ChannelCheckDiagnosticLog,
   ChannelsConfig,
   ChickenBreedId,
   DynamicPromoCode,
@@ -103,6 +104,7 @@ interface ChannelDiagnosticResult {
   botUsername?: string | null;
   botError?: string;
   error?: string;
+  recentLogs?: ChannelCheckDiagnosticLog[];
   channels?: Array<{
     id: string;
     handle: string;
@@ -144,6 +146,10 @@ interface AdminPanelViewProps {
   serverBotConfigured?: boolean;
   onVerifyAdminPasscode: (passcode: string) => Promise<{ ok: boolean; error?: string }>;
   onTestChannels?: (channels?: RequiredTelegramChannel[]) => Promise<ChannelDiagnosticResult>;
+  channelDiagnosticLogs?: ChannelCheckDiagnosticLog[];
+  loadingChannelLogs?: boolean;
+  channelLogsError?: string | null;
+  onRefreshChannelLogs?: () => Promise<void> | void;
   onLockAdmin?: () => void;
   withdrawRequests: WithdrawRequestRecord[];
   withdrawApproveTemplate?: WithdrawApproveMessageTemplate;
@@ -328,6 +334,10 @@ export function AdminPanelView({
   serverBotConfigured,
   onVerifyAdminPasscode,
   onTestChannels,
+  channelDiagnosticLogs = [],
+  loadingChannelLogs = false,
+  channelLogsError = null,
+  onRefreshChannelLogs,
   onLockAdmin,
   withdrawRequests,
   withdrawApproveTemplate = DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
@@ -858,10 +868,18 @@ export function AdminPanelView({
       const activeList = channelsDraft.filter((ch) => ch.enabled !== false && Boolean(ch.handle));
       const res = await onTestChannels(activeList);
       setChannelDiagnostic(res);
+      if (onRefreshChannelLogs) {
+        void onRefreshChannelLogs();
+      }
     } finally {
       setTestingChannels(false);
     }
   };
+
+  useEffect(() => {
+    if (!adminUnlocked || tab !== 'channels' || !onRefreshChannelLogs) return;
+    void onRefreshChannelLogs();
+  }, [adminUnlocked, onRefreshChannelLogs, tab]);
 
   const mergedPlayersDirectory = useMemo(() => {
     const byUid = new Map<string, UserFarmProfile>();
@@ -2890,6 +2908,148 @@ export function AdminPanelView({
                       </span>
                     </div>
                   ))}
+                </div>
+              )}
+            </div>
+
+            {/* Diagnostic Logs Visualizer (Last 5 Membership API Responses) */}
+            <div className="clay-inset !rounded-2xl p-3.5 space-y-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div>
+                  <div className="text-xs font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-1.5">
+                    <ShieldAlert className="w-4 h-4 text-sky-600 dark:text-sky-400" />
+                    <span>API Diagnostic Logs (Last 5 Checks)</span>
+                  </div>
+                  <p className="text-[11px] text-stone-500 dark:text-stone-400 mt-0.5">
+                    Raw Telegram Bot <span className="font-mono-num">getChatMember</span> responses for bot-admin &amp; user-joined debugging.
+                  </p>
+                </div>
+                {onRefreshChannelLogs && (
+                  <button
+                    type="button"
+                    disabled={loadingChannelLogs}
+                    onClick={() => {
+                      onTabTap?.();
+                      void onRefreshChannelLogs();
+                    }}
+                    className="clay-btn clay-btn-neutral min-h-[32px] px-3 rounded-xl text-[11px] font-extrabold inline-flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loadingChannelLogs ? 'animate-spin' : ''}`} />
+                    <span>{loadingChannelLogs ? 'Refreshing...' : 'Refresh Logs'}</span>
+                  </button>
+                )}
+              </div>
+
+              {channelLogsError && (
+                <div className="rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/70 px-3 py-2 text-[11px] font-semibold text-rose-700 dark:text-rose-300">
+                  {channelLogsError}
+                </div>
+              )}
+
+              {channelDiagnosticLogs.length === 0 ? (
+                <div className="rounded-xl bg-stone-100/80 dark:bg-stone-800/60 border border-stone-200/80 dark:border-stone-700/70 px-3 py-3 text-[11px] font-semibold text-stone-500 dark:text-stone-400 text-center">
+                  No membership check responses recorded yet. Tap &quot;Test Bot &amp; Channels&quot; or run Check Channels from Tasks/Withdraw.
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {channelDiagnosticLogs.slice(0, 5).map((entry) => {
+                    const passed = entry.allJoined && !entry.error;
+                    return (
+                      <div
+                        key={entry.id}
+                        className="clay-card !rounded-xl p-2.5 space-y-2 border border-stone-200/80 dark:border-stone-700/70 text-[11px]"
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span
+                              className={`px-1.5 py-0.5 rounded-md border font-extrabold text-[10px] ${
+                                passed
+                                  ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                                  : 'bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800/70 text-amber-800 dark:text-amber-300'
+                              }`}
+                            >
+                              {passed ? 'PASSED' : 'NEGATIVE'}
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded-md bg-sky-50 dark:bg-sky-950/60 border border-sky-200 dark:border-sky-800/70 font-mono-num font-bold text-sky-700 dark:text-sky-300 text-[10px]">
+                              {entry.endpoint}
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded-md bg-stone-100 dark:bg-stone-800 font-mono-num font-semibold text-stone-700 dark:text-stone-300 text-[10px]">
+                              mode={entry.verificationMode}
+                            </span>
+                          </div>
+                          <span className="font-mono-num text-[10px] text-stone-500 dark:text-stone-400">
+                            {new Date(entry.timestampMs).toLocaleTimeString()}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-[10px] font-mono-num text-stone-600 dark:text-stone-300">
+                          <span>TG ID: {entry.telegramUserId || 'none'}</span>
+                          {entry.userIdSource && <span>Source: {entry.userIdSource}</span>}
+                          <span>
+                            Bot: {entry.botConfigured ? (entry.botUsername ? `@${entry.botUsername}` : 'configured') : 'missing'}
+                          </span>
+                          {typeof entry.fromFirestore === 'boolean' && (
+                            <span>Config: {entry.fromFirestore ? 'Firestore' : 'Fallback'}</span>
+                          )}
+                        </div>
+
+                        {entry.error && (
+                          <div className="rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/70 px-2 py-1 font-mono-num text-[10px] font-semibold text-rose-700 dark:text-rose-300 break-words">
+                            Error: {entry.error}
+                          </div>
+                        )}
+
+                        {entry.channels.length > 0 && (
+                          <div className="space-y-1.5 pt-1 border-t border-stone-200/70 dark:border-stone-700/70">
+                            {entry.channels.map((ch, idx) => (
+                              <div
+                                key={`${entry.id}_${ch.handle}_${idx}`}
+                                className="rounded-lg bg-stone-100/70 dark:bg-stone-900/60 px-2 py-1.5 space-y-1"
+                              >
+                                <div className="flex items-center justify-between gap-2 flex-wrap">
+                                  <span className="font-mono-num font-extrabold text-stone-900 dark:text-stone-100">
+                                    {ch.handle}
+                                  </span>
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    {typeof ch.botIsAdmin === 'boolean' && (
+                                      <span
+                                        className={`px-1.5 py-0.5 rounded text-[10px] font-extrabold ${
+                                          ch.botIsAdmin
+                                            ? 'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300'
+                                            : 'bg-rose-100 dark:bg-rose-950/70 text-rose-700 dark:text-rose-300'
+                                        }`}
+                                      >
+                                        bot: {ch.botStatus || (ch.botIsAdmin ? 'admin' : 'not_admin')}
+                                      </span>
+                                    )}
+                                    <span
+                                      className={`px-1.5 py-0.5 rounded text-[10px] font-extrabold ${
+                                        ch.joined
+                                          ? 'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300'
+                                          : 'bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300'
+                                      }`}
+                                    >
+                                      {ch.joined ? `joined (${ch.status})` : `failed (${ch.status})`}
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="font-mono-num text-[10px] text-stone-600 dark:text-stone-400 break-words leading-snug">
+                                  tg_ok={String(ch.rawTelegramOk ?? 'n/a')}
+                                  {ch.errorCode !== undefined ? ` · code=${ch.errorCode}` : ''}
+                                  {ch.rawStatus ? ` · rawStatus=${ch.rawStatus}` : ''}
+                                  {ch.rawIsMember !== undefined && ch.rawIsMember !== null
+                                    ? ` · is_member=${String(ch.rawIsMember)}`
+                                    : ''}
+                                  {ch.targetChatIdUsed ? ` · chat_id=${ch.targetChatIdUsed}` : ''}
+                                  {ch.rawDescription ? ` · desc="${ch.rawDescription}"` : ''}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

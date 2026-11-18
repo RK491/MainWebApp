@@ -4,6 +4,7 @@ import {
   ExternalLink,
   Loader2,
   RefreshCw,
+  RotateCcw,
   Send,
   ShieldCheck,
   X,
@@ -20,7 +21,9 @@ interface ChannelCheckCardProps {
   requiredChannels?: RequiredTelegramChannel[];
   verification?: ChannelVerificationResult | null;
   checking?: boolean;
+  checkError?: string | null;
   onCheckChannels: () => void;
+  onRetryCheck?: () => void;
   variant?: 'default' | 'compact';
 }
 
@@ -47,7 +50,9 @@ export function ChannelCheckCard({
   requiredChannels,
   verification,
   checking = false,
+  checkError = null,
   onCheckChannels,
+  onRetryCheck,
   variant = 'default',
 }: ChannelCheckCardProps) {
   const items =
@@ -63,6 +68,16 @@ export function ChannelCheckCard({
   const isStrictTelegram = mode === 'telegram_bot';
   const joinedCount = items.filter((item) => item.joined).length;
   const isCompact = variant === 'compact';
+  const hasApiOrNetworkItemError = items.some(
+    (ch) => !ch.joined && (ch.status === 'api_error' || ch.status === 'network_error'),
+  );
+  const hasCheckFailure =
+    Boolean(checkError) ||
+    mode === 'bot_unconfigured' ||
+    mode === 'guest_browser' ||
+    hasApiOrNetworkItemError ||
+    (isStrictTelegram && !allJoined);
+  const handleRetry = onRetryCheck ?? onCheckChannels;
 
   const statusBadge = (() => {
     if (checking && !verification) {
@@ -70,6 +85,13 @@ export function ChannelCheckCard({
         label: 'Checking...',
         className:
           'bg-sky-50 dark:bg-sky-950/60 border-sky-200 dark:border-sky-800/70 text-sky-700 dark:text-sky-300',
+      };
+    }
+    if (checkError) {
+      return {
+        label: 'Check Failed',
+        className:
+          'bg-rose-50 dark:bg-rose-950/60 border-rose-200 dark:border-rose-800/70 text-rose-700 dark:text-rose-300',
       };
     }
     if (!verification) {
@@ -207,6 +229,14 @@ export function ChannelCheckCard({
       </div>
 
 
+      {checkError && (
+        <div className="rounded-xl bg-rose-50/90 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 px-3 py-2 text-[11px] font-semibold text-rose-800 dark:text-rose-300 flex items-center justify-between gap-2">
+          <span className="min-w-0 break-words">
+            Membership check failed: {checkError}
+          </span>
+        </div>
+      )}
+
       {verification && mode === 'bot_unconfigured' && (
         <div className="rounded-xl bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 px-3 py-2 text-[11px] font-semibold text-amber-800 dark:text-amber-300">
           Server bot verification requires TELEGRAM_BOT_TOKEN and adding the bot as an Admin in {summaryHandles}.
@@ -219,33 +249,52 @@ export function ChannelCheckCard({
         </div>
       )}
 
-      <button
-        type="button"
-        disabled={checking}
-        onClick={() => {
-          onCheckChannels();
-        }}
-        className={`clay-btn w-full min-h-[42px] rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 ${
-          allJoined && isStrictTelegram ? 'clay-btn-neutral text-emerald-700 dark:text-emerald-300' : 'clay-btn-emerald'
-        } disabled:opacity-60`}
-      >
-        {checking ? (
-          <>
-            <Loader2 className="w-4 h-4 animate-spin" />
-            <span>Checking Channels...</span>
-          </>
-        ) : allJoined && isStrictTelegram ? (
-          <>
-            <RefreshCw className="w-3.5 h-3.5" />
-            <span>Verified · Re-check Channels</span>
-          </>
-        ) : (
-          <>
-            <ShieldCheck className="w-4 h-4" />
-            <span>Check Channels</span>
-          </>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          disabled={checking}
+          onClick={() => {
+            onCheckChannels();
+          }}
+          className={`clay-btn flex-1 min-h-[42px] rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 ${
+            allJoined && isStrictTelegram
+              ? 'clay-btn-neutral text-emerald-700 dark:text-emerald-300'
+              : 'clay-btn-emerald'
+          } disabled:opacity-60`}
+        >
+          {checking ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span>Checking Channels...</span>
+            </>
+          ) : allJoined && isStrictTelegram ? (
+            <>
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Verified · Re-check Channels</span>
+            </>
+          ) : (
+            <>
+              <ShieldCheck className="w-4 h-4" />
+              <span>Check Channels</span>
+            </>
+          )}
+        </button>
+
+        {hasCheckFailure && (
+          <button
+            type="button"
+            disabled={checking}
+            onClick={() => {
+              handleRetry();
+            }}
+            aria-label="Retry channel membership diagnostic check"
+            className="clay-btn clay-btn-amber min-h-[42px] px-3.5 rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 shrink-0 disabled:opacity-60"
+          >
+            <RotateCcw className={`w-3.5 h-3.5 ${checking ? 'animate-spin' : ''}`} />
+            <span>Retry</span>
+          </button>
         )}
-      </button>
+      </div>
     </div>
   );
 }
@@ -254,8 +303,10 @@ interface ChannelCheckModalProps {
   requiredChannels?: RequiredTelegramChannel[];
   verification?: ChannelVerificationResult | null;
   checking?: boolean;
+  checkError?: string | null;
   pendingPromoCode?: string | null;
   onCheckChannels: () => void;
+  onRetryCheck?: () => void;
   onClose: () => void;
 }
 
@@ -263,16 +314,29 @@ export function ChannelCheckModal({
   requiredChannels,
   verification,
   checking = false,
+  checkError = null,
   pendingPromoCode = null,
   onCheckChannels,
+  onRetryCheck,
   onClose,
 }: ChannelCheckModalProps) {
   const items =
     verification && verification.channels.length > 0
       ? verification.channels
       : buildFallbackItems(requiredChannels);
-  const isStrictTelegram = verification?.verificationMode === 'telegram_bot';
+  const mode = verification?.verificationMode;
+  const isStrictTelegram = mode === 'telegram_bot';
   const allJoined = Boolean(verification?.allJoined);
+  const hasApiOrNetworkItemError = items.some(
+    (ch) => !ch.joined && (ch.status === 'api_error' || ch.status === 'network_error'),
+  );
+  const hasCheckFailure =
+    Boolean(checkError) ||
+    mode === 'bot_unconfigured' ||
+    mode === 'guest_browser' ||
+    hasApiOrNetworkItemError ||
+    (isStrictTelegram && !allJoined);
+  const handleRetry = onRetryCheck ?? onCheckChannels;
   const canDismissFreely = !isStrictTelegram || allJoined || Boolean(pendingPromoCode);
 
   return (
@@ -359,6 +423,12 @@ export function ChannelCheckModal({
           })}
         </div>
 
+        {checkError && (
+          <div className="rounded-xl bg-rose-50/90 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 px-3 py-2 text-[11px] font-semibold text-rose-800 dark:text-rose-300">
+            Membership check failed: {checkError}
+          </div>
+        )}
+
         {verification?.verificationMode === 'bot_unconfigured' && (
           <div className="rounded-xl bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 px-3 py-2 text-[11px] font-semibold text-amber-800 dark:text-amber-300">
             Bot verification requires TELEGRAM_BOT_TOKEN on the server and adding the bot as an Admin in each channel.
@@ -372,31 +442,48 @@ export function ChannelCheckModal({
         )}
 
         <div className="space-y-2">
-          <button
-            type="button"
-            disabled={checking}
-            onClick={() => {
-              onCheckChannels();
-            }}
-            className="clay-btn clay-btn-emerald w-full min-h-[46px] rounded-2xl text-sm font-extrabold inline-flex items-center justify-center gap-2 disabled:opacity-60"
-          >
-            {checking ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                <span>Verifying Membership...</span>
-              </>
-            ) : allJoined && isStrictTelegram ? (
-              <>
-                <CheckCircle2 className="w-4 h-4" />
-                <span>Verified! Continue</span>
-              </>
-            ) : (
-              <>
-                <ShieldCheck className="w-4 h-4" />
-                <span>Check Channels</span>
-              </>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={checking}
+              onClick={() => {
+                onCheckChannels();
+              }}
+              className="clay-btn clay-btn-emerald flex-1 min-h-[46px] rounded-2xl text-sm font-extrabold inline-flex items-center justify-center gap-2 disabled:opacity-60"
+            >
+              {checking ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Verifying Membership...</span>
+                </>
+              ) : allJoined && isStrictTelegram ? (
+                <>
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Verified! Continue</span>
+                </>
+              ) : (
+                <>
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>Check Channels</span>
+                </>
+              )}
+            </button>
+
+            {hasCheckFailure && (
+              <button
+                type="button"
+                disabled={checking}
+                onClick={() => {
+                  handleRetry();
+                }}
+                aria-label="Retry channel membership check"
+                className="clay-btn clay-btn-amber min-h-[46px] px-4 rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 shrink-0 disabled:opacity-60"
+              >
+                <RotateCcw className={`w-4 h-4 ${checking ? 'animate-spin' : ''}`} />
+                <span>Retry</span>
+              </button>
             )}
-          </button>
+          </div>
 
           {canDismissFreely && (
             <button

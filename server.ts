@@ -50,6 +50,7 @@ import {
   renderWithdrawApproveMessage,
 } from './src/game/economy.ts';
 import type {
+  ChannelCheckDiagnosticLog,
   ChannelsConfig,
   RequiredTelegramChannel,
   WithdrawApproveMessageTemplate,
@@ -862,10 +863,62 @@ async function loadExtraAdminIdsFromFirestore(): Promise<string[]> {
   }
 }
 
+const CHANNEL_CHECK_LOGS_FILE = path.resolve(__dirname, '.data', 'channel_check_logs.json');
+const channelCheckLogs: ChannelCheckDiagnosticLog[] = [];
+
+function loadChannelCheckLogsFromDisk(): void {
+  try {
+    if (!fs.existsSync(CHANNEL_CHECK_LOGS_FILE)) return;
+    const raw = fs.readFileSync(CHANNEL_CHECK_LOGS_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      for (const item of parsed.slice(0, 20)) {
+        if (item && typeof item === 'object' && typeof item.timestampMs === 'number') {
+          channelCheckLogs.push(item as ChannelCheckDiagnosticLog);
+        }
+      }
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
+function recordChannelCheckDiagnosticLog(
+  entry: Omit<ChannelCheckDiagnosticLog, 'id' | 'timestampMs'>,
+): ChannelCheckDiagnosticLog {
+  const fullEntry: ChannelCheckDiagnosticLog = {
+    id: `cclog_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    timestampMs: Date.now(),
+    ...entry,
+  };
+  channelCheckLogs.unshift(fullEntry);
+  if (channelCheckLogs.length > 20) {
+    channelCheckLogs.length = 20;
+  }
+  try {
+    const dir = path.dirname(CHANNEL_CHECK_LOGS_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(CHANNEL_CHECK_LOGS_FILE, JSON.stringify(channelCheckLogs), 'utf8');
+  } catch {
+    // Non-fatal on read-only containers
+  }
+  return fullEntry;
+}
+
+function getRecentChannelCheckLogs(limitCount = 5): ChannelCheckDiagnosticLog[] {
+  return channelCheckLogs.slice(0, Math.max(1, Math.min(20, limitCount)));
+}
+
+loadChannelCheckLogsFromDisk();
+
 async function fetchTelegramChatMember(chatId: string, userId: string): Promise<{
   ok: boolean;
   userNotFound?: boolean;
+  errorCode?: number;
   description?: string;
+  targetChatIdUsed?: string;
   result?: { status?: string; is_member?: boolean };
 }> {
   const tryLookup = async (targetChatId: string) => {
@@ -875,6 +928,7 @@ async function fetchTelegramChatMember(chatId: string, userId: string): Promise<
     const tgRes = await fetch(url, { signal: AbortSignal.timeout(7000) });
     return (await tgRes.json()) as {
       ok?: boolean;
+      error_code?: number;
       description?: string;
       result?: { status?: string; is_member?: boolean };
     };
@@ -884,12 +938,18 @@ async function fetchTelegramChatMember(chatId: string, userId: string): Promise<
   const normalizedHandle = normalizeTelegramChannelHandle(cleanedInput).handle || cleanedInput;
   const primary = await tryLookup(normalizedHandle);
   if (primary.ok && primary.result) {
-    return { ok: true, result: primary.result };
+    return { ok: true, targetChatIdUsed: normalizedHandle, result: primary.result };
   }
 
   const primaryDesc = String(primary.description || '').toLowerCase();
   if (primaryDesc.includes('user not found') || primaryDesc.includes('user_id_invalid')) {
-    return { ok: false, userNotFound: true, description: primary.description };
+    return {
+      ok: false,
+      userNotFound: true,
+      errorCode: primary.error_code,
+      targetChatIdUsed: normalizedHandle,
+      description: redactBotToken(primary.description || ''),
+    };
   }
 
   // Retry with -100 prefix if admin saved positive numeric ID or -groupId for a channel/supergroup
@@ -904,22 +964,32 @@ async function fetchTelegramChatMember(chatId: string, userId: string): Promise<
     if (supergroupCandidate) {
       const retried = await tryLookup(supergroupCandidate);
       if (retried.ok && retried.result) {
-        return { ok: true, result: retried.result };
+        return { ok: true, targetChatIdUsed: supergroupCandidate, result: retried.result };
       }
       const retryDesc = String(retried.description || '').toLowerCase();
       if (retryDesc.includes('user not found') || retryDesc.includes('user_id_invalid')) {
-        return { ok: false, userNotFound: true, description: retried.description };
+        return {
+          ok: false,
+          userNotFound: true,
+          errorCode: retried.error_code,
+          targetChatIdUsed: supergroupCandidate,
+          description: redactBotToken(retried.description || ''),
+        };
       }
       return {
         ok: false,
-        description: retried.description || primary.description,
+        errorCode: retried.error_code ?? primary.error_code,
+        targetChatIdUsed: supergroupCandidate,
+        description: redactBotToken(retried.description || primary.description || ''),
       };
     }
   }
 
   return {
     ok: false,
-    description: primary.description,
+    errorCode: primary.error_code,
+    targetChatIdUsed: normalizedHandle,
+    description: redactBotToken(primary.description || ''),
   };
 }
 
@@ -1880,38 +1950,75 @@ async function startServer() {
     }
 
     if (!numericUserId) {
+      const channelsOut = targetChannels.map((ch) => ({
+        ...ch,
+        joined: false,
+        status: 'no_telegram_user',
+      }));
+      recordChannelCheckDiagnosticLog({
+        endpoint: 'check-channels',
+        userIdSource,
+        telegramUserId: null,
+        verificationMode: 'guest_browser',
+        allJoined: false,
+        fromFirestore,
+        botConfigured: Boolean(TELEGRAM_BOT_TOKEN),
+        error: 'No Telegram numeric user ID detected on request',
+        channels: channelsOut.map((c) => ({
+          handle: c.handle,
+          joined: false,
+          status: c.status,
+          rawTelegramOk: false,
+          rawDescription: 'No Telegram user ID detected (guest browser / non-Telegram context)',
+        })),
+      });
       res.json({
         ok: true,
         allJoined: false,
         verificationMode: 'guest_browser',
         telegramUserId: null,
-        channels: targetChannels.map((ch) => ({
-          ...ch,
-          joined: false,
-          status: 'no_telegram_user',
-        })),
+        channels: channelsOut,
         checkedAtMs: Date.now(),
       });
       return;
     }
 
     if (!TELEGRAM_BOT_TOKEN) {
+      const channelsOut = targetChannels.map((ch) => ({
+        ...ch,
+        joined: false,
+        status: 'bot_unconfigured',
+        error: 'TELEGRAM_BOT_TOKEN not configured on server',
+      }));
+      recordChannelCheckDiagnosticLog({
+        endpoint: 'check-channels',
+        userIdSource,
+        telegramUserId: numericUserId,
+        verificationMode: 'bot_unconfigured',
+        allJoined: false,
+        fromFirestore,
+        botConfigured: false,
+        error: 'TELEGRAM_BOT_TOKEN not configured on server',
+        channels: channelsOut.map((c) => ({
+          handle: c.handle,
+          joined: false,
+          status: c.status,
+          rawTelegramOk: false,
+          rawDescription: c.error,
+        })),
+      });
       res.json({
         ok: true,
         allJoined: false,
         verificationMode: 'bot_unconfigured',
         telegramUserId: numericUserId,
-        channels: targetChannels.map((ch) => ({
-          ...ch,
-          joined: false,
-          status: 'bot_unconfigured',
-          error: 'TELEGRAM_BOT_TOKEN not configured on server',
-        })),
+        channels: channelsOut,
         checkedAtMs: Date.now(),
       });
       return;
     }
 
+    const logChannelRows: ChannelCheckDiagnosticLog['channels'] = [];
     const checks = await Promise.all(
       targetChannels.map(async (ch) => {
         try {
@@ -1919,39 +2026,86 @@ async function startServer() {
 
           if (!tgData.ok || !tgData.result) {
             if (tgData.userNotFound) {
+              logChannelRows.push({
+                handle: ch.handle,
+                joined: false,
+                status: 'left',
+                rawTelegramOk: false,
+                errorCode: tgData.errorCode,
+                rawDescription: tgData.description || 'User not found in channel',
+                targetChatIdUsed: tgData.targetChatIdUsed,
+              });
               return {
                 ...ch,
                 joined: false,
                 status: 'left',
               };
             }
+            const errText = tgData.description || 'Make sure the bot is admin in this channel';
+            logChannelRows.push({
+              handle: ch.handle,
+              joined: false,
+              status: 'api_error',
+              rawTelegramOk: false,
+              errorCode: tgData.errorCode,
+              rawDescription: errText,
+              targetChatIdUsed: tgData.targetChatIdUsed,
+            });
             return {
               ...ch,
               joined: false,
               status: 'api_error',
-              error: tgData.description || 'Make sure the bot is admin in this channel',
+              error: errText,
             };
           }
 
           const status = String(tgData.result.status || 'left');
           const joined = isTelegramMemberStatusJoined(status, tgData.result.is_member);
+          logChannelRows.push({
+            handle: ch.handle,
+            joined,
+            status,
+            rawTelegramOk: true,
+            rawStatus: status,
+            rawIsMember:
+              typeof tgData.result.is_member === 'boolean' ? tgData.result.is_member : null,
+            targetChatIdUsed: tgData.targetChatIdUsed,
+          });
           return {
             ...ch,
             joined,
             status,
           };
         } catch (err) {
+          const errText = err instanceof Error ? err.message : 'Telegram API timeout';
+          logChannelRows.push({
+            handle: ch.handle,
+            joined: false,
+            status: 'network_error',
+            rawTelegramOk: false,
+            rawDescription: errText,
+          });
           return {
             ...ch,
             joined: false,
             status: 'network_error',
-            error: err instanceof Error ? err.message : 'Telegram API timeout',
+            error: errText,
           };
         }
       }),
     );
 
     const allJoined = checks.every((c) => c.joined);
+    recordChannelCheckDiagnosticLog({
+      endpoint: 'check-channels',
+      userIdSource,
+      telegramUserId: numericUserId,
+      verificationMode: 'telegram_bot',
+      allJoined,
+      fromFirestore,
+      botConfigured: true,
+      channels: logChannelRows,
+    });
     console.info(
       '[channel-check]',
       JSON.stringify({
@@ -2026,6 +2180,25 @@ async function startServer() {
     try {
       const tgData = await fetchTelegramChatMember(normalized.handle, numericUserId);
       if (tgData.userNotFound) {
+        recordChannelCheckDiagnosticLog({
+          endpoint: 'check-task-channel',
+          userIdSource: verifiedActor ? 'verified' : 'player_id',
+          telegramUserId: numericUserId,
+          verificationMode: 'telegram_bot',
+          allJoined: false,
+          botConfigured: true,
+          channels: [
+            {
+              handle: normalized.handle,
+              joined: false,
+              status: 'left',
+              rawTelegramOk: false,
+              errorCode: tgData.errorCode,
+              rawDescription: tgData.description || 'User not found in channel',
+              targetChatIdUsed: tgData.targetChatIdUsed,
+            },
+          ],
+        });
         res.json({
           ok: true,
           enforced: true,
@@ -2037,6 +2210,26 @@ async function startServer() {
       }
       if (!tgData.ok || !tgData.result) {
         // Bot is not admin in third-party/partner channel or link is a bot/username — don't false-block
+        recordChannelCheckDiagnosticLog({
+          endpoint: 'check-task-channel',
+          userIdSource: verifiedActor ? 'verified' : 'player_id',
+          telegramUserId: numericUserId,
+          verificationMode: 'telegram_bot',
+          allJoined: false,
+          botConfigured: true,
+          error: tgData.description || 'bot_not_admin_in_task_channel',
+          channels: [
+            {
+              handle: normalized.handle,
+              joined: false,
+              status: 'api_error',
+              rawTelegramOk: false,
+              errorCode: tgData.errorCode,
+              rawDescription: tgData.description || 'bot_not_admin_in_task_channel',
+              targetChatIdUsed: tgData.targetChatIdUsed,
+            },
+          ],
+        });
         res.json({
           ok: true,
           enforced: false,
@@ -2048,6 +2241,26 @@ async function startServer() {
       }
       const status = String(tgData.result.status || 'left');
       const joined = isTelegramMemberStatusJoined(status, tgData.result.is_member);
+      recordChannelCheckDiagnosticLog({
+        endpoint: 'check-task-channel',
+        userIdSource: verifiedActor ? 'verified' : 'player_id',
+        telegramUserId: numericUserId,
+        verificationMode: 'telegram_bot',
+        allJoined: joined,
+        botConfigured: true,
+        channels: [
+          {
+            handle: normalized.handle,
+            joined,
+            status,
+            rawTelegramOk: true,
+            rawStatus: status,
+            rawIsMember:
+              typeof tgData.result.is_member === 'boolean' ? tgData.result.is_member : null,
+            targetChatIdUsed: tgData.targetChatIdUsed,
+          },
+        ],
+      });
       res.json({
         ok: true,
         enforced: true,
@@ -2100,18 +2313,38 @@ async function startServer() {
       : getActiveRequiredChannels(channelsCfg);
 
     if (!TELEGRAM_BOT_TOKEN) {
+      const channelsOut = targetChannels.map((ch) => ({
+        id: ch.id,
+        handle: ch.handle,
+        botIsAdmin: false,
+        botStatus: 'bot_unconfigured',
+        error: 'TELEGRAM_BOT_TOKEN not configured on server',
+      }));
+      recordChannelCheckDiagnosticLog({
+        endpoint: 'test-channels',
+        userIdSource: 'admin_session',
+        telegramUserId: extractTelegramNumericUserId(resolvedPlayerId),
+        verificationMode: 'bot_unconfigured',
+        allJoined: false,
+        botConfigured: false,
+        error: 'TELEGRAM_BOT_TOKEN is not set in server environment variables.',
+        channels: channelsOut.map((c) => ({
+          handle: c.handle,
+          joined: false,
+          status: c.botStatus,
+          botIsAdmin: false,
+          botStatus: c.botStatus,
+          rawTelegramOk: false,
+          rawDescription: c.error,
+        })),
+      });
       res.json({
         ok: true,
         botConfigured: false,
         botUsername: null,
         botError: 'TELEGRAM_BOT_TOKEN is not set in server environment variables.',
-        channels: targetChannels.map((ch) => ({
-          id: ch.id,
-          handle: ch.handle,
-          botIsAdmin: false,
-          botStatus: 'bot_unconfigured',
-          error: 'TELEGRAM_BOT_TOKEN not configured on server',
-        })),
+        channels: channelsOut,
+        recentLogs: getRecentChannelCheckLogs(5),
       });
       return;
     }
@@ -2122,22 +2355,44 @@ async function startServer() {
       });
       const meData = (await meRes.json()) as {
         ok?: boolean;
+        error_code?: number;
         description?: string;
         result?: { id?: number | string; username?: string };
       };
       if (!meData.ok || !meData.result?.id) {
+        const channelsOut = targetChannels.map((ch) => ({
+          id: ch.id,
+          handle: ch.handle,
+          botIsAdmin: false,
+          botStatus: 'token_invalid',
+          error: meData.description || 'Bot token rejected by Telegram',
+        }));
+        recordChannelCheckDiagnosticLog({
+          endpoint: 'test-channels',
+          userIdSource: 'admin_session',
+          telegramUserId: extractTelegramNumericUserId(resolvedPlayerId),
+          verificationMode: 'telegram_bot',
+          allJoined: false,
+          botConfigured: true,
+          error: redactBotToken(meData.description || 'Invalid TELEGRAM_BOT_TOKEN (getMe failed)'),
+          channels: channelsOut.map((c) => ({
+            handle: c.handle,
+            joined: false,
+            status: c.botStatus,
+            botIsAdmin: false,
+            botStatus: c.botStatus,
+            rawTelegramOk: false,
+            errorCode: meData.error_code,
+            rawDescription: c.error,
+          })),
+        });
         res.json({
           ok: true,
           botConfigured: true,
           botUsername: null,
           botError: meData.description || 'Invalid TELEGRAM_BOT_TOKEN (getMe failed)',
-          channels: targetChannels.map((ch) => ({
-            id: ch.id,
-            handle: ch.handle,
-            botIsAdmin: false,
-            botStatus: 'token_invalid',
-            error: meData.description || 'Bot token rejected by Telegram',
-          })),
+          channels: channelsOut,
+          recentLogs: getRecentChannelCheckLogs(5),
         });
         return;
       }
@@ -2145,34 +2400,72 @@ async function startServer() {
       const botId = String(meData.result.id);
       const botUsername = meData.result.username || '';
       const adminNumericId = extractTelegramNumericUserId(resolvedPlayerId);
+      const diagLogChannels: ChannelCheckDiagnosticLog['channels'] = [];
 
       const results = await Promise.all(
         targetChannels.map(async (ch) => {
           try {
             const botMember = await fetchTelegramChatMember(ch.handle, botId);
             if (!botMember.ok || !botMember.result) {
+              const errMsg = botMember.description || 'Could not inspect bot status in channel';
+              diagLogChannels.push({
+                handle: ch.handle,
+                joined: false,
+                status: 'api_error',
+                botIsAdmin: false,
+                botStatus: 'api_error',
+                rawTelegramOk: false,
+                errorCode: botMember.errorCode,
+                rawDescription: errMsg,
+                targetChatIdUsed: botMember.targetChatIdUsed,
+              });
               return {
                 id: ch.id,
                 handle: ch.handle,
                 botIsAdmin: false,
                 botStatus: 'api_error',
-                error: botMember.description || 'Could not inspect bot status in channel',
+                error: errMsg,
               };
             }
             const botStatus = String(botMember.result.status || 'left').toLowerCase();
             const botIsAdmin = botStatus === 'administrator' || botStatus === 'creator';
             let userJoined: boolean | null = null;
             let userStatus: string | null = null;
+            let userRawDesc: string | undefined;
+            let userRawOk: boolean | undefined;
+            let userErrorCode: number | undefined;
             if (adminNumericId) {
               const adminCheck = await fetchTelegramChatMember(ch.handle, adminNumericId);
               if (adminCheck.userNotFound) {
                 userStatus = 'left';
                 userJoined = false;
+                userRawOk = false;
+                userErrorCode = adminCheck.errorCode;
+                userRawDesc = adminCheck.description || 'User not found in channel';
               } else if (adminCheck.ok && adminCheck.result) {
                 userStatus = String(adminCheck.result.status || 'left');
                 userJoined = isTelegramMemberStatusJoined(userStatus, adminCheck.result.is_member);
+                userRawOk = true;
+              } else {
+                userRawOk = false;
+                userErrorCode = adminCheck.errorCode;
+                userRawDesc = adminCheck.description;
               }
             }
+            diagLogChannels.push({
+              handle: ch.handle,
+              joined: Boolean(userJoined),
+              status: userStatus || (botIsAdmin ? 'bot_admin_ready' : botStatus),
+              botIsAdmin,
+              botStatus,
+              rawTelegramOk: userRawOk ?? true,
+              errorCode: userErrorCode,
+              rawStatus: userStatus || botStatus,
+              rawDescription:
+                userRawDesc ||
+                (!botIsAdmin ? `Bot status is "${botStatus}" — promote bot to Admin` : undefined),
+              targetChatIdUsed: botMember.targetChatIdUsed,
+            });
             return {
               id: ch.id,
               handle: ch.handle,
@@ -2183,32 +2476,107 @@ async function startServer() {
               error: botIsAdmin ? undefined : `Bot status is "${botStatus}" — promote bot to Admin in ${ch.handle}`,
             };
           } catch (err) {
+            const errMsg = err instanceof Error ? err.message : 'Telegram API timeout';
+            diagLogChannels.push({
+              handle: ch.handle,
+              joined: false,
+              status: 'network_error',
+              botIsAdmin: false,
+              botStatus: 'network_error',
+              rawTelegramOk: false,
+              rawDescription: errMsg,
+            });
             return {
               id: ch.id,
               handle: ch.handle,
               botIsAdmin: false,
               botStatus: 'network_error',
-              error: err instanceof Error ? err.message : 'Telegram API timeout',
+              error: errMsg,
             };
           }
         }),
       );
+
+      recordChannelCheckDiagnosticLog({
+        endpoint: 'test-channels',
+        userIdSource: 'admin_session',
+        telegramUserId: adminNumericId,
+        verificationMode: 'telegram_bot',
+        allJoined: results.every((r) => r.botIsAdmin && r.userJoined !== false),
+        botConfigured: true,
+        botUsername,
+        channels: diagLogChannels,
+      });
 
       res.json({
         ok: true,
         botConfigured: true,
         botUsername,
         channels: results,
+        recentLogs: getRecentChannelCheckLogs(5),
       });
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'Failed to connect to Telegram API';
+      recordChannelCheckDiagnosticLog({
+        endpoint: 'test-channels',
+        userIdSource: 'admin_session',
+        telegramUserId: extractTelegramNumericUserId(resolvedPlayerId),
+        verificationMode: 'telegram_bot',
+        allJoined: false,
+        botConfigured: true,
+        error: redactBotToken(errMsg),
+        channels: [],
+      });
       res.json({
         ok: true,
         botConfigured: true,
         botUsername: null,
-        botError: err instanceof Error ? err.message : 'Failed to connect to Telegram API',
+        botError: errMsg,
         channels: [],
+        recentLogs: getRecentChannelCheckLogs(5),
       });
     }
+  });
+
+  app.post('/api/admin/channel-logs', async (req, res) => {
+    const body = (req.body || {}) as { token?: string; initData?: string };
+    const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
+    const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
+    const resolvedPlayerId = resolveVerifiedAdminActor({
+      req,
+      token: body.token,
+      initData: body.initData,
+      extraAdminIds: effectiveExtraAdmins,
+    });
+    if (!resolvedPlayerId) {
+      res.status(403).json({ ok: false, error: 'Verified Admin session required.' });
+      return;
+    }
+    res.json({
+      ok: true,
+      logs: getRecentChannelCheckLogs(5),
+      totalRecorded: channelCheckLogs.length,
+    });
+  });
+
+  app.get('/api/admin/channel-logs', async (req, res) => {
+    const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
+    const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
+    const resolvedPlayerId = resolveVerifiedAdminActor({
+      req,
+      token: typeof req.query.token === 'string' ? req.query.token : undefined,
+      initData: typeof req.query.initData === 'string' ? req.query.initData : undefined,
+      extraAdminIds: effectiveExtraAdmins,
+    });
+    if (!resolvedPlayerId) {
+      res.status(403).json({ ok: false, error: 'Verified Admin session required.' });
+      return;
+    }
+    res.json({
+      ok: true,
+      logs: getRecentChannelCheckLogs(5),
+      totalRecorded: channelCheckLogs.length,
+    });
   });
 
   app.post('/api/auth/verify-telegram', (req, res) => {
@@ -3226,6 +3594,10 @@ async function startServer() {
       botPollInterval.unref();
     }
   }
+
+  app.all('/api/*', (_req, res) => {
+    res.status(404).json({ ok: false, error: 'API route not found' });
+  });
 
   if (process.env.NODE_ENV !== 'production') {
     const httpServer = http.createServer(app);

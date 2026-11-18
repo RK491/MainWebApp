@@ -86,7 +86,9 @@ interface TasksViewProps {
   activeAdAction?: 'watch_ad' | 'ad_network' | 'adsgram_task' | null;
   channelVerification?: ChannelVerificationResult | null;
   checkingChannels?: boolean;
+  channelCheckError?: string | null;
   onCheckChannels?: () => Promise<ChannelVerificationResult | null> | void;
+  onRetryCheckChannels?: () => Promise<ChannelVerificationResult | null> | void;
   onVerifyTaskChannel?: (actionUrl: string) => Promise<{ joined: boolean; handle?: string }>;
   onTabTap?: () => void;
   onClaimPromo: (code: string) => void;
@@ -129,7 +131,9 @@ export function TasksView({
   activeAdAction = null,
   channelVerification = null,
   checkingChannels = false,
+  channelCheckError = null,
   onCheckChannels,
+  onRetryCheckChannels,
   onVerifyTaskChannel,
   onTabTap,
   onClaimPromo,
@@ -915,9 +919,14 @@ export function TasksView({
           requiredChannels={activeRequiredChannels}
           verification={channelVerification}
           checking={checkingChannels}
+          checkError={channelCheckError}
           onCheckChannels={() => {
             onTabTap?.();
             void onCheckChannels();
+          }}
+          onRetryCheck={() => {
+            onTabTap?.();
+            void (onRetryCheckChannels ?? onCheckChannels)();
           }}
         />
       )}
