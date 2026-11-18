@@ -38,13 +38,19 @@ export const MIN_DEPOSIT_COINS = 1000;
 export const MAX_DEPOSIT_COINS = 15000;
 export const MIN_WITHDRAW_EGGS = 100;
 export const MIN_WITHDRAW_ADS_WATCHED = 30;
-export const MIN_REINVEST_EGGS = 100;
+export const MIN_REINVEST_EGGS = 500;
+export const REINVEST_BONUS_RATE = 0.05;
+export const CHANNEL_LEAVE_PENALTY_MULTIPLIER = 5;
 export const SIGNUP_BONUS_COINS = 1000;
 export const REFERRER_SIGNUP_BONUS_COINS = 150;
 export const REFERRER_SIGNUP_BONUS_EGGS = 500;
 export const REFERRAL_DEPOSIT_COMMISSION_RATE = 0.05;
 export const REFERRER_LIFETIME_EGG_COMMISSION_RATE = 0.05;
 export const REFERRED_WELCOME_BONUS_COINS = 100;
+
+export function getTodayDateString(nowMs = Date.now()): string {
+  return new Date(nowMs).toISOString().slice(0, 10);
+}
 
 export function calculateReferralEggCommission(collectedEggs: number): number {
   const safe = Math.max(0, Math.floor(collectedEggs));
@@ -366,6 +372,7 @@ export const TASK_DEFINITIONS: TaskDefinition[] = [
     id: 'daily_reinvest',
     category: 'daily',
     title: 'Reinvest eggs today',
+    subtitle: 'Reinvest min. 500 eggs (+5% extra) to unlock Claim',
     rewardCoins: 100,
     icon: 'refresh',
   },
@@ -1107,14 +1114,26 @@ export function executeDeposit(
 }
 
 export function calculateReinvestCoins(eggsAmount: number): {
+  bonusEggs: number;
   baseCoins: number;
   bonusCoins: number;
   totalCoins: number;
 } {
   const safeEggs = Math.max(0, Math.floor(eggsAmount));
+  if (safeEggs <= 0) {
+    return {
+      bonusEggs: 0,
+      baseCoins: 0,
+      bonusCoins: 0,
+      totalCoins: 0,
+    };
+  }
+  const bonusEggs = Math.max(1, Math.round(safeEggs * REINVEST_BONUS_RATE));
   const baseCoins = Math.max(1, Math.round(safeEggs * 0.07));
-  const bonusCoins = Math.max(1, Math.round(baseCoins * 0.2));
+  const totalCoins = Math.max(baseCoins + 1, Math.round((safeEggs + bonusEggs) * 0.07));
+  const bonusCoins = Math.max(1, totalCoins - baseCoins);
   return {
+    bonusEggs,
     baseCoins,
     bonusCoins,
     totalCoins: baseCoins + bonusCoins,
@@ -1125,7 +1144,14 @@ export function reinvestEggs(
   profile: UserFarmProfile,
   eggsAmount: number,
   nowMs: number,
-): { profile: UserFarmProfile; transaction: TransactionEntry; coinsReceived: number } | { error: string } {
+):
+  | {
+      profile: UserFarmProfile;
+      transaction: TransactionEntry;
+      coinsReceived: number;
+      bonusEggs: number;
+    }
+  | { error: string } {
   const safeEggs = Math.floor(eggsAmount);
   if (safeEggs < MIN_REINVEST_EGGS) {
     return { error: `Minimum reinvest amount is ${MIN_REINVEST_EGGS} eggs.` };
@@ -1133,18 +1159,19 @@ export function reinvestEggs(
   if (safeEggs > profile.eggs) {
     return { error: 'Not enough eggs in your balance.' };
   }
-  const { totalCoins } = calculateReinvestCoins(safeEggs);
+  const { totalCoins, bonusEggs } = calculateReinvestCoins(safeEggs);
   const nextProfile: UserFarmProfile = {
     ...profile,
     eggs: profile.eggs - safeEggs,
     coins: profile.coins + totalCoins,
+    lastReinvestDate: getTodayDateString(nowMs),
   };
 
   const transaction: TransactionEntry = {
     id: `tx_reinv_${nowMs}`,
     userId: profile.uid,
     type: 'reinvest',
-    title: `Reinvested ${safeEggs.toLocaleString()} eggs (+20%)`,
+    title: `Reinvested ${safeEggs.toLocaleString()} eggs (+5% extra)`,
     amount: totalCoins,
     currency: 'coins',
     usdValue: coinsToUsd(totalCoins),
@@ -1152,7 +1179,7 @@ export function reinvestEggs(
     createdAtMs: nowMs,
   };
 
-  return { profile: nextProfile, transaction, coinsReceived: totalCoins };
+  return { profile: nextProfile, transaction, coinsReceived: totalCoins, bonusEggs };
 }
 
 export function getTotalAdsWatched(
@@ -1463,6 +1490,14 @@ export function completeTask(
   }
   if (profile.completedTaskIds.includes(taskId)) {
     return { error: 'Task already completed.' };
+  }
+  if (taskId === 'daily_reinvest') {
+    const todayStr = getTodayDateString(nowMs);
+    if (profile.lastReinvestDate !== todayStr) {
+      return {
+        error: `Reinvest at least ${MIN_REINVEST_EGGS} eggs today first to unlock this reward.`,
+      };
+    }
   }
   const remainingSlots = getTaskRemainingSlots(task, false);
   if (remainingSlots !== null && remainingSlots <= 0) {
@@ -2828,6 +2863,7 @@ const COOP_FEVER_BASE_PREFIX = '__cf_b:';
 const COOP_FEVER_ADS_PREFIX = '__cf_a:';
 const AUTO_HARVEST_UNTIL_PREFIX = '__ah_u:';
 const TG_REMINDERS_PREFIX = '__tgr:';
+const REINVEST_DATE_PREFIX = '__reinv:';
 const TASK_META_PREFIX = '__m:';
 const TASK_SUBTITLE_MAX_LEN = 120;
 
@@ -2838,6 +2874,7 @@ export interface AchievementTokenExtras {
   coopFeverAdsWatched?: number;
   autoHarvestUntilMs?: number;
   telegramRemindersEnabled?: boolean;
+  lastReinvestDate?: string;
 }
 
 function isInternalAchievementStateToken(id: string): boolean {
@@ -2848,7 +2885,8 @@ function isInternalAchievementStateToken(id: string): boolean {
     id.startsWith(COOP_FEVER_BASE_PREFIX) ||
     id.startsWith(COOP_FEVER_ADS_PREFIX) ||
     id.startsWith(AUTO_HARVEST_UNTIL_PREFIX) ||
-    id.startsWith(TG_REMINDERS_PREFIX)
+    id.startsWith(TG_REMINDERS_PREFIX) ||
+    id.startsWith(REINVEST_DATE_PREFIX)
   );
 }
 
@@ -2896,6 +2934,10 @@ export function encodeAchievementsWithAds(
   if (extras.telegramRemindersEnabled === false) {
     stateTokens.push(`${TG_REMINDERS_PREFIX}0`);
   }
+  const cleanReinvDate = String(extras.lastReinvestDate || '').trim().slice(0, 20);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(cleanReinvDate)) {
+    stateTokens.push(`${REINVEST_DATE_PREFIX}${cleanReinvDate}`);
+  }
 
   const maxRealIds = Math.max(0, 50 - stateTokens.length);
   return [...cleanIds.slice(-maxRealIds), ...stateTokens];
@@ -2915,6 +2957,7 @@ export function decodeAchievementsAndAds(
   coopFeverAdsWatched: number;
   autoHarvestUntilMs: number;
   telegramRemindersEnabled: boolean;
+  lastReinvestDate: string;
 } {
   const arr = Array.isArray(rawClaimedIds) ? rawClaimedIds : [];
   const cleanIds: string[] = [];
@@ -2927,6 +2970,7 @@ export function decodeAchievementsAndAds(
   let tokenCfAds = 0;
   let tokenAhUntil = 0;
   let tokenTgReminders: boolean | undefined = undefined;
+  let tokenReinvDate = '';
 
   for (const item of arr) {
     const str = String(item || '').trim();
@@ -2980,6 +3024,13 @@ export function decodeAchievementsAndAds(
       tokenTgReminders = str.slice(TG_REMINDERS_PREFIX.length) !== '0';
       continue;
     }
+    if (str.startsWith(REINVEST_DATE_PREFIX)) {
+      const d = str.slice(REINVEST_DATE_PREFIX.length).trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(d) && d > tokenReinvDate) {
+        tokenReinvDate = d;
+      }
+      continue;
+    }
     if (!seen.has(str)) {
       seen.add(str);
       cleanIds.push(str);
@@ -2993,6 +3044,7 @@ export function decodeAchievementsAndAds(
   const explicitCfBase = Math.max(0, Math.floor(Number(explicitExtras.coopFeverBaselineAds ?? 0) || 0));
   const explicitCfAds = Math.max(0, Math.floor(Number(explicitExtras.coopFeverAdsWatched ?? 0) || 0));
   const explicitAhUntil = Math.max(0, Math.floor(Number(explicitExtras.autoHarvestUntilMs ?? 0) || 0));
+  const explicitReinvDate = String(explicitExtras.lastReinvestDate || '').trim();
 
   return {
     claimedAchievementIds: cleanIds,
@@ -3006,6 +3058,8 @@ export function decodeAchievementsAndAds(
       explicitExtras.telegramRemindersEnabled !== undefined
         ? Boolean(explicitExtras.telegramRemindersEnabled)
         : (tokenTgReminders ?? true),
+    lastReinvestDate:
+      explicitReinvDate > tokenReinvDate ? explicitReinvDate : tokenReinvDate,
   };
 }
 
@@ -4140,5 +4194,113 @@ export function renderWithdrawApproveMessage(params: {
     buttonUrl,
   };
 }
+
+export function getVerifiableClaimedChannelTasks(
+  completedTaskIds: string[],
+  customTasks: TaskDefinition[] = [],
+): Array<{ task: TaskDefinition; handle: string }> {
+  if (!Array.isArray(completedTaskIds) || completedTaskIds.length === 0) {
+    return [];
+  }
+  const completedSet = new Set(completedTaskIds);
+  const allTasks = mergeTaskDefinitions(customTasks);
+  const out: Array<{ task: TaskDefinition; handle: string }> = [];
+  for (const task of allTasks) {
+    if (!completedSet.has(task.id)) continue;
+    if (!task.actionUrl) continue;
+    const isPaidTask = Boolean(task.creatorUid || (task.paidCoins ?? 0) > 0);
+    if (isPaidTask && task.requireChannelCheck === false) continue;
+    if (
+      /[?&]start(app)?=/i.test(task.actionUrl) ||
+      /t\.me\/(\+|joinchat\/)/i.test(task.actionUrl)
+    ) {
+      continue;
+    }
+    const normalized = normalizeTelegramChannelHandle(task.actionUrl);
+    if (!normalized.handle) continue;
+    out.push({ task, handle: normalized.handle });
+  }
+  return out;
+}
+
+export function applyLeftChannelPenalties(
+  profile: UserFarmProfile,
+  leftTaskIds: string[],
+  nowMs: number,
+  customTasks: TaskDefinition[] = [],
+): {
+  profile: UserFarmProfile;
+  transaction: TransactionEntry;
+  penalizedTasks: Array<{ taskId: string; title: string; rewardCoins: number; penaltyCoins: number }>;
+  totalPenaltyCoins: number;
+} | null {
+  if (!Array.isArray(leftTaskIds) || leftTaskIds.length === 0) return null;
+  const completedSet = new Set(profile.completedTaskIds);
+  const allTasks = mergeTaskDefinitions(customTasks);
+  const taskMap = new Map(allTasks.map((t) => [t.id, t]));
+  const penalizedSet = new Set<string>();
+  const penalizedTasks: Array<{
+    taskId: string;
+    title: string;
+    rewardCoins: number;
+    penaltyCoins: number;
+  }> = [];
+
+  let totalPenaltyCoins = 0;
+  for (const rawId of leftTaskIds) {
+    if (!completedSet.has(rawId) || penalizedSet.has(rawId)) continue;
+    const task = taskMap.get(rawId);
+    if (!task) continue;
+    const rewardCoins = Math.max(0, Math.round(Number(task.rewardCoins) || 0));
+    if (rewardCoins <= 0) continue;
+    const penaltyCoins = rewardCoins * CHANNEL_LEAVE_PENALTY_MULTIPLIER;
+    penalizedSet.add(rawId);
+    penalizedTasks.push({
+      taskId: rawId,
+      title: task.title,
+      rewardCoins,
+      penaltyCoins,
+    });
+    totalPenaltyCoins += penaltyCoins;
+  }
+
+  if (penalizedTasks.length === 0 || totalPenaltyCoins <= 0) {
+    return null;
+  }
+
+  const nextCoins = Math.max(-100_000_000, profile.coins - totalPenaltyCoins);
+  const nextCompletedTaskIds = profile.completedTaskIds.filter((id) => !penalizedSet.has(id));
+
+  const nextProfile: UserFarmProfile = {
+    ...profile,
+    coins: nextCoins,
+    completedTaskIds: nextCompletedTaskIds,
+  };
+
+  const label =
+    penalizedTasks.length === 1
+      ? `Left channel penalty (5×): ${penalizedTasks[0].title}`
+      : `Left ${penalizedTasks.length} channels penalty (5×)`;
+
+  const transaction: TransactionEntry = {
+    id: `tx_ch_pen_${nowMs}`,
+    userId: profile.uid,
+    type: 'task',
+    title: label.slice(0, 80),
+    amount: -totalPenaltyCoins,
+    currency: 'coins',
+    usdValue: coinsToUsd(totalPenaltyCoins),
+    status: 'completed',
+    createdAtMs: nowMs,
+  };
+
+  return {
+    profile: nextProfile,
+    transaction,
+    penalizedTasks,
+    totalPenaltyCoins,
+  };
+}
+
 
 

@@ -223,6 +223,12 @@ function safeNonNegativeNum(value: unknown, fallback = 0): number {
   return n;
 }
 
+function safeBoundedCoins(value: unknown, fallback = 0): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(-100_000_000, Math.min(100_000_000, n));
+}
+
 function toFirestoreProfilePayload(profile: UserFarmProfile, isCreate: boolean) {
   const cumulativeAds = Math.max(
     0,
@@ -236,7 +242,7 @@ function toFirestoreProfilePayload(profile: UserFarmProfile, isCreate: boolean) 
     avatarColor: (profile.avatarColor || '#EF4444').slice(0, 20),
     level: Math.max(1, Math.min(999, Math.floor(safeNonNegativeNum(profile.level, 1)))),
     xp: safeNonNegativeNum(profile.xp, 0),
-    coins: safeNonNegativeNum(profile.coins, 0),
+    coins: safeBoundedCoins(profile.coins, 0),
     eggs: safeNonNegativeNum(profile.eggs, 0),
     totalEggsCollected: safeNonNegativeNum(profile.totalEggsCollected, 0),
     totalCashEarnedUsd: safeNonNegativeNum(profile.totalCashEarnedUsd, 0),
@@ -275,6 +281,7 @@ function toFirestoreProfilePayload(profile: UserFarmProfile, isCreate: boolean) 
         coopFeverAdsWatched: profile.coopFeverAdsWatched,
         autoHarvestUntilMs: profile.autoHarvestUntilMs,
         telegramRemindersEnabled: profile.telegramRemindersEnabled,
+        lastReinvestDate: profile.lastReinvestDate,
       },
     ),
     claimedReferralMilestones: (profile.claimedReferralMilestones ?? []).slice(0, 20),
@@ -347,6 +354,7 @@ function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFa
     coopFeverAdsWatched,
     autoHarvestUntilMs,
     telegramRemindersEnabled,
+    lastReinvestDate,
   } = decodeAchievementsAndAds(
     d.claimedAchievementIds,
     d.totalAdsWatched,
@@ -354,6 +362,7 @@ function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFa
     {
       withdrawAdsWatched: typeof d.withdrawAdsWatched === 'number' ? d.withdrawAdsWatched : undefined,
       coopFeverAdsWatched: typeof d.coopFeverAdsWatched === 'number' ? d.coopFeverAdsWatched : undefined,
+      lastReinvestDate: typeof d.lastReinvestDate === 'string' ? d.lastReinvestDate : undefined,
     },
   );
   return {
@@ -378,6 +387,7 @@ function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFa
     boughtThisWeek: Number(d.boughtThisWeek ?? 0),
     dailyStreak: Number(d.dailyStreak ?? 0),
     lastDailyClaimDate: String(d.lastDailyClaimDate ?? ''),
+    lastReinvestDate,
     completedTaskIds: Array.isArray(d.completedTaskIds) ? (d.completedTaskIds as string[]) : [],
     claimedPromoCodes: Array.isArray(d.claimedPromoCodes) ? (d.claimedPromoCodes as string[]) : [],
     watchedAdsCount: Number(d.watchedAdsCount ?? 0),

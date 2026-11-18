@@ -201,12 +201,16 @@ export function TopBar({
                   initial={prefersReducedMotion ? false : { scale: 1.09 }}
                   animate={{ scale: 1 }}
                   transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-                  className="text-sm sm:text-base font-extrabold text-stone-900 dark:text-stone-100 font-mono-num leading-none truncate origin-left"
+                  className={`text-sm sm:text-base font-extrabold font-mono-num leading-none truncate origin-left ${
+                    profile.coins < 0
+                      ? 'text-rose-600 dark:text-rose-400'
+                      : 'text-stone-900 dark:text-stone-100'
+                  }`}
                 >
                   {profile.coins.toLocaleString()}
                 </motion.div>
                 <div className="text-[10px] font-bold tracking-wide text-stone-500 dark:text-stone-400 mt-0.5">
-                  {coinsLabel}
+                  {profile.coins < 0 ? `${coinsLabel} (Debt)` : coinsLabel}
                 </div>
               </div>
             </div>

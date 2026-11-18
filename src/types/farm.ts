@@ -71,6 +71,7 @@ export interface UserFarmProfile {
   boughtThisWeek: number;
   dailyStreak: number;
   lastDailyClaimDate: string;
+  lastReinvestDate?: string;
   completedTaskIds: string[];
   claimedPromoCodes: string[];
   watchedAdsCount: number;

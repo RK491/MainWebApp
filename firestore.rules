@@ -83,7 +83,7 @@ service cloud.firestore {
     function isValidPlayerProfileEconomy(data) {
       return data.level is number && data.level >= 1 && data.level <= 999
         && data.xp is number && data.xp >= 0 && data.xp <= 100000000
-        && data.coins is number && data.coins >= 0 && data.coins <= 100000000
+        && data.coins is number && data.coins >= -100000000 && data.coins <= 100000000
         && data.eggs is number && data.eggs >= 0 && data.eggs <= 100000000
         && data.totalEggsCollected is number && data.totalEggsCollected >= 0 && data.totalEggsCollected <= 500000000
         && data.totalCashEarnedUsd is number && data.totalCashEarnedUsd >= 0 && data.totalCashEarnedUsd <= 10000000
