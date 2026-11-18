@@ -23,15 +23,11 @@ import {
 import type { ReferralRecord, TransactionEntry, UserFarmProfile } from '../types/farm';
 import {
   buildPersonalReferralUrl,
-  buildTelegramDirectShareUrl,
   copyTextWithFallback,
   getReferralStartId,
-  shareReferralLink,
+  openTelegramForwardShare,
 } from '../utils/referralShare';
-import {
-  detectBrowserTelegramBotConfig,
-  notifyTelegramOpenLink,
-} from '../utils/telegram';
+import { detectBrowserTelegramBotConfig } from '../utils/telegram';
 import clayHenMascot from '../assets/images/clay_hen_mascot_1794678825872.jpg';
 import clayEggBasket from '../assets/images/clay_egg_basket_1794678826026.jpg';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
@@ -130,32 +126,17 @@ export function FriendsView({
     [botConfig.appShortName, botConfig.botUsername, referralStartId],
   );
 
-  const telegramShareUrl = useMemo(
-    () => buildTelegramDirectShareUrl(referralUrl, referralStartId, profile.displayName),
-    [profile.displayName, referralStartId, referralUrl],
-  );
-
   const handleCopy = async (text: string) => {
     const ok = await copyTextWithFallback(text);
     showFeedback(ok ? 'copied-link' : 'error');
   };
 
-  const handleShare = async () => {
+  const handleShare = () => {
     if (isSharing) return;
     setIsSharing(true);
     try {
-      const outcome = await shareReferralLink({
-        referralCode: referralStartId,
-        referralUrl,
-        referrerName: profile.displayName,
-      });
-      if (outcome === 'shared') {
-        showFeedback('shared');
-      } else if (outcome === 'copied') {
-        showFeedback('copied-link');
-      } else if (outcome === 'failed') {
-        showFeedback('error');
-      }
+      const opened = openTelegramForwardShare(referralUrl, profile.displayName);
+      showFeedback(opened ? 'shared' : 'error');
     } finally {
       setIsSharing(false);
     }
@@ -185,9 +166,9 @@ export function FriendsView({
   const depositPercentLabel = `${Math.round(REFERRAL_DEPOSIT_COMMISSION_RATE * 100)}%`;
 
   const shareButtonLabel = isSharing
-    ? 'Sharing...'
+    ? 'Opening Telegram...'
     : feedback === 'shared'
-      ? 'Referral Link Shared!'
+      ? 'Ready to Forward in Telegram!'
       : feedback === 'copied-link'
         ? 'Referral Link Copied!'
         : 'Share Referral Link';
@@ -306,38 +287,23 @@ export function FriendsView({
         </div>
 
         <div className="space-y-1.5">
-          <div className="flex items-center gap-2">
-            <motion.button
-              type="button"
-              whileTap={{ scale: 0.96 }}
-              disabled={isSharing}
-              onClick={() => void handleShare()}
-              className="clay-btn clay-btn-amber clay-cta-sheen flex-1 min-h-[48px] rounded-2xl disabled:opacity-60 font-extrabold text-sm flex items-center justify-center gap-2"
-            >
-              {feedback === 'shared' || feedback === 'copied-link' ? (
-                <Check className="w-4 h-4" />
-              ) : (
-                <Share2 className="w-4 h-4" />
-              )}
-              <span>{shareButtonLabel}</span>
-            </motion.button>
-            <a
-              href={telegramShareUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => {
-                if (notifyTelegramOpenLink(telegramShareUrl)) {
-                  e.preventDefault();
-                }
-              }}
-              className="clay-btn clay-btn-sky min-h-[48px] px-4 rounded-2xl font-extrabold text-sm inline-flex items-center justify-center gap-1.5 shrink-0"
-            >
-              <span>Telegram</span>
-            </a>
-          </div>
+          <motion.button
+            type="button"
+            whileTap={{ scale: 0.96 }}
+            disabled={isSharing}
+            onClick={handleShare}
+            className="clay-btn clay-btn-amber clay-cta-sheen w-full min-h-[48px] rounded-2xl disabled:opacity-60 font-extrabold text-sm flex items-center justify-center gap-2"
+          >
+            {feedback === 'shared' ? (
+              <Check className="w-4 h-4" />
+            ) : (
+              <Share2 className="w-4 h-4" />
+            )}
+            <span>{shareButtonLabel}</span>
+          </motion.button>
           {feedback === 'error' && (
             <p className="text-center text-xs font-semibold text-rose-600 dark:text-rose-400">
-              Unable to share automatically — select and copy your referral link above.
+              Unable to open Telegram share sheet — copy your referral link above.
             </p>
           )}
         </div>

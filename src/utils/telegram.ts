@@ -409,12 +409,71 @@ export function getTelegramInitData(): string {
   }
 }
 
+const API_BASE_URL_STORAGE_KEY = 'chickenland_api_base_url_v1';
+
+export function normalizeApiBaseUrl(raw?: string | null): string {
+  const trimmed = String(raw || '').trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  if (/^https?:\/\/[a-zA-Z0-9.-]+(:\d+)?(\/.*)?$/i.test(trimmed)) {
+    return trimmed;
+  }
+  return '';
+}
+
+export function getConfiguredApiBaseUrl(): string {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const stored = normalizeApiBaseUrl(localStorage.getItem(API_BASE_URL_STORAGE_KEY));
+      if (stored) return stored;
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+  try {
+    const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
+    const envUrl = normalizeApiBaseUrl(env?.VITE_API_BASE_URL);
+    if (envUrl) return envUrl;
+  } catch {
+    // Ignore non-Vite Node environments
+  }
+  return '';
+}
+
+export function setConfiguredApiBaseUrl(rawUrl: string): string {
+  const clean = normalizeApiBaseUrl(rawUrl);
+  try {
+    if (typeof localStorage !== 'undefined') {
+      if (clean) {
+        localStorage.setItem(API_BASE_URL_STORAGE_KEY, clean);
+      } else {
+        localStorage.removeItem(API_BASE_URL_STORAGE_KEY);
+      }
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+  return clean;
+}
+
+export function resolveApiUrl(endpointPath: string): string {
+  const cleanPath = endpointPath.startsWith('/') ? endpointPath : `/${endpointPath}`;
+  const configuredBase = getConfiguredApiBaseUrl();
+  if (configuredBase) {
+    return `${configuredBase}${cleanPath}`;
+  }
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return new URL(cleanPath, window.location.origin).toString();
+  }
+  return cleanPath;
+}
+
 export async function safeFetchJson<T>(
   url: string,
   init?: RequestInit,
 ): Promise<T | null> {
   try {
-    const res = await fetch(url, init);
+    const targetUrl = url.startsWith('http://') || url.startsWith('https://') ? url : resolveApiUrl(url);
+    const res = await fetch(targetUrl, init);
     if (!res.ok) return null;
     const contentType = (res.headers.get('content-type') || '').toLowerCase();
     if (!contentType.includes('application/json')) {

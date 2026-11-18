@@ -1322,8 +1322,9 @@ test('referralShare builds Telegram Mini App t.me startapp URL with auto-detecte
   const payload = buildReferralShareData('7508911853', url, 'Rahul');
   assert.equal(payload.title, 'Join Alpha Gram!');
   assert.equal(payload.url, url);
-  assert.ok(payload.text?.includes('7508911853'));
-  assert.ok(payload.text?.includes('+1,000'));
+  assert.ok(!payload.text?.includes('7508911853'));
+  assert.ok(payload.text?.includes("Rahul's"));
+  assert.ok(payload.text?.includes('Alpha Gram farm and claim +1,000 sign-up bonus coins!'));
 
   // 1. Web Share API succeeds
   let sharedPayload: ShareData | null = null;
@@ -2657,7 +2658,7 @@ test('filterPlayersBySearchQuery, computeAdminCoinAdjustment, and computeAdminRe
   );
   assert.deepEqual(
     filterPlayersBySearchQuery([p1, p2], p1.referralCode).map((p) => p.uid),
-    ['tg_123456789'],
+    ['tg_123456789', 'player_guest_42'],
   );
 
   // Coin adjustments clamp cleanly at 0 and validate inputs
@@ -3098,4 +3099,78 @@ test('renderWithdrawApproveMessage formats default payout DM with walletShort an
   assert.equal(custom.buttonUrl, `https://tonviewer.com/transaction/${txHash64}`);
 });
 
+test('getUnifiedUserId removes CL- codes cleanly and Admin withdraw-ads controls support add, remove, unlock, and reset to 0', async () => {
+  const {
+    computeAdminWithdrawAdsAdjustment,
+    computeAdminWithdrawAdsTarget,
+    createReferralCodeFromUid,
+    getUnifiedUserId,
+  } = await import('./economy');
 
+  assert.equal(getUnifiedUserId('tg_7508911853'), '7508911853');
+  assert.equal(getUnifiedUserId('player_guest_99'), 'player_guest_99');
+  assert.equal(createReferralCodeFromUid('tg_7508911853'), '7508911853');
+  assert.ok(!createReferralCodeFromUid('tg_7508911853').startsWith('CL-'));
+  assert.equal(createReferralCodeFromUid('player_abc123'), 'player_abc123');
+
+  // Add ads (+30)
+  assert.deepEqual(computeAdminWithdrawAdsAdjustment(0, 30), {
+    ok: true,
+    previousAds: 0,
+    nextAds: 30,
+    actualDelta: 30,
+  });
+
+  // Remove ads (-10 from 25 -> 15; removing from 0 errors)
+  assert.deepEqual(computeAdminWithdrawAdsAdjustment(25, -10), {
+    ok: true,
+    previousAds: 25,
+    nextAds: 15,
+    actualDelta: -10,
+  });
+  assert.equal(computeAdminWithdrawAdsAdjustment(0, -5).ok, false);
+
+  // Target unlock (30) and reset (0)
+  assert.deepEqual(computeAdminWithdrawAdsTarget(4, 30), {
+    ok: true,
+    previousAds: 4,
+    nextAds: 30,
+    actualDelta: 26,
+  });
+  assert.deepEqual(computeAdminWithdrawAdsTarget(30, 0), {
+    ok: true,
+    previousAds: 30,
+    nextAds: 0,
+    actualDelta: -30,
+  });
+
+  // Token override ensures downward/reset __wad:0 wins over stale top-level field
+  const encodedReset = encodeAchievementsWithAds(['first_harvest'], 40, {
+    withdrawAdsWatched: 0,
+  });
+  assert.ok(encodedReset.includes('__wad:0'));
+  const decodedReset = decodeAchievementsAndAds(encodedReset);
+  assert.equal(decodedReset.withdrawAdsWatched, 0);
+
+  // Arbitrary target set (e.g. admin setting 17 ads or reducing 30 -> 12)
+  assert.deepEqual(computeAdminWithdrawAdsTarget(0, 17), {
+    ok: true,
+    previousAds: 0,
+    nextAds: 17,
+    actualDelta: 17,
+  });
+  assert.deepEqual(computeAdminWithdrawAdsTarget(30, 12), {
+    ok: true,
+    previousAds: 30,
+    nextAds: 12,
+    actualDelta: -18,
+  });
+
+  // Telegram WebApp start_param & URL startapp referral IDs preserve numeric IDs cleanly
+  const tgStartIdentity = resolveTelegramUserIdentity({
+    tgUser: { id: 99887766, first_name: 'Mira' },
+    startParam: '7508911853',
+  });
+  assert.equal(tgStartIdentity.playerId, 'tg_99887766');
+  assert.equal(tgStartIdentity.startParam, '7508911853');
+});

@@ -30,8 +30,11 @@ import {
   coinsToUsd,
   computeAdminCoinAdjustment,
   computeAdminReferralCountAdjustment,
+  computeAdminWithdrawAdsAdjustment,
+  computeAdminWithdrawAdsTarget,
   createDefaultProfile,
   createDefaultSeasonConfig,
+  createReferralCodeFromUid,
   decodeAchievementsAndAds,
   decodePromoLabelMeta,
   decodeTaskSubtitleMeta,
@@ -250,7 +253,7 @@ function toFirestoreProfilePayload(profile: UserFarmProfile, isCreate: boolean) 
     completedTaskIds: (profile.completedTaskIds ?? []).slice(0, 50),
     claimedPromoCodes: (profile.claimedPromoCodes ?? []).slice(0, 50),
     watchedAdsCount: Math.max(0, Math.min(10, Math.floor(safeNonNegativeNum(profile.watchedAdsCount, 0)))),
-    referralCode: (profile.referralCode || `CL-${profile.uid.slice(-6).toUpperCase()}`).slice(0, 32),
+    referralCode: (profile.referralCode || createReferralCodeFromUid(profile.uid)).slice(0, 32),
     referredBy: (profile.referredBy || '').slice(0, 64),
     referralActivated: Boolean(profile.referralActivated),
     referralCount: Math.floor(safeNonNegativeNum(profile.referralCount, 0)),
@@ -294,7 +297,7 @@ function toLeaderboardPayload(profile: UserFarmProfile) {
     handle: (profile.handle || '').trim().slice(0, 40) || '@farmer',
     photoUrl: (profile.photoUrl || '').slice(0, 512),
     avatarColor: (profile.avatarColor || '#EF4444').slice(0, 20),
-    referralCode: (profile.referralCode || `CL-${profile.uid.slice(-6).toUpperCase()}`).slice(0, 32),
+    referralCode: (profile.referralCode || createReferralCodeFromUid(profile.uid)).slice(0, 32),
     buyerPoints: Math.max(0, calculateBuyerPoints(profile)),
     inviterCount: Math.max(0, Math.floor(safeNonNegativeNum(profile.referralCount, 0))),
     eggs: Math.max(0, safeNonNegativeNum(profile.eggs, 0)),
@@ -385,7 +388,7 @@ function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFa
     coopFeverAdsWatched,
     autoHarvestUntilMs,
     telegramRemindersEnabled,
-    referralCode: String(d.referralCode ?? `CL-${fallbackId.slice(-6).toUpperCase()}`),
+    referralCode: String(d.referralCode ?? createReferralCodeFromUid(fallbackId)),
     referredBy: String(d.referredBy ?? ''),
     referralActivated: Boolean(d.referralActivated),
     referralCount: Number(d.referralCount ?? 0),
@@ -564,19 +567,35 @@ export async function applyReferralCodeInFirestore(
       }
     }
 
-    // 2. Fallback to legacy CL-XXXXXX referralCode lookup
+    // 2. Fallback to stored referralCode lookup across leaderboard and players (supports unified IDs & legacy codes)
     if (!referrerUid) {
-      const q = query(
-        collection(db, 'leaderboard'),
-        where('referralCode', '==', codeUpper),
-        limit(1),
-      );
-      const matches = await getDocs(q);
-      if (!matches.empty) {
-        const referrerSnap = matches.docs[0];
-        const referrerData = referrerSnap.data();
-        referrerUid = String(referrerData.uid || referrerSnap.id);
-        referrerName = String(referrerData.displayName || 'Farmer');
+      for (const codeCandidate of Array.from(new Set([strippedParam, rawTrimmed, codeUpper])).filter(Boolean)) {
+        const lbQ = query(
+          collection(db, 'leaderboard'),
+          where('referralCode', '==', codeCandidate),
+          limit(1),
+        );
+        const lbMatches = await getDocs(lbQ);
+        if (!lbMatches.empty) {
+          const referrerSnap = lbMatches.docs[0];
+          const referrerData = referrerSnap.data();
+          referrerUid = String(referrerData.uid || referrerSnap.id);
+          referrerName = String(referrerData.displayName || 'Farmer');
+          break;
+        }
+        const playerQ = query(
+          collection(db, 'players'),
+          where('referralCode', '==', codeCandidate),
+          limit(1),
+        );
+        const playerMatches = await getDocs(playerQ);
+        if (!playerMatches.empty) {
+          const referrerSnap = playerMatches.docs[0];
+          const referrerData = referrerSnap.data();
+          referrerUid = String(referrerData.uid || referrerSnap.id);
+          referrerName = String(referrerData.displayName || 'Farmer');
+          break;
+        }
       }
     }
 
@@ -617,30 +636,45 @@ export async function applyReferralCodeInFirestore(
 
     let alreadyLinked = false;
     await runTransaction(db, async (transaction) => {
-      const [playerSnap, referrerPlayerSnap, referrerLbSnap, existingRefSnap] = await Promise.all([
-        transaction.get(playerRef),
-        transaction.get(referrerPlayerRef),
-        transaction.get(referrerLbRef),
-        transaction.get(referralDocRef),
-      ]);
+      const [playerSnap, playerLbSnap, referrerPlayerSnap, referrerLbSnap, existingRefSnap] =
+        await Promise.all([
+          transaction.get(playerRef),
+          transaction.get(playerLbRef),
+          transaction.get(referrerPlayerRef),
+          transaction.get(referrerLbRef),
+          transaction.get(referralDocRef),
+        ]);
 
       if (existingRefSnap.exists() || (playerSnap.exists() && playerSnap.data().referredBy)) {
         alreadyLinked = true;
         return;
       }
 
-      const liveCoins = playerSnap.exists()
-        ? Number(playerSnap.data().coins ?? currentProfile.coins)
-        : currentProfile.coins;
-      nextProfile = {
-        ...currentProfile,
-        referredBy: referrerUid,
-        referralActivated: true,
-        coins: liveCoins + REFERRED_WELCOME_BONUS_COINS,
-      };
+      if (playerSnap.exists()) {
+        const liveCoins = Number(playerSnap.data().coins ?? currentProfile.coins);
+        const { updatedProfile, firestorePayload } = buildUpdatedPlayerFromRaw(
+          playerSnap.data(),
+          currentProfile.uid,
+          {
+            referredBy: referrerUid,
+            referralActivated: true,
+            coins: liveCoins + REFERRED_WELCOME_BONUS_COINS,
+          },
+        );
+        nextProfile = updatedProfile;
+        transaction.update(playerRef, firestorePayload);
+      } else {
+        transaction.set(playerRef, toFirestoreProfilePayload(nextProfile, true));
+      }
 
-      transaction.update(playerRef, toFirestoreProfilePayload(nextProfile, false));
-      transaction.set(playerLbRef, toLeaderboardPayload(nextProfile));
+      if (playerLbSnap.exists()) {
+        transaction.update(
+          playerLbRef,
+          buildUpdatedLeaderboardFromRaw(playerLbSnap.data(), nextProfile),
+        );
+      } else {
+        transaction.set(playerLbRef, toLeaderboardPayload(nextProfile));
+      }
       transaction.set(doc(db, 'players', currentProfile.uid, 'transactions', userTx.id), {
         userId: currentProfile.uid,
         type: userTx.type,
@@ -669,45 +703,47 @@ export async function applyReferralCodeInFirestore(
         createdAt: serverTimestamp(),
       });
 
-      if (referrerPlayerSnap.exists()) {
-        const rp = referrerPlayerSnap.data();
-        const nextRefPlayerCoins = Number(rp.coins ?? 0) + rewardCoins;
-        const nextRefCount = Number(rp.referralCount ?? 0) + 1;
-        const nextRefCoinsEarned = Number(rp.referralCoinsEarned ?? 0) + rewardCoins;
-        const { updatedProfile: updatedReferrer, firestorePayload } = buildUpdatedPlayerFromRaw(
-          rp,
-          referrerUid,
-          {
-            coins: nextRefPlayerCoins,
-            referralCount: nextRefCount,
-            referralCoinsEarned: nextRefCoinsEarned,
-          },
-        );
-
-        transaction.update(referrerPlayerRef, firestorePayload);
-
-        if (referrerLbSnap.exists()) {
-          transaction.update(
-            referrerLbRef,
-            buildUpdatedLeaderboardFromRaw(referrerLbSnap.data(), updatedReferrer),
-          );
-        } else {
-          transaction.set(referrerLbRef, toLeaderboardPayload(updatedReferrer));
-        }
-
-        const refRewardTxId = `tx_ref_earned_${currentProfile.uid.replace(/[^a-zA-Z0-9_-]/g, '').slice(-16)}_${nowMs}`.slice(0, 64);
-        transaction.set(doc(db, 'players', referrerUid, 'transactions', refRewardTxId), {
-          userId: referrerUid,
-          type: 'referral',
-          title: `Referral reward (+${rewardCoins} coins): ${safeReferredName}`.slice(0, 80),
-          amount: rewardCoins,
-          currency: 'coins',
-          usdValue: Number((rewardCoins / 10000).toFixed(4)),
-          status: 'completed',
-          createdAtMs: nowMs,
-          createdAt: serverTimestamp(),
-        });
+      if (!referrerPlayerSnap.exists()) {
+        throw new Error('REFERRER_MISSING');
       }
+
+      const rp = referrerPlayerSnap.data();
+      const nextRefPlayerCoins = Number(rp.coins ?? 0) + rewardCoins;
+      const nextRefCount = Number(rp.referralCount ?? 0) + 1;
+      const nextRefCoinsEarned = Number(rp.referralCoinsEarned ?? 0) + rewardCoins;
+      const { updatedProfile: updatedReferrer, firestorePayload } = buildUpdatedPlayerFromRaw(
+        rp,
+        referrerUid,
+        {
+          coins: nextRefPlayerCoins,
+          referralCount: nextRefCount,
+          referralCoinsEarned: nextRefCoinsEarned,
+        },
+      );
+
+      transaction.update(referrerPlayerRef, firestorePayload);
+
+      if (referrerLbSnap.exists()) {
+        transaction.update(
+          referrerLbRef,
+          buildUpdatedLeaderboardFromRaw(referrerLbSnap.data(), updatedReferrer),
+        );
+      } else {
+        transaction.set(referrerLbRef, toLeaderboardPayload(updatedReferrer));
+      }
+
+      const refRewardTxId = `tx_ref_earned_${currentProfile.uid.replace(/[^a-zA-Z0-9_-]/g, '').slice(-16)}_${nowMs}`.slice(0, 64);
+      transaction.set(doc(db, 'players', referrerUid, 'transactions', refRewardTxId), {
+        userId: referrerUid,
+        type: 'referral',
+        title: `Referral reward (+${rewardCoins} coins): ${safeReferredName}`.slice(0, 80),
+        amount: rewardCoins,
+        currency: 'coins',
+        usdValue: Number((rewardCoins / 10000).toFixed(4)),
+        status: 'completed',
+        createdAtMs: nowMs,
+        createdAt: serverTimestamp(),
+      });
     });
 
     if (alreadyLinked) {
@@ -723,6 +759,9 @@ export async function applyReferralCodeInFirestore(
       coinsRewarded: rewardCoins,
     };
   } catch (error) {
+    if (error instanceof Error && error.message === 'REFERRER_MISSING') {
+      return { error: `Referral ID "${rawTrimmed}" not found.` };
+    }
     handleFirestoreError(error, OperationType.WRITE, `referrals/${rawTrimmed}`);
   }
 }
@@ -3137,6 +3176,69 @@ export async function adjustPlayerReferralCountInFirestore(params: {
       error instanceof Error &&
       (error.message.includes('not found') ||
         error.message.includes('referral') ||
+        error.message.includes('Admin'))
+    ) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.WRITE, `players/${cleanTargetUid}`);
+  }
+}
+
+export async function adjustPlayerWithdrawAdsInFirestore(params: {
+  adminUid: string;
+  targetUid: string;
+  deltaAds?: number;
+  targetAds?: number;
+  extraAdminIds?: readonly string[];
+}): Promise<{ profile: UserFarmProfile; actualDelta: number; previousAds: number; nextAds: number }> {
+  if (!isAdminPlayerId(params.adminUid, params.extraAdminIds)) {
+    throw new Error('Only authorized Admins can adjust withdraw ads.');
+  }
+  const cleanTargetUid = params.targetUid.trim();
+  if (!cleanTargetUid) {
+    throw new Error('Select a valid player.');
+  }
+
+  const playerRef = doc(db, 'players', cleanTargetUid);
+
+  try {
+    const result = await runTransaction(db, async (tx) => {
+      const playerSnap = await tx.get(playerRef);
+      if (!playerSnap.exists()) {
+        throw new Error(`Player "${cleanTargetUid}" not found in Firestore.`);
+      }
+      const currentProfile = parseProfileDoc(playerSnap.data(), cleanTargetUid);
+      const currentAds = currentProfile.withdrawAdsWatched ?? 0;
+      const calc =
+        typeof params.targetAds === 'number'
+          ? computeAdminWithdrawAdsTarget(currentAds, params.targetAds)
+          : computeAdminWithdrawAdsAdjustment(currentAds, params.deltaAds ?? 0);
+
+      if (!calc.ok) {
+        throw new Error(calc.error);
+      }
+
+      const { updatedProfile, firestorePayload } = buildUpdatedPlayerFromRaw(
+        playerSnap.data(),
+        cleanTargetUid,
+        { withdrawAdsWatched: calc.nextAds },
+      );
+
+      tx.update(playerRef, firestorePayload);
+      return {
+        profile: updatedProfile,
+        actualDelta: calc.actualDelta,
+        previousAds: calc.previousAds,
+        nextAds: calc.nextAds,
+      };
+    });
+
+    return result;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('not found') ||
+        error.message.includes('withdraw ads') ||
         error.message.includes('Admin'))
     ) {
       throw error;

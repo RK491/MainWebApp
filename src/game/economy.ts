@@ -2092,10 +2092,18 @@ export function upgradeBasket(
 
 const AVATAR_COLORS = ['#EF4444', '#10B981', '#0284C7', '#D97706', '#7C3AED', '#E11D48'];
 
+export function getUnifiedUserId(uid: string): string {
+  const numeric = extractTelegramNumericUserId(uid);
+  return numeric || String(uid || '').trim();
+}
+
 export function createReferralCodeFromUid(uid: string): string {
-  const cleaned = uid.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-  const suffix = cleaned.slice(-6).padStart(6, 'X');
-  return `CL-${suffix}`;
+  const unified = getUnifiedUserId(uid);
+  if (unified) {
+    return unified.slice(0, 32);
+  }
+  const cleaned = String(uid || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32);
+  return cleaned || 'FARMER';
 }
 
 export function createDefaultProfile(
@@ -2837,8 +2845,8 @@ export function encodeAchievementsWithAds(
   if (safeAds > 0) {
     stateTokens.push(`${ADS_TOKEN_PREFIX}${safeAds}`);
   }
-  const wad = Math.max(0, Math.floor(Number(extras.withdrawAdsWatched ?? 0) || 0));
-  if (wad > 0) {
+  if (typeof extras.withdrawAdsWatched === 'number' && Number.isFinite(extras.withdrawAdsWatched)) {
+    const wad = Math.max(0, Math.floor(extras.withdrawAdsWatched));
     stateTokens.push(`${WITHDRAW_ADS_PREFIX}${wad}`);
   }
   const cfUntil = Math.max(0, Math.floor(Number(extras.coopFeverUntilMs ?? 0) || 0));
@@ -2885,6 +2893,7 @@ export function decodeAchievementsAndAds(
   const seen = new Set<string>();
   let tokenAds = 0;
   let tokenWad = 0;
+  let hasTokenWad = false;
   let tokenCfUntil = 0;
   let tokenCfBase = 0;
   let tokenCfAds = 0;
@@ -2903,8 +2912,11 @@ export function decodeAchievementsAndAds(
     }
     if (str.startsWith(WITHDRAW_ADS_PREFIX)) {
       const parsed = Math.floor(Number(str.slice(WITHDRAW_ADS_PREFIX.length)));
-      if (Number.isFinite(parsed) && parsed > tokenWad) {
-        tokenWad = parsed;
+      if (Number.isFinite(parsed) && parsed >= 0) {
+        hasTokenWad = true;
+        if (parsed > tokenWad) {
+          tokenWad = parsed;
+        }
       }
       continue;
     }
@@ -2957,7 +2969,7 @@ export function decodeAchievementsAndAds(
   return {
     claimedAchievementIds: cleanIds,
     totalAdsWatched: Math.max(tokenAds, explicitNum, fallbackNum),
-    withdrawAdsWatched: Math.max(tokenWad, explicitWad),
+    withdrawAdsWatched: hasTokenWad ? tokenWad : explicitWad,
     coopFeverUntilMs: Math.max(tokenCfUntil, explicitCfUntil),
     coopFeverBaselineAds: Math.max(tokenCfBase, explicitCfBase),
     coopFeverAdsWatched: Math.max(tokenCfAds, explicitCfAds),
@@ -3781,6 +3793,7 @@ export function filterPlayersBySearchQuery(
   const noAt = trimmed.replace(/^@+/, '');
 
   return players.filter((p) => {
+    const unifiedId = getUnifiedUserId(p.uid).toLowerCase();
     const numericId = (extractTelegramNumericUserId(p.uid) || '').toLowerCase();
     const uidLow = p.uid.toLowerCase();
     const nameLow = (p.displayName || '').toLowerCase();
@@ -3790,6 +3803,7 @@ export function filterPlayersBySearchQuery(
 
     return (
       uidLow.includes(trimmed) ||
+      unifiedId.includes(noAt) ||
       (numericId && numericId.includes(noAt)) ||
       nameLow.includes(trimmed) ||
       handleLow.includes(trimmed) ||
@@ -3861,6 +3875,65 @@ export function computeAdminReferralCountAdjustment(
     previousCount: safeCurrent,
     nextCount,
     actualDelta,
+  };
+}
+
+export function computeAdminWithdrawAdsAdjustment(
+  currentAds: number,
+  rawDelta: number,
+):
+  | {
+      ok: true;
+      previousAds: number;
+      nextAds: number;
+      actualDelta: number;
+    }
+  | { ok: false; error: string } {
+  const safeCurrent = Math.max(0, Math.min(10_000, Math.floor(Number(currentAds) || 0)));
+  const delta = Math.trunc(Number(rawDelta));
+  if (!Number.isFinite(delta) || delta === 0) {
+    return { ok: false, error: 'Enter a withdraw ads count greater than 0.' };
+  }
+  if (delta > 10_000 || delta < -10_000) {
+    return { ok: false, error: 'Maximum single withdraw-ads adjustment is 10,000.' };
+  }
+  const nextAds = Math.max(0, Math.min(10_000, safeCurrent + delta));
+  const actualDelta = nextAds - safeCurrent;
+  if (actualDelta === 0 && delta < 0) {
+    return { ok: false, error: 'Player already has 0 withdraw ads.' };
+  }
+  if (actualDelta === 0 && delta > 0) {
+    return { ok: false, error: 'Player already reached the maximum withdraw-ads cap.' };
+  }
+  return {
+    ok: true,
+    previousAds: safeCurrent,
+    nextAds,
+    actualDelta,
+  };
+}
+
+export function computeAdminWithdrawAdsTarget(
+  currentAds: number,
+  rawTargetAds: number,
+):
+  | {
+      ok: true;
+      previousAds: number;
+      nextAds: number;
+      actualDelta: number;
+    }
+  | { ok: false; error: string } {
+  const safeCurrent = Math.max(0, Math.min(10_000, Math.floor(Number(currentAds) || 0)));
+  const parsed = Math.floor(Number(rawTargetAds));
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 10_000) {
+    return { ok: false, error: 'Enter a valid withdraw ads target between 0 and 10,000.' };
+  }
+  return {
+    ok: true,
+    previousAds: safeCurrent,
+    nextAds: parsed,
+    actualDelta: parsed - safeCurrent,
   };
 }
 

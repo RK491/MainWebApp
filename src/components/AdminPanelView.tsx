@@ -81,6 +81,8 @@ import {
   canAddAdminPlayerId,
   canBanPlayerId,
   CHICKEN_PACKS,
+  computeAdminWithdrawAdsAdjustment,
+  computeAdminWithdrawAdsTarget,
   DEFAULT_GET_CODE_CHANNEL_URL,
   DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
   extractTelegramNumericUserId,
@@ -89,10 +91,12 @@ import {
   formatPromoRewardSummary,
   generateGiftCodeString,
   getEffectiveAdminIds,
+  getUnifiedUserId,
   getWithdrawalStatusMeta,
   isAdminPlayerId,
   matchesAdminRecord,
   matchesBannedUserRecord,
+  MIN_WITHDRAW_ADS_WATCHED,
   normalizeGetCodeChannelUrl,
   normalizePlayerBanId,
   normalizeTelegramChannelEntry,
@@ -100,6 +104,7 @@ import {
   PRIMARY_ADMIN_TELEGRAM_ID,
   renderWithdrawApproveMessage,
 } from '../game/economy';
+import { getConfiguredApiBaseUrl, setConfiguredApiBaseUrl } from '../utils/telegram';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
 
 interface ChannelDiagnosticResult {
@@ -258,6 +263,25 @@ interface AdminPanelViewProps {
     excludeBanned?: boolean;
     testOnlyToAdmin?: boolean;
   }) => Promise<BroadcastResult>;
+  botConfigStatus?: {
+    configured: boolean;
+    source: 'runtime' | 'env' | 'none';
+    maskedToken: string;
+    botUsername: string | null;
+    updatedAtMs: number;
+  } | null;
+  onSaveBotToken?: (botToken: string) => Promise<{
+    ok: boolean;
+    error?: string;
+    botUsername?: string | null;
+    maskedToken?: string;
+  }>;
+  onClearBotToken?: () => Promise<{ ok: boolean; error?: string }>;
+  onAdjustWithdrawAds?: (input: {
+    targetUid: string;
+    deltaAds?: number;
+    targetAds?: number;
+  }) => Promise<UserFarmProfile>;
 }
 
 const AD_PROVIDER_CARDS: Array<{
@@ -385,6 +409,10 @@ export function AdminPanelView({
   onFetchBroadcastStats,
   onSyncBotSubscribers,
   onSendBroadcast,
+  botConfigStatus = null,
+  onSaveBotToken,
+  onClearBotToken,
+  onAdjustWithdrawAds,
 }: AdminPanelViewProps) {
   const extraAdminIds = useMemo(
     () => getEffectiveAdminIds(adminsConfig),
@@ -442,10 +470,25 @@ export function AdminPanelView({
   const [coinAmountInput, setCoinAmountInput] = useState('1000');
   const [coinNoteInput, setCoinNoteInput] = useState('');
   const [referCountInput, setReferCountInput] = useState('1');
+  const [withdrawAdsInput, setWithdrawAdsInput] = useState('30');
   const [linkFriendIdInput, setLinkFriendIdInput] = useState('');
   const [linkBonusCoinsInput, setLinkBonusCoinsInput] = useState('150');
   const [userActionBusy, setUserActionBusy] = useState<string | null>(null);
   const [userActionFeedback, setUserActionFeedback] = useState<{
+    type: 'ok' | 'error';
+    text: string;
+  } | null>(null);
+
+  // Telegram Bot Token & Optional Backend URL state
+  const [botTokenDraft, setBotTokenDraft] = useState('');
+  const [showBotTokenDraft, setShowBotTokenDraft] = useState(false);
+  const [savingBotToken, setSavingBotToken] = useState(false);
+  const [botTokenFeedback, setBotTokenFeedback] = useState<{
+    type: 'ok' | 'error';
+    text: string;
+  } | null>(null);
+  const [backendUrlDraft, setBackendUrlDraft] = useState(() => getConfiguredApiBaseUrl());
+  const [backendUrlFeedback, setBackendUrlFeedback] = useState<{
     type: 'ok' | 'error';
     text: string;
   } | null>(null);
@@ -1132,6 +1175,137 @@ export function AdminPanelView({
     }
   };
 
+  const handleAdjustWithdrawAdsClick = async (input: {
+    deltaAds?: number;
+    targetAds?: number;
+    busyKey: string;
+  }) => {
+    if (!selectedPlayer || !onAdjustWithdrawAds) return;
+    const currentAds = selectedPlayer.withdrawAdsWatched ?? 0;
+    const check =
+      typeof input.targetAds === 'number'
+        ? computeAdminWithdrawAdsTarget(currentAds, input.targetAds)
+        : computeAdminWithdrawAdsAdjustment(currentAds, input.deltaAds ?? 0);
+    if (!check.ok) {
+      setUserActionFeedback({ type: 'error', text: check.error });
+      return;
+    }
+
+    setUserActionBusy(input.busyKey);
+    setUserActionFeedback(null);
+    try {
+      onTabTap?.();
+      const updated = await onAdjustWithdrawAds({
+        targetUid: selectedPlayer.uid,
+        deltaAds: input.deltaAds,
+        targetAds: input.targetAds,
+      });
+      syncUpdatedPlayerIntoState(updated);
+      setSelectedPlayer(updated);
+      const nextCount = updated.withdrawAdsWatched ?? 0;
+      setUserActionFeedback({
+        type: 'ok',
+        text: `Updated withdraw ads progress to ${nextCount}/${MIN_WITHDRAW_ADS_WATCHED}${
+          nextCount >= MIN_WITHDRAW_ADS_WATCHED ? ' (Withdraw Unlocked!)' : '.'
+        }`,
+      });
+    } catch (err) {
+      setUserActionFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to update withdraw ads progress.',
+      });
+    } finally {
+      setUserActionBusy(null);
+    }
+  };
+
+  const handleSaveBotTokenSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!onSaveBotToken) return;
+    const trimmed = botTokenDraft.trim();
+    if (!trimmed) {
+      setBotTokenFeedback({
+        type: 'error',
+        text: 'Paste your Telegram Bot Token (from @BotFather) first.',
+      });
+      return;
+    }
+    setSavingBotToken(true);
+    setBotTokenFeedback(null);
+    try {
+      onTabTap?.();
+      const res = await onSaveBotToken(trimmed);
+      if (res.ok) {
+        setBotTokenDraft('');
+        setBotTokenFeedback({
+          type: 'ok',
+          text: res.botUsername
+            ? `Verified & saved Telegram bot @${res.botUsername}!`
+            : 'Verified & saved Telegram Bot Token!',
+        });
+      } else {
+        setBotTokenFeedback({
+          type: 'error',
+          text: res.error || 'Failed to verify or save Bot Token.',
+        });
+      }
+    } catch (err) {
+      setBotTokenFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to save Bot Token.',
+      });
+    } finally {
+      setSavingBotToken(false);
+    }
+  };
+
+  const handleClearBotTokenClick = async () => {
+    if (!onClearBotToken) return;
+    setSavingBotToken(true);
+    setBotTokenFeedback(null);
+    try {
+      onTabTap?.();
+      const res = await onClearBotToken();
+      if (res.ok) {
+        setBotTokenFeedback({
+          type: 'ok',
+          text: 'Cleared Admin-saved Bot Token.',
+        });
+      } else {
+        setBotTokenFeedback({
+          type: 'error',
+          text: res.error || 'Failed to clear Bot Token.',
+        });
+      }
+    } catch (err) {
+      setBotTokenFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to clear Bot Token.',
+      });
+    } finally {
+      setSavingBotToken(false);
+    }
+  };
+
+  const handleSaveBackendUrlSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onTabTap?.();
+    const saved = setConfiguredApiBaseUrl(backendUrlDraft);
+    setBackendUrlDraft(saved);
+    setBackendUrlFeedback({
+      type: 'ok',
+      text: saved
+        ? `Backend API URL set to ${saved}. Re-testing endpoints...`
+        : 'Backend API URL reset to current site origin.',
+    });
+    if (onFetchSystemDiagnostics) {
+      void onFetchSystemDiagnostics(true);
+    }
+    if (onRefreshChannelLogs) {
+      void onRefreshChannelLogs();
+    }
+  };
+
   const handleLinkFriendUnderSelected = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedPlayer || !linkFriendIdInput.trim()) return;
@@ -1609,6 +1783,170 @@ export function AdminPanelView({
     ].join('\n');
   };
 
+  const renderBotConfigCard = (compact = false) => {
+    const isConfigured = botConfigStatus?.configured ?? serverBotConfigured === true;
+    const sourceLabel =
+      botConfigStatus?.source === 'runtime'
+        ? 'Admin Panel Saved'
+        : botConfigStatus?.source === 'env'
+          ? 'Server .env'
+          : isConfigured
+            ? 'Configured'
+            : 'Not Set';
+
+    return (
+      <div className="clay-card p-4 space-y-3">
+        <div className="flex items-start justify-between gap-2 flex-wrap">
+          <div>
+            <h3 className="text-sm font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+              <KeyRound className="w-4 h-4 text-sky-600 dark:text-sky-400" />
+              <span>Telegram Bot Token Setup</span>
+            </h3>
+            <p className="text-[11px] text-stone-500 dark:text-stone-400 mt-0.5">
+              Connect your <span className="font-mono-num">@BotFather</span> token directly for Channel Check, Referral DMs, Payout alerts &amp; Broadcasts.
+            </p>
+          </div>
+          <span
+            className={`px-2 py-0.5 rounded-lg border text-[10px] font-extrabold shrink-0 ${
+              isConfigured
+                ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                : 'bg-rose-50 dark:bg-rose-950/60 border-rose-200 dark:border-rose-800/70 text-rose-700 dark:text-rose-300'
+            }`}
+          >
+            {isConfigured
+              ? botConfigStatus?.botUsername
+                ? `@${botConfigStatus.botUsername} · ${sourceLabel}`
+                : sourceLabel
+              : 'Token Missing'}
+          </span>
+        </div>
+
+        {botConfigStatus?.maskedToken && (
+          <div className="clay-inset !rounded-xl px-3 py-2 flex items-center justify-between gap-2 text-[11px] font-mono-num">
+            <span className="text-stone-600 dark:text-stone-300 truncate">
+              Active Token: <strong className="text-stone-900 dark:text-stone-100">{botConfigStatus.maskedToken}</strong>
+            </span>
+            {botConfigStatus.source === 'runtime' && onClearBotToken && (
+              <button
+                type="button"
+                disabled={savingBotToken}
+                onClick={() => void handleClearBotTokenClick()}
+                className="px-2 py-1 rounded-lg bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 font-sans font-extrabold text-[10px] shrink-0 cursor-pointer disabled:opacity-50"
+              >
+                Clear Token
+              </button>
+            )}
+          </div>
+        )}
+
+        {onSaveBotToken && (
+          <form onSubmit={(e) => void handleSaveBotTokenSubmit(e)} className="space-y-2">
+            <div className="flex flex-col sm:flex-row gap-2">
+              <div className="relative flex-1">
+                <input
+                  type={showBotTokenDraft ? 'text' : 'password'}
+                  value={botTokenDraft}
+                  onChange={(e) => {
+                    setBotTokenDraft(e.target.value);
+                    setBotTokenFeedback(null);
+                  }}
+                  placeholder="Paste Telegram Bot Token (e.g. 123456789:ABCdef...)"
+                  aria-label="Telegram Bot Token"
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="clay-inset w-full min-h-[42px] pl-3 pr-10 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-sky-400"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowBotTokenDraft((v) => !v)}
+                  aria-label={showBotTokenDraft ? 'Hide bot token' : 'Show bot token'}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 rounded-lg flex items-center justify-center text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-100 cursor-pointer"
+                >
+                  {showBotTokenDraft ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+              <button
+                type="submit"
+                disabled={savingBotToken || !botTokenDraft.trim()}
+                className="clay-btn clay-btn-emerald min-h-[42px] px-4 rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 shrink-0 disabled:opacity-50"
+              >
+                {savingBotToken ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                <span>{savingBotToken ? 'Verifying...' : 'Verify & Save Token'}</span>
+              </button>
+            </div>
+
+            {botTokenFeedback && (
+              <div
+                role="status"
+                className={`rounded-xl border px-3 py-2 text-xs font-bold ${
+                  botTokenFeedback.type === 'ok'
+                    ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                    : 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-800/70 text-rose-700 dark:text-rose-300'
+                }`}
+              >
+                {botTokenFeedback.text}
+              </div>
+            )}
+          </form>
+        )}
+
+        {!compact && (
+          <form
+            onSubmit={handleSaveBackendUrlSubmit}
+            className="pt-2.5 border-t border-stone-200/70 dark:border-stone-700/60 space-y-2"
+          >
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <label
+                htmlFor="admin-backend-api-url"
+                className="text-[11px] font-extrabold text-stone-700 dark:text-stone-300 flex items-center gap-1.5"
+              >
+                <Server className="w-3.5 h-3.5 text-amber-500" />
+                <span>Backend Server URL (only needed if hosted on static CDN)</span>
+              </label>
+              {backendUrlDraft && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const cleared = setConfiguredApiBaseUrl('');
+                    setBackendUrlDraft(cleared);
+                    setBackendUrlFeedback({ type: 'ok', text: 'Reset to default same-origin server.' });
+                  }}
+                  className="text-[10px] font-bold text-rose-600 dark:text-rose-400 hover:underline cursor-pointer"
+                >
+                  Use Default Origin
+                </button>
+              )}
+            </div>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input
+                id="admin-backend-api-url"
+                type="url"
+                value={backendUrlDraft}
+                onChange={(e) => {
+                  setBackendUrlDraft(e.target.value);
+                  setBackendUrlFeedback(null);
+                }}
+                placeholder="Leave blank for same-origin Express backend (e.g. https://api.yourdomain.com)"
+                className="clay-inset flex-1 min-h-[38px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 placeholder:text-stone-400"
+              />
+              <button
+                type="submit"
+                className="clay-btn clay-btn-sky min-h-[38px] px-3.5 rounded-xl text-xs font-extrabold shrink-0"
+              >
+                Save Backend URL
+              </button>
+            </div>
+            {backendUrlFeedback && (
+              <div className="text-[11px] font-bold text-emerald-700 dark:text-emerald-300">
+                {backendUrlFeedback.text}
+              </div>
+            )}
+          </form>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="animate-clay-enter space-y-4 pb-8">
       {/* Executive Header */}
@@ -1813,7 +2151,7 @@ export function AdminPanelView({
                   <span>User Search &amp; Controls</span>
                 </h2>
                 <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
-                  Search any user by Telegram ID, UID, Name, @handle or CL-Code — then Add/Remove Coins, Refers, or Admin.
+                  Search any user by ID, UID, Name, or @handle — then Add/Remove Coins, Refers, Withdraw 30-Ads Criteria, or Admin.
                 </p>
               </div>
               {cloudSearchResults !== null && (
@@ -1839,7 +2177,7 @@ export function AdminPanelView({
                   type="text"
                   value={userSearch}
                   onChange={(e) => setUserSearch(e.target.value)}
-                  placeholder="Enter ID (e.g. 7508911853), player_..., @handle, name, or CL-..."
+                  placeholder="Enter ID / UID (e.g. 7508911853), @handle, or name..."
                   aria-label="Search user in Firestore"
                   className="clay-inset w-full min-h-[42px] pl-9 pr-3 text-xs font-semibold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-400"
                 />
@@ -1857,7 +2195,6 @@ export function AdminPanelView({
 
           {/* Selected Player Control Panel */}
           {selectedPlayer && (() => {
-            const numericId = extractTelegramNumericUserId(selectedPlayer.uid);
             const ban = findBanForPlayer(selectedPlayer.uid);
             const isOwnerAdmin = isAdminPlayerId(selectedPlayer.uid);
             const isCoAdmin = !isOwnerAdmin && isAdminPlayerId(selectedPlayer.uid, extraAdminIds);
@@ -1907,18 +2244,20 @@ export function AdminPanelView({
                         <button
                           type="button"
                           onClick={() =>
-                            void handleCopy(`sel_id_${selectedPlayer.uid}`, numericId || selectedPlayer.uid)
+                            void handleCopy(
+                              `sel_id_${selectedPlayer.uid}`,
+                              getUnifiedUserId(selectedPlayer.uid),
+                            )
                           }
                           className="inline-flex items-center gap-1 hover:underline cursor-pointer"
                         >
-                          <span>ID: {numericId || selectedPlayer.uid}</span>
+                          <span>ID / UID: {getUnifiedUserId(selectedPlayer.uid)}</span>
                           {copiedKey === `sel_id_${selectedPlayer.uid}` ? (
                             <Check className="w-3 h-3 text-emerald-400" />
                           ) : (
                             <Copy className="w-3 h-3 opacity-75" />
                           )}
                         </button>
-                        <span>· Code: {selectedPlayer.referralCode}</span>
                       </div>
                     </div>
                   </div>
@@ -2121,7 +2460,7 @@ export function AdminPanelView({
                           type="text"
                           value={linkFriendIdInput}
                           onChange={(e) => setLinkFriendIdInput(e.target.value)}
-                          placeholder="Friend ID or CL-Code"
+                          placeholder="Friend ID or UID"
                           aria-label="Friend player ID to refer"
                           className="clay-card !rounded-xl min-h-[38px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-emerald-400"
                         />
@@ -2189,6 +2528,155 @@ export function AdminPanelView({
                     </div>
                   </div>
 
+                  {/* Withdraw 30-Ads Criteria Control */}
+                  {(() => {
+                    const currentAds = selectedPlayer.withdrawAdsWatched ?? 0;
+                    const adsPct = Math.min(
+                      100,
+                      Math.round((currentAds / MIN_WITHDRAW_ADS_WATCHED) * 100),
+                    );
+                    const isUnlocked = currentAds >= MIN_WITHDRAW_ADS_WATCHED;
+                    const parsedInput = Math.trunc(Number(withdrawAdsInput));
+                    return (
+                      <div className="clay-inset !rounded-2xl p-3.5 space-y-2.5">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <h3 className="text-xs font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-1.5">
+                            <Megaphone className="w-3.5 h-3.5 text-amber-500" />
+                            <span>
+                              Withdraw Criteria ({currentAds}/{MIN_WITHDRAW_ADS_WATCHED} Ads)
+                            </span>
+                          </h3>
+                          <span
+                            className={`px-2 py-0.5 rounded-md border text-[10px] font-extrabold ${
+                              isUnlocked
+                                ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                                : 'bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800/70 text-amber-800 dark:text-amber-300'
+                            }`}
+                          >
+                            {isUnlocked
+                              ? 'Withdraw Unlocked'
+                              : `Need ${MIN_WITHDRAW_ADS_WATCHED - currentAds} more`}
+                          </span>
+                        </div>
+
+                        <div className="h-2.5 rounded-full bg-stone-200 dark:bg-stone-800 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all ${
+                              isUnlocked ? 'bg-emerald-500' : 'bg-amber-500'
+                            }`}
+                            style={{ width: `${adsPct}%` }}
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <input
+                            type="number"
+                            min={0}
+                            max={10000}
+                            value={withdrawAdsInput}
+                            onChange={(e) => setWithdrawAdsInput(e.target.value)}
+                            placeholder="Ads count"
+                            aria-label="Withdraw ads adjustment count"
+                            className="clay-card !rounded-xl min-h-[38px] w-28 px-3 text-xs font-mono-num font-extrabold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                          />
+                          <div className="flex items-center gap-1 flex-wrap">
+                            {[0, 1, 5, 10, 30].map((preset) => (
+                              <button
+                                key={preset}
+                                type="button"
+                                onClick={() => setWithdrawAdsInput(String(preset))}
+                                className={`px-2 py-1 rounded-lg text-[10px] font-mono-num font-extrabold cursor-pointer transition-colors ${
+                                  withdrawAdsInput === String(preset)
+                                    ? 'bg-amber-500 text-amber-950'
+                                    : 'bg-stone-200/80 dark:bg-stone-800 text-stone-700 dark:text-stone-300'
+                                }`}
+                              >
+                                {preset}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                          <button
+                            type="button"
+                            disabled={!onAdjustWithdrawAds || userActionBusy !== null || !Number.isFinite(parsedInput) || parsedInput < 0}
+                            onClick={() =>
+                              void handleAdjustWithdrawAdsClick({
+                                targetAds: Number.isFinite(parsedInput) ? Math.max(0, parsedInput) : 0,
+                                busyKey: 'set_wd_ads',
+                              })
+                            }
+                            className="clay-btn clay-btn-amber min-h-[38px] rounded-xl text-[11px] font-extrabold inline-flex items-center justify-center gap-1 disabled:opacity-50"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            <span>
+                              {userActionBusy === 'set_wd_ads'
+                                ? 'Setting...'
+                                : `Set (${Number.isFinite(parsedInput) && parsedInput >= 0 ? parsedInput : 0})`}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={!onAdjustWithdrawAds || userActionBusy !== null || !Number.isFinite(parsedInput) || parsedInput <= 0}
+                            onClick={() =>
+                              void handleAdjustWithdrawAdsClick({
+                                deltaAds: Number.isFinite(parsedInput) ? parsedInput : 0,
+                                busyKey: 'add_wd_ads',
+                              })
+                            }
+                            className="clay-btn clay-btn-emerald min-h-[38px] rounded-xl text-[11px] font-extrabold inline-flex items-center justify-center gap-1 disabled:opacity-50"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>{userActionBusy === 'add_wd_ads' ? 'Adding...' : 'Add Ads'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={!onAdjustWithdrawAds || userActionBusy !== null || !Number.isFinite(parsedInput) || parsedInput <= 0}
+                            onClick={() =>
+                              void handleAdjustWithdrawAdsClick({
+                                deltaAds: -(Number.isFinite(parsedInput) ? parsedInput : 0),
+                                busyKey: 'remove_wd_ads',
+                              })
+                            }
+                            className="clay-btn min-h-[38px] rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-extrabold inline-flex items-center justify-center gap-1 disabled:opacity-50"
+                          >
+                            <Minus className="w-3.5 h-3.5" />
+                            <span>{userActionBusy === 'remove_wd_ads' ? 'Removing...' : 'Remove Ads'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={!onAdjustWithdrawAds || userActionBusy !== null || isUnlocked}
+                            onClick={() =>
+                              void handleAdjustWithdrawAdsClick({
+                                targetAds: MIN_WITHDRAW_ADS_WATCHED,
+                                busyKey: 'unlock_wd_ads',
+                              })
+                            }
+                            className="clay-btn clay-btn-sky min-h-[38px] rounded-xl text-[11px] font-extrabold inline-flex items-center justify-center gap-1 disabled:opacity-50"
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            <span>Unlock (30/30)</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={!onAdjustWithdrawAds || userActionBusy !== null || currentAds === 0}
+                            onClick={() =>
+                              void handleAdjustWithdrawAdsClick({
+                                targetAds: 0,
+                                busyKey: 'reset_wd_ads',
+                              })
+                            }
+                            className="clay-btn clay-btn-neutral min-h-[38px] rounded-xl text-[11px] font-extrabold inline-flex items-center justify-center gap-1 disabled:opacity-50"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            <span>Reset (0/30)</span>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* Quick Admin Role & Ban Footer */}
                   <div className="flex flex-wrap items-center gap-2 pt-1">
                     {isOwnerAdmin ? (
@@ -2253,7 +2741,7 @@ export function AdminPanelView({
                 <span>Quick Link Referral (Refer Any User)</span>
               </h2>
               <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
-                Manually assign a Referred Friend to a Referrer by Telegram ID, UID, or CL-Code.
+                Manually assign a Referred Friend to a Referrer by Telegram ID or UID.
               </p>
             </div>
 
@@ -2265,7 +2753,7 @@ export function AdminPanelView({
                   setQuickReferrerInput(e.target.value);
                   setQuickReferFeedback(null);
                 }}
-                placeholder="Referrer ID / CL-Code"
+                placeholder="Referrer ID / UID"
                 aria-label="Referrer ID or referral code"
                 className="clay-inset min-h-[42px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-400"
               />
@@ -2446,7 +2934,6 @@ export function AdminPanelView({
                     const matchedProfile = mergedPlayersDirectory.find((p) =>
                       matchesBannedUserRecord(p.uid, ban),
                     );
-                    const numericId = extractTelegramNumericUserId(ban.uid);
                     const displayLabel =
                       ban.displayName || matchedProfile?.displayName || `Player ${ban.uid.slice(-4)}`;
                     const handleLabel = ban.handle || matchedProfile?.handle || '';
@@ -2475,17 +2962,16 @@ export function AdminPanelView({
                             <div className="flex items-center gap-2 flex-wrap text-[11px] font-mono-num text-stone-500 dark:text-stone-400">
                               <button
                                 type="button"
-                                onClick={() => void handleCopy(`ban_id_${ban.uid}`, numericId || ban.uid)}
+                                onClick={() => void handleCopy(`ban_id_${ban.uid}`, getUnifiedUserId(ban.uid))}
                                 className="inline-flex items-center gap-1 rounded-md bg-stone-100 dark:bg-stone-800 px-1.5 py-0.5 font-bold text-stone-700 dark:text-stone-200 hover:underline cursor-pointer"
                               >
-                                <span>ID: {numericId || ban.uid}</span>
+                                <span>ID / UID: {getUnifiedUserId(ban.uid)}</span>
                                 {copiedKey === `ban_id_${ban.uid}` ? (
                                   <Check className="w-3 h-3 text-emerald-600" />
                                 ) : (
                                   <Copy className="w-3 h-3 opacity-70" />
                                 )}
                               </button>
-                              {numericId && <span className="opacity-75">({ban.uid})</span>}
                               {ban.bannedAtMs > 0 && (
                                 <span>· {new Date(ban.bannedAtMs).toLocaleDateString()}</span>
                               )}
@@ -2534,7 +3020,6 @@ export function AdminPanelView({
                   const ban = findBanForPlayer(player.uid);
                   const isOwnerAdmin = isAdminPlayerId(player.uid);
                   const isCoAdmin = !isOwnerAdmin && isAdminPlayerId(player.uid, extraAdminIds);
-                  const numericId = extractTelegramNumericUserId(player.uid);
                   const totalHens = calculateTotalChickens(player);
                   const isBusy = banningId === player.uid;
                   const isSelected = selectedPlayer?.uid === player.uid;
@@ -2596,11 +3081,11 @@ export function AdminPanelView({
                           <div className="flex items-center gap-2 flex-wrap text-[11px] font-mono-num text-stone-500 dark:text-stone-400">
                             <button
                               type="button"
-                              onClick={() => void handleCopy(`usr_id_${player.uid}`, numericId || player.uid)}
-                              title="Copy Player ID"
+                              onClick={() => void handleCopy(`usr_id_${player.uid}`, getUnifiedUserId(player.uid))}
+                              title="Copy Player ID / UID"
                               className="inline-flex items-center gap-1 rounded-md bg-stone-100 dark:bg-stone-800 px-1.5 py-0.5 font-bold text-stone-700 dark:text-stone-200 hover:underline cursor-pointer"
                             >
-                              <span>ID: {numericId || player.uid}</span>
+                              <span>ID: {getUnifiedUserId(player.uid)}</span>
                               {copiedKey === `usr_id_${player.uid}` ? (
                                 <Check className="w-3 h-3 text-emerald-600" />
                               ) : (
@@ -2610,6 +3095,7 @@ export function AdminPanelView({
                             <span>· {Math.floor(player.coins).toLocaleString()} coins</span>
                             <span>· {player.referralCount} refs</span>
                             <span>· {totalHens} hens</span>
+                            <span>· {player.withdrawAdsWatched ?? 0}/{MIN_WITHDRAW_ADS_WATCHED} ads</span>
                           </div>
 
                           {ban && (
@@ -2880,6 +3366,7 @@ export function AdminPanelView({
          ======================================================================== */}
       {tab === 'channels' && (
         <div key="admin-tab-channels" className="animate-clay-enter space-y-4">
+          {renderBotConfigCard(false)}
           <div className="clay-card p-4 space-y-3.5">
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -5566,6 +6053,7 @@ export function AdminPanelView({
 
         return (
           <div key="admin-tab-broadcast" className="animate-clay-enter space-y-4">
+            {renderBotConfigCard(true)}
             <div className="clay-card p-4 space-y-4">
               <div className="flex items-start justify-between gap-2">
                 <div>
@@ -6019,6 +6507,7 @@ export function AdminPanelView({
 
         return (
           <div key="admin-tab-diagnostics" className="animate-clay-enter space-y-4">
+            {renderBotConfigCard(false)}
             {/* Control Header */}
             <div className="clay-card p-4 space-y-3">
               <div className="flex items-start justify-between gap-3 flex-wrap">

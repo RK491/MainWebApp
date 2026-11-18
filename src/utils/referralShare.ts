@@ -54,17 +54,16 @@ export function buildPersonalReferralUrl(
 }
 
 export function buildReferralShareData(
-  referralCode: string,
+  _referralCode: string,
   referralUrl: string,
   referrerName?: string,
 ): ShareData {
   const cleanName = (referrerName || '').trim();
   const possessiveOwner = cleanName ? `${cleanName}'s` : 'my';
-  const codeFragment = referralCode.trim() ? ` (ID: ${referralCode.trim()})` : '';
 
   return {
     title: 'Join Alpha Gram!',
-    text: `Join ${possessiveOwner} Alpha Gram farm${codeFragment} and claim +1,000 sign-up bonus coins!`,
+    text: `🐔 Join ${possessiveOwner} Alpha Gram farm and claim +1,000 sign-up bonus coins!\n\n🥚 Collect golden eggs 24/7, boost your flock, and earn real GRAM rewards!`,
     url: referralUrl,
   };
 }
@@ -78,6 +77,47 @@ export function buildTelegramDirectShareUrl(
   return `https://t.me/share/url?url=${encodeURIComponent(referralUrl)}&text=${encodeURIComponent(
     shareData.text || '',
   )}`;
+}
+
+export function openTelegramForwardShare(
+  referralUrl: string,
+  referrerName?: string,
+): boolean {
+  const shareUrl = buildTelegramDirectShareUrl(referralUrl, '', referrerName);
+  if (typeof window === 'undefined') return false;
+
+  const tgOpen = (
+    window as unknown as {
+      Telegram?: { WebApp?: { openTelegramLink?: (url: string) => void } };
+    }
+  ).Telegram?.WebApp?.openTelegramLink;
+
+  if (typeof tgOpen === 'function') {
+    try {
+      tgOpen(shareUrl);
+      return true;
+    } catch {
+      // Fall through to anchor navigation
+    }
+  }
+
+  if (typeof document !== 'undefined' && document.body && typeof document.createElement === 'function') {
+    try {
+      const anchor = document.createElement('a');
+      anchor.href = shareUrl;
+      anchor.target = '_blank';
+      anchor.rel = 'noopener noreferrer';
+      anchor.style.display = 'none';
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
 }
 
 export async function copyTextWithFallback(

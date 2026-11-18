@@ -54,8 +54,10 @@ import {
   getActiveRequiredChannels,
   getCoopFeverProgress,
   getEffectiveAdminIds,
+  getUnifiedUserId,
   isAdminPlayerId,
   isAutoHarvestDroneActive,
+  MIN_WITHDRAW_ADS_WATCHED,
   purchaseAutoHarvestDrone,
   recordCompletedGateAd,
   recordCoopFeverAd,
@@ -74,6 +76,7 @@ import {
   addAdminInFirestore,
   adjustPlayerCoinsInFirestore,
   adjustPlayerReferralCountInFirestore,
+  adjustPlayerWithdrawAdsInFirestore,
   adminAddReferralRelationInFirestore,
   adminRemoveReferralRelationInFirestore,
   applyReferralCodeInFirestore,
@@ -97,6 +100,7 @@ import {
   resolveActivePlayerIdentity,
   reviewWithdrawalInFirestore,
   saveAdConfigInFirestore,
+  saveCachedPlayerProfile,
   saveChannelsConfigInFirestore,
   saveWithdrawApproveTemplateInFirestore,
   searchUsersInFirestore,
@@ -191,6 +195,7 @@ import {
   detectBrowserTelegramBotConfig,
   getTelegramChannelUrl,
   getTelegramInitData,
+  resolveApiUrl,
   safeFetchJson,
   type TelegramBotConfig,
   triggerHapticFeedback,
@@ -328,6 +333,8 @@ function verifyStaticHostAdminPasscode(passcode: string): boolean {
 export default function App() {
   const [detectedIdentity, setDetectedIdentity] = useState(() => resolveActivePlayerIdentity());
   const activePlayerId = detectedIdentity.playerId || getStoredPlayerId();
+  const activePlayerIdRef = useRef<string>(activePlayerId);
+  activePlayerIdRef.current = activePlayerId;
   const initialSeed = useMemo(() => {
     const cached = loadCachedPlayerProfile(activePlayerId);
     if (cached) {
@@ -382,6 +389,13 @@ export default function App() {
   >('default');
   const [adminPasscodeUpdatedAtMs, setAdminPasscodeUpdatedAtMs] = useState<number>(0);
   const [serverBotConfigured, setServerBotConfigured] = useState<boolean | undefined>(undefined);
+  const [botConfigStatus, setBotConfigStatus] = useState<{
+    configured: boolean;
+    source: 'runtime' | 'env' | 'none';
+    maskedToken: string;
+    botUsername: string | null;
+    updatedAtMs: number;
+  } | null>(null);
   const [channelDiagnosticLogs, setChannelDiagnosticLogs] = useState<ChannelCheckDiagnosticLog[]>([]);
   const [loadingChannelLogs, setLoadingChannelLogs] = useState(false);
   const [channelLogsError, setChannelLogsError] = useState<string | null>(null);
@@ -494,24 +508,48 @@ export default function App() {
     setShowSplash(false);
   }, []);
 
-  const pendingRefCodeRef = useRef<string | null>(
-    (() => {
-      if (detectedIdentity.startParam) {
-        return detectedIdentity.startParam.trim();
+  const PENDING_REF_STORAGE_KEY = 'chickenland_pending_ref_v1';
+  const [pendingRefCode, setPendingRefCode] = useState<string | null>(() => {
+    if (detectedIdentity.startParam?.trim()) {
+      const clean = detectedIdentity.startParam.trim();
+      try {
+        localStorage.setItem(PENDING_REF_STORAGE_KEY, clean);
+      } catch {
+        // ignore storage errors
       }
-      if (typeof window !== 'undefined') {
-        const search = new URLSearchParams(window.location.search);
-        const param =
-          search.get('tgWebAppStartParam') ||
-          search.get('startapp') ||
-          search.get('start_param') ||
-          search.get('ref') ||
-          '';
-        return param.trim() || null;
+      return clean;
+    }
+    if (typeof window !== 'undefined') {
+      const search = new URLSearchParams(window.location.search);
+      const param =
+        search.get('tgWebAppStartParam') ||
+        search.get('startapp') ||
+        search.get('start_param') ||
+        search.get('ref') ||
+        '';
+      if (param.trim()) {
+        const clean = param.trim();
+        try {
+          localStorage.setItem(PENDING_REF_STORAGE_KEY, clean);
+        } catch {
+          // ignore storage errors
+        }
+        return clean;
       }
-      return null;
-    })(),
-  );
+      try {
+        const stored = localStorage.getItem(PENDING_REF_STORAGE_KEY);
+        if (stored?.trim()) {
+          return stored.trim();
+        }
+      } catch {
+        // ignore storage errors
+      }
+    }
+    return null;
+  });
+  const pendingRefCodeRef = useRef<string | null>(pendingRefCode);
+  pendingRefCodeRef.current = pendingRefCode;
+  const referralAttemptedKeysRef = useRef<Set<string>>(new Set());
   const welcomeCheckedForPlayerRef = useRef<string | null>(null);
   const ensurePromiseRef = useRef<Promise<UserFarmProfile | void>>(Promise.resolve());
   const [isPlayerSynced, setIsPlayerSynced] = useState(false);
@@ -610,12 +648,19 @@ export default function App() {
 
   useEffect(() => {
     // Re-check Telegram WebApp hydration shortly after mount in case SDK populates asynchronously
-    if (detectedIdentity.isTelegramDetected) return;
+    if (detectedIdentity.isTelegramDetected && pendingRefCodeRef.current) return;
     const timers = [150, 500, 1200].map((delay) =>
       window.setTimeout(() => {
         const next = resolveActivePlayerIdentity();
-        if (next.startParam && !pendingRefCodeRef.current) {
-          pendingRefCodeRef.current = next.startParam.trim();
+        if (next.startParam && next.startParam.trim() !== (pendingRefCodeRef.current || '')) {
+          const clean = next.startParam.trim();
+          pendingRefCodeRef.current = clean;
+          setPendingRefCode(clean);
+          try {
+            localStorage.setItem(PENDING_REF_STORAGE_KEY, clean);
+          } catch {
+            // ignore storage errors
+          }
         }
         if (next.isTelegramDetected && next.playerId && next.playerId !== activePlayerId) {
           setDetectedIdentity(next);
@@ -900,6 +945,7 @@ export default function App() {
     let cancelled = false;
     let retryTimer: number | null = null;
     let syncedSuccess = false;
+    setIsPlayerSynced(false);
 
     const handlePlayerCallbacks = {
       onProfile: (p: UserFarmProfile) => {
@@ -981,39 +1027,6 @@ export default function App() {
           }
         }
 
-        // Auto-link ?startapp= / ?ref= / start_param immediately, award +150 coins to referrer, and notify bot
-        const refCode = pendingRefCodeRef.current;
-        if (refCode && !ensured.referredBy) {
-          pendingRefCodeRef.current = null;
-          const refRes = await applyReferralCodeInFirestore(ensured, refCode);
-          if (!cancelled && !('error' in refRes)) {
-            latestProfileRef.current = refRes.profile;
-            setProfile(refRes.profile);
-            showToast(`+100 welcome coins! Joined via ${refRes.referrerName}'s referral!`);
-            void safeFetchJson('/api/referrals/notify', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                event: 'referral_joined',
-                referrerUid: refRes.referrerUid,
-                referredUid: refRes.profile.uid,
-                referredName: refRes.profile.displayName,
-                referredHandle: refRes.profile.handle,
-                rewardCoins: refRes.coinsRewarded,
-                initData: getTelegramInitData(),
-                token: playerSessionTokenRef.current,
-              }),
-            });
-            if (typeof window !== 'undefined') {
-              const url = new URL(window.location.href);
-              url.searchParams.delete('ref');
-              url.searchParams.delete('startapp');
-              url.searchParams.delete('tgWebAppStartParam');
-              window.history.replaceState({}, '', url.toString());
-            }
-          }
-        }
-
         if (fromCache && attempt < 3 && !cancelled) {
           retryTimer = window.setTimeout(() => {
             if (!cancelled) {
@@ -1063,6 +1076,173 @@ export default function App() {
     detectedIdentity.photoUrl,
     showToast,
     skipWelcome,
+  ]);
+
+  // Reliably link pending referral once player is synced (handles late Telegram SDK start_param & server-side atomic linking + Bot DM)
+  useEffect(() => {
+    const refCode = (pendingRefCode || '').trim();
+    if (!refCode || !isPlayerSynced || isBanned) return;
+    const currentProfile = latestProfileRef.current;
+    if (!currentProfile?.uid || currentProfile.uid !== activePlayerId) return;
+
+    const targetUid = currentProfile.uid;
+    const clearPendingRef = () => {
+      pendingRefCodeRef.current = null;
+      setPendingRefCode(null);
+      try {
+        localStorage.removeItem(PENDING_REF_STORAGE_KEY);
+      } catch {
+        // ignore storage errors
+      }
+      if (typeof window !== 'undefined') {
+        try {
+          const url = new URL(window.location.href);
+          url.searchParams.delete('ref');
+          url.searchParams.delete('startapp');
+          url.searchParams.delete('start_param');
+          url.searchParams.delete('tgWebAppStartParam');
+          window.history.replaceState({}, '', url.toString());
+        } catch {
+          // ignore history errors
+        }
+      }
+    };
+
+    if (currentProfile.referredBy) {
+      clearPendingRef();
+      return;
+    }
+
+    const attemptKey = `${targetUid}::${refCode.toUpperCase()}`;
+    if (referralAttemptedKeysRef.current.has(attemptKey)) return;
+    referralAttemptedKeysRef.current.add(attemptKey);
+
+    const applyReferral = async () => {
+      const isStillSamePlayer = () => activePlayerIdRef.current === targetUid;
+      try {
+        const response = await fetch(resolveApiUrl('/api/referrals/apply'), {
+          method: 'POST',
+          cache: 'no-store',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            playerId: targetUid,
+            refCode,
+            displayName: currentProfile.displayName,
+            handle: currentProfile.handle,
+            photoUrl: currentProfile.photoUrl,
+            initData: getTelegramInitData(),
+            token: playerSessionTokenRef.current,
+          }),
+        });
+        const contentType = (response.headers.get('content-type') || '').toLowerCase();
+        const payload = (
+          contentType.includes('application/json') ? await response.json().catch(() => null) : null
+        ) as {
+          ok?: boolean;
+          applied?: boolean;
+          reason?: string;
+          referrerUid?: string;
+          referrerName?: string;
+          coinsRewarded?: number;
+          referredBonusCoins?: number;
+          nextReferredCoins?: number;
+        } | null;
+
+        if (!isStillSamePlayer()) return;
+
+        if (response.ok && payload?.ok) {
+          if (payload.applied) {
+            const bonus = Number(payload.referredBonusCoins ?? 100);
+            const serverNextCoins = Number(payload.nextReferredCoins);
+            setProfile((prev) => {
+              if (prev.uid !== targetUid || prev.referredBy) return prev;
+              const next: UserFarmProfile = {
+                ...prev,
+                referredBy: payload.referrerUid || prev.referredBy,
+                referralActivated: true,
+                coins: Number.isFinite(serverNextCoins) ? serverNextCoins : prev.coins + bonus,
+              };
+              latestProfileRef.current = next;
+              saveCachedPlayerProfile(next);
+              return next;
+            });
+            showToast(
+              `+${bonus} welcome coins! Joined via ${payload.referrerName || 'a friend'}'s referral!`,
+            );
+            clearPendingRef();
+            return;
+          }
+          if (
+            payload.reason === 'already_linked' ||
+            payload.reason === 'self_referral' ||
+            payload.reason === 'invalid_code'
+          ) {
+            clearPendingRef();
+            return;
+          }
+        }
+      } catch {
+        // Fall through to client-side Firestore transaction fallback
+      }
+
+      if (!isStillSamePlayer()) {
+        referralAttemptedKeysRef.current.delete(attemptKey);
+        return;
+      }
+
+      try {
+        const snapshotProfile =
+          latestProfileRef.current.uid === targetUid ? latestProfileRef.current : currentProfile;
+        const refRes = await applyReferralCodeInFirestore(snapshotProfile, refCode);
+        if (!isStillSamePlayer()) return;
+        if (!('error' in refRes)) {
+          latestProfileRef.current = refRes.profile;
+          setProfile(refRes.profile);
+          saveCachedPlayerProfile(refRes.profile);
+          showToast(`+100 welcome coins! Joined via ${refRes.referrerName}'s referral!`);
+          await safeFetchJson('/api/referrals/notify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              event: 'referral_joined',
+              referrerUid: refRes.referrerUid,
+              referredUid: refRes.profile.uid,
+              referredName: refRes.profile.displayName,
+              referredHandle: refRes.profile.handle,
+              rewardCoins: refRes.coinsRewarded,
+              initData: getTelegramInitData(),
+              token: playerSessionTokenRef.current,
+            }),
+          });
+          clearPendingRef();
+          return;
+        }
+
+        const errLow = refRes.error.toLowerCase();
+        if (
+          errLow.includes('already') ||
+          errLow.includes('own') ||
+          errLow.includes('yourself') ||
+          errLow.includes('invalid') ||
+          errLow.includes('not found')
+        ) {
+          clearPendingRef();
+        } else {
+          referralAttemptedKeysRef.current.delete(attemptKey);
+        }
+      } catch {
+        referralAttemptedKeysRef.current.delete(attemptKey);
+      }
+    };
+
+    void applyReferral();
+  }, [
+    activePlayerId,
+    isBanned,
+    isPlayerSynced,
+    pendingRefCode,
+    profile.referredBy,
+    showToast,
   ]);
 
   const persistMutation = useCallback(
@@ -1169,10 +1349,7 @@ export default function App() {
       setCheckingChannels(true);
       setChannelCheckError(null);
       try {
-        const endpointUrl =
-          typeof window !== 'undefined'
-            ? new URL('/api/telegram/check-channels', window.location.origin).toString()
-            : '/api/telegram/check-channels';
+        const endpointUrl = resolveApiUrl('/api/telegram/check-channels');
         const res = await fetch(endpointUrl, {
           method: 'POST',
           cache: 'no-store',
@@ -1293,7 +1470,7 @@ export default function App() {
         return { joined: true };
       }
       try {
-        const res = await fetch('/api/telegram/check-task-channel', {
+        const res = await fetch(resolveApiUrl('/api/telegram/check-task-channel'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1975,10 +2152,7 @@ export default function App() {
   ): Promise<{ ok: boolean; error?: string }> => {
     try {
       const effectivePlayerId = detectedIdentity.playerId || profile.uid || activePlayerId;
-      const endpointUrl =
-        typeof window !== 'undefined'
-          ? new URL('/api/admin/auth', window.location.origin).toString()
-          : '/api/admin/auth';
+      const endpointUrl = resolveApiUrl('/api/admin/auth');
       const response = await fetch(endpointUrl, {
         method: 'POST',
         cache: 'no-store',
@@ -2059,10 +2233,7 @@ export default function App() {
     setLoadingChannelLogs(true);
     setChannelLogsError(null);
     try {
-      const endpointUrl =
-        typeof window !== 'undefined'
-          ? new URL('/api/admin/channel-logs', window.location.origin).toString()
-          : '/api/admin/channel-logs';
+      const endpointUrl = resolveApiUrl('/api/admin/channel-logs');
       const response = await fetch(endpointUrl, {
         method: 'POST',
         cache: 'no-store',
@@ -2103,10 +2274,7 @@ export default function App() {
       setLoadingSystemDiagnostics(true);
       setSystemDiagnosticsError(null);
       try {
-        const endpointUrl =
-          typeof window !== 'undefined'
-            ? new URL('/api/admin/system-diagnostics', window.location.origin).toString()
-            : '/api/admin/system-diagnostics';
+        const endpointUrl = resolveApiUrl('/api/admin/system-diagnostics');
         const response = await fetch(endpointUrl, {
           method: 'POST',
           cache: 'no-store',
@@ -2148,10 +2316,7 @@ export default function App() {
     channelsOverride?: typeof activeRequiredChannels,
   ) => {
     try {
-      const endpointUrl =
-        typeof window !== 'undefined'
-          ? new URL('/api/telegram/test-channels', window.location.origin).toString()
-          : '/api/telegram/test-channels';
+      const endpointUrl = resolveApiUrl('/api/telegram/test-channels');
       const response = await fetch(endpointUrl, {
         method: 'POST',
         cache: 'no-store',
@@ -2283,6 +2448,189 @@ export default function App() {
     return res.profile;
   };
 
+  const handleAdjustWithdrawAds = async (input: {
+    targetUid: string;
+    deltaAds?: number;
+    targetAds?: number;
+  }): Promise<UserFarmProfile> => {
+    const res = await adjustPlayerWithdrawAdsInFirestore({
+      adminUid: profile.uid,
+      targetUid: input.targetUid,
+      deltaAds: input.deltaAds,
+      targetAds: input.targetAds,
+      extraAdminIds,
+    });
+    setRecentPlayers((prev) =>
+      prev.map((p) => (p.uid === res.profile.uid ? res.profile : p)),
+    );
+    if (res.profile.uid === latestProfileRef.current.uid) {
+      latestProfileRef.current = res.profile;
+      setProfile(res.profile);
+    }
+    const label = res.profile.displayName || getUnifiedUserId(res.profile.uid);
+    showToast(
+      `Updated ${label} withdraw ads: ${res.nextAds}/${MIN_WITHDRAW_ADS_WATCHED}`,
+    );
+    return res.profile;
+  };
+
+  const handleFetchBotConfig = useCallback(async () => {
+    try {
+      const res = await fetch(resolveApiUrl('/api/admin/bot-config/get'), {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerId: latestProfileRef.current.uid,
+          token: adminSessionToken,
+          initData: getTelegramInitData(),
+        }),
+      });
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('application/json')) return;
+      const payload = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        configured?: boolean;
+        source?: 'runtime' | 'env' | 'none';
+        maskedToken?: string;
+        botUsername?: string | null;
+        updatedAtMs?: number;
+      } | null;
+      if (res.ok && payload?.ok) {
+        setBotConfigStatus({
+          configured: Boolean(payload.configured),
+          source: payload.source || 'none',
+          maskedToken: payload.maskedToken || '',
+          botUsername: payload.botUsername ?? null,
+          updatedAtMs: Number(payload.updatedAtMs || 0),
+        });
+        setServerBotConfigured(Boolean(payload.configured));
+        if (payload.botUsername) {
+          cacheDetectedTelegramBotConfig(payload.botUsername, telegramBotConfig.appShortName);
+          setTelegramBotConfig(
+            detectBrowserTelegramBotConfig({
+              serverBotUsername: payload.botUsername,
+              serverAppShortName: telegramBotConfig.appShortName,
+            }),
+          );
+        }
+      }
+    } catch {
+      // ignore fetch errors
+    }
+  }, [adminSessionToken, telegramBotConfig.appShortName]);
+
+  useEffect(() => {
+    if (!adminUnlocked) return;
+    void handleFetchBotConfig();
+  }, [adminUnlocked, handleFetchBotConfig]);
+
+  const handleSaveBotToken = async (botToken: string) => {
+    try {
+      const res = await fetch(resolveApiUrl('/api/admin/bot-config'), {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerId: latestProfileRef.current.uid,
+          token: adminSessionToken,
+          initData: getTelegramInitData(),
+          botToken,
+        }),
+      });
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('application/json')) {
+        return {
+          ok: false,
+          error: `Bot config endpoint returned HTTP ${res.status}. Open from the Express backend or configure Backend Server URL.`,
+        };
+      }
+      const payload = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        configured?: boolean;
+        source?: 'runtime' | 'env' | 'none';
+        maskedToken?: string;
+        botUsername?: string | null;
+        updatedAtMs?: number;
+        error?: string;
+      };
+      if (res.ok && payload.ok) {
+        setBotConfigStatus({
+          configured: Boolean(payload.configured ?? true),
+          source: payload.source || 'runtime',
+          maskedToken: payload.maskedToken || '',
+          botUsername: payload.botUsername ?? null,
+          updatedAtMs: Number(payload.updatedAtMs || Date.now()),
+        });
+        setServerBotConfigured(true);
+        if (payload.botUsername) {
+          cacheDetectedTelegramBotConfig(payload.botUsername, telegramBotConfig.appShortName);
+          setTelegramBotConfig(
+            detectBrowserTelegramBotConfig({
+              serverBotUsername: payload.botUsername,
+              serverAppShortName: telegramBotConfig.appShortName,
+            }),
+          );
+        }
+        playClaimSound(soundsEnabled);
+        triggerHapticFeedback('success');
+        showToast(
+          payload.botUsername
+            ? `Telegram bot @${payload.botUsername} connected!`
+            : 'Telegram Bot Token saved!',
+        );
+        void handleFetchSystemDiagnostics(true);
+        return {
+          ok: true,
+          botUsername: payload.botUsername ?? null,
+          maskedToken: payload.maskedToken,
+        };
+      }
+      return { ok: false, error: payload.error || 'Failed to save Bot Token.' };
+    } catch {
+      return { ok: false, error: 'Network error while saving Bot Token.' };
+    }
+  };
+
+  const handleClearBotToken = async () => {
+    try {
+      const res = await fetch(resolveApiUrl('/api/admin/bot-config/clear'), {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerId: latestProfileRef.current.uid,
+          token: adminSessionToken,
+          initData: getTelegramInitData(),
+        }),
+      });
+      const payload = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        configured?: boolean;
+        source?: 'runtime' | 'env' | 'none';
+        maskedToken?: string;
+        botUsername?: string | null;
+        error?: string;
+      };
+      if (res.ok && payload.ok) {
+        setBotConfigStatus({
+          configured: Boolean(payload.configured),
+          source: payload.source || 'none',
+          maskedToken: payload.maskedToken || '',
+          botUsername: payload.botUsername ?? null,
+          updatedAtMs: Date.now(),
+        });
+        setServerBotConfigured(Boolean(payload.configured));
+        showToast('Cleared saved Telegram Bot Token.');
+        void handleFetchSystemDiagnostics(true);
+        return { ok: true };
+      }
+      return { ok: false, error: payload.error || 'Failed to clear Bot Token.' };
+    } catch {
+      return { ok: false, error: 'Network error clearing Bot Token.' };
+    }
+  };
+
   const handleAddReferralRelation = async (input: {
     referrerIdOrCode: string;
     referredIdOrCode: string;
@@ -2403,7 +2751,7 @@ export default function App() {
   const handleFetchBroadcastStats = useCallback(
     async (excludeBanned: boolean) => {
       try {
-        const res = await fetch('/api/admin/broadcast/stats', {
+        const res = await fetch(resolveApiUrl('/api/admin/broadcast/stats'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2430,7 +2778,7 @@ export default function App() {
 
   const handleSyncBotSubscribers = useCallback(async () => {
     try {
-      const res = await fetch('/api/admin/telegram/sync-bot', {
+      const res = await fetch(resolveApiUrl('/api/admin/telegram/sync-bot'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2487,7 +2835,7 @@ export default function App() {
     testOnlyToAdmin?: boolean;
   }) => {
     try {
-      const response = await fetch('/api/admin/broadcast', {
+      const response = await fetch(resolveApiUrl('/api/admin/broadcast'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3198,6 +3546,10 @@ export default function App() {
           onFetchBroadcastStats={handleFetchBroadcastStats}
           onSyncBotSubscribers={handleSyncBotSubscribers}
           onSendBroadcast={handleSendBroadcast}
+          botConfigStatus={botConfigStatus}
+          onSaveBotToken={handleSaveBotToken}
+          onClearBotToken={handleClearBotToken}
+          onAdjustWithdrawAds={handleAdjustWithdrawAds}
         />
       );
     }
@@ -3522,7 +3874,7 @@ export default function App() {
   const hideBottomNav = subView === 'profile' || subView === 'admin';
 
   if (isBanned && banRecord) {
-    const displayUserId = getPrimaryDepositMemo(banRecord.uid || profile.uid);
+    const displayUserId = getUnifiedUserId(banRecord.uid || profile.uid);
     return (
       <div className="min-h-screen flex items-center justify-center p-4 text-stone-900 dark:text-stone-100">
         <div className="clay-card max-w-md w-full overflow-hidden">
@@ -3544,7 +3896,7 @@ export default function App() {
 
             <div className="clay-inset !rounded-2xl p-3.5 space-y-2 text-xs">
               <div className="flex items-center justify-between gap-2">
-                <span className="font-bold text-stone-500 dark:text-stone-400">Blocked Player ID</span>
+                <span className="font-bold text-stone-500 dark:text-stone-400">Blocked User ID / UID</span>
                 <button
                   type="button"
                   onClick={() => {
@@ -3562,14 +3914,6 @@ export default function App() {
                   )}
                 </button>
               </div>
-              {displayUserId !== banRecord.uid && (
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-bold text-stone-500 dark:text-stone-400">Account UID</span>
-                  <span className="font-mono-num font-bold text-stone-700 dark:text-stone-300">
-                    {banRecord.uid}
-                  </span>
-                </div>
-              )}
               {banRecord.bannedAtMs > 0 && (
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-bold text-stone-500 dark:text-stone-400">Blocked On</span>
