@@ -265,7 +265,7 @@ interface AdminPanelViewProps {
   }) => Promise<BroadcastResult>;
   botConfigStatus?: {
     configured: boolean;
-    source: 'runtime' | 'env' | 'none';
+    source: 'runtime' | 'env' | 'local_preview' | 'none';
     maskedToken: string;
     botUsername: string | null;
     updatedAtMs: number;
@@ -1390,6 +1390,8 @@ export function AdminPanelView({
           res.referralRecord,
           ...prev.filter((r) => r.referredUid !== res.referralRecord.referredUid),
         ]);
+      } else if (selectedPlayer?.uid === res.referredProfile.uid) {
+        setSelectedPlayer(res.referredProfile);
       }
       setQuickReferrerInput('');
       setQuickReferredInput('');
@@ -1788,11 +1790,13 @@ export function AdminPanelView({
     const sourceLabel =
       botConfigStatus?.source === 'runtime'
         ? 'Admin Panel Saved'
-        : botConfigStatus?.source === 'env'
-          ? 'Server .env'
-          : isConfigured
-            ? 'Configured'
-            : 'Not Set';
+        : botConfigStatus?.source === 'local_preview'
+          ? 'Browser Local (Preview)'
+          : botConfigStatus?.source === 'env'
+            ? 'Server .env'
+            : isConfigured
+              ? 'Configured'
+              : 'Not Set';
 
     return (
       <div className="clay-card p-4 space-y-3">
@@ -1826,16 +1830,17 @@ export function AdminPanelView({
             <span className="text-stone-600 dark:text-stone-300 truncate">
               Active Token: <strong className="text-stone-900 dark:text-stone-100">{botConfigStatus.maskedToken}</strong>
             </span>
-            {botConfigStatus.source === 'runtime' && onClearBotToken && (
-              <button
-                type="button"
-                disabled={savingBotToken}
-                onClick={() => void handleClearBotTokenClick()}
-                className="px-2 py-1 rounded-lg bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 font-sans font-extrabold text-[10px] shrink-0 cursor-pointer disabled:opacity-50"
-              >
-                Clear Token
-              </button>
-            )}
+            {(botConfigStatus.source === 'runtime' || botConfigStatus.source === 'local_preview') &&
+              onClearBotToken && (
+                <button
+                  type="button"
+                  disabled={savingBotToken}
+                  onClick={() => void handleClearBotTokenClick()}
+                  className="px-2 py-1 rounded-lg bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 font-sans font-extrabold text-[10px] shrink-0 cursor-pointer disabled:opacity-50"
+                >
+                  Clear Token
+                </button>
+              )}
           </div>
         )}
 
@@ -2460,8 +2465,8 @@ export function AdminPanelView({
                           type="text"
                           value={linkFriendIdInput}
                           onChange={(e) => setLinkFriendIdInput(e.target.value)}
-                          placeholder="Friend ID or UID"
-                          aria-label="Friend player ID to refer"
+                          placeholder="Telegram ID, @username, or UID"
+                          aria-label="Friend player ID or username to refer"
                           className="clay-card !rounded-xl min-h-[38px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-emerald-400"
                         />
                         <input
@@ -2741,7 +2746,7 @@ export function AdminPanelView({
                 <span>Quick Link Referral (Refer Any User)</span>
               </h2>
               <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
-                Manually assign a Referred Friend to a Referrer by Telegram ID or UID.
+                Manually assign a Referred Friend to a Referrer by Telegram ID, @username, or UID.
               </p>
             </div>
 
@@ -2753,8 +2758,8 @@ export function AdminPanelView({
                   setQuickReferrerInput(e.target.value);
                   setQuickReferFeedback(null);
                 }}
-                placeholder="Referrer ID / UID"
-                aria-label="Referrer ID or referral code"
+                placeholder="Referrer ID, @username, or UID"
+                aria-label="Referrer ID, username, or referral code"
                 className="clay-inset min-h-[42px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-400"
               />
               <input
@@ -2764,8 +2769,8 @@ export function AdminPanelView({
                   setQuickReferredInput(e.target.value);
                   setQuickReferFeedback(null);
                 }}
-                placeholder="Referred Friend ID / UID"
-                aria-label="Referred friend ID"
+                placeholder="Friend ID, @username, or UID"
+                aria-label="Referred friend ID or username"
                 className="clay-inset min-h-[42px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-400"
               />
               <input

@@ -525,3 +525,149 @@ export function notifyTelegramOpenLink(channelUrl: string): boolean {
   }
   return false;
 }
+
+const LOCAL_ADMIN_BOT_STORAGE_KEY = 'chickenland_admin_local_bot_v1';
+const LOCAL_CHANNEL_LOGS_STORAGE_KEY = 'chickenland_local_channel_logs_v1';
+
+export interface LocalAdminBotConfig {
+  token: string;
+  maskedToken: string;
+  botUsername: string;
+  botId: number | null;
+  updatedAtMs: number;
+}
+
+export function sanitizeTelegramBotTokenInput(raw: unknown): string {
+  return String(raw || '')
+    .trim()
+    .replace(/^['"]|['"]$/g, '')
+    .replace(/^bot(?=\d+:)/i, '');
+}
+
+export function maskTelegramBotToken(token: string): string {
+  const clean = sanitizeTelegramBotTokenInput(token);
+  if (!clean) return '';
+  if (clean.length <= 12) return `${clean.slice(0, 4)}***`;
+  return `${clean.slice(0, 8)}...${clean.slice(-6)}`;
+}
+
+export function getLocalAdminBotConfig(): LocalAdminBotConfig | null {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    const raw = localStorage.getItem(LOCAL_ADMIN_BOT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<LocalAdminBotConfig> | null;
+    const cleanToken = sanitizeTelegramBotTokenInput(parsed?.token);
+    if (!cleanToken) return null;
+    return {
+      token: cleanToken,
+      maskedToken: parsed?.maskedToken || maskTelegramBotToken(cleanToken),
+      botUsername: normalizeTelegramBotUsername(parsed?.botUsername) || DEFAULT_TELEGRAM_BOT_USERNAME,
+      botId: typeof parsed?.botId === 'number' ? parsed.botId : null,
+      updatedAtMs: Number(parsed?.updatedAtMs || Date.now()),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function setLocalAdminBotConfig(cfg: LocalAdminBotConfig): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(LOCAL_ADMIN_BOT_STORAGE_KEY, JSON.stringify(cfg));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function clearLocalAdminBotConfig(): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.removeItem(LOCAL_ADMIN_BOT_STORAGE_KEY);
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export async function verifyTelegramBotTokenDirect(rawToken: string): Promise<{
+  ok: boolean;
+  token?: string;
+  maskedToken?: string;
+  botUsername?: string;
+  botId?: number | null;
+  latencyMs?: number;
+  error?: string;
+}> {
+  const cleanToken = sanitizeTelegramBotTokenInput(rawToken);
+  if (!cleanToken) {
+    return { ok: false, error: 'Enter a Telegram Bot Token.' };
+  }
+  if (!/^\d{6,15}:[A-Za-z0-9_-]{20,80}$/.test(cleanToken)) {
+    return {
+      ok: false,
+      error: 'Invalid bot token format. Expected format like 123456789:ABCdef... from @BotFather.',
+    };
+  }
+  const startedAt = Date.now();
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${cleanToken}/getMe`, {
+      cache: 'no-store',
+    });
+    const latencyMs = Math.max(1, Date.now() - startedAt);
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      description?: string;
+      result?: { id?: number; username?: string };
+    };
+    if (!res.ok || !data.ok || !data.result?.id) {
+      return {
+        ok: false,
+        latencyMs,
+        error: (data.description || 'Telegram rejected this Bot Token.').replaceAll(cleanToken, '[redacted]'),
+      };
+    }
+    const botUsername =
+      normalizeTelegramBotUsername(data.result.username) || DEFAULT_TELEGRAM_BOT_USERNAME;
+    return {
+      ok: true,
+      token: cleanToken,
+      maskedToken: maskTelegramBotToken(cleanToken),
+      botUsername,
+      botId: typeof data.result.id === 'number' ? data.result.id : null,
+      latencyMs,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: (err instanceof Error ? err.message : 'Unable to reach Telegram API.').replaceAll(
+        cleanToken,
+        '[redacted]',
+      ),
+    };
+  }
+}
+
+export function loadLocalChannelLogs(): Array<Record<string, unknown>> {
+  try {
+    if (typeof localStorage === 'undefined') return [];
+    const raw = localStorage.getItem(LOCAL_CHANNEL_LOGS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.slice(0, 20) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function appendLocalChannelLog(entry: Record<string, unknown>): Array<Record<string, unknown>> {
+  const next = [entry, ...loadLocalChannelLogs()].slice(0, 20);
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(LOCAL_CHANNEL_LOGS_STORAGE_KEY, JSON.stringify(next));
+    }
+  } catch {
+    // Ignore storage errors
+  }
+  return next;
+}
+

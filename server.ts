@@ -1391,6 +1391,51 @@ async function applyReferralInServerDb(params: {
     }
 
     if (!referrerUid) {
+      const cleanNoAt = rawRefCode.replace(/^@+/, '').trim();
+      const cleanLower = cleanNoAt.toLowerCase();
+      if (cleanNoAt) {
+        for (const handleCandidate of Array.from(
+          new Set([`@${cleanNoAt}`, `@${cleanNoAt.toLowerCase()}`, `@${cleanNoAt.toUpperCase()}`, cleanNoAt]),
+        )) {
+          const pHandleMatches = await getDocs(
+            query(collection(serverDb, 'players'), where('handle', '==', handleCandidate), limit(1)),
+          );
+          if (!pHandleMatches.empty) {
+            const matchSnap = pHandleMatches.docs[0];
+            referrerUid = String(matchSnap.data()?.uid || matchSnap.id);
+            referrerName = String(matchSnap.data()?.displayName || 'Farmer');
+            break;
+          }
+          const lbHandleMatches = await getDocs(
+            query(collection(serverDb, 'leaderboard'), where('handle', '==', handleCandidate), limit(1)),
+          );
+          if (!lbHandleMatches.empty) {
+            const matchSnap = lbHandleMatches.docs[0];
+            referrerUid = String(matchSnap.data()?.uid || matchSnap.id);
+            referrerName = String(matchSnap.data()?.displayName || 'Farmer');
+            break;
+          }
+        }
+      }
+      if (!referrerUid && cleanLower) {
+        const [playersSnap, lbSnap] = await Promise.all([
+          getDocs(query(collection(serverDb, 'players'), orderBy('createdAtMs', 'desc'), limit(50))),
+          getDocs(query(collection(serverDb, 'leaderboard'), limit(50))),
+        ]);
+        for (const docSnap of [...playersSnap.docs, ...lbSnap.docs]) {
+          const data = docSnap.data();
+          const hLow = String(data?.handle || '').trim().replace(/^@+/, '').toLowerCase();
+          const cLow = String(data?.referralCode || '').trim().toLowerCase();
+          if (hLow === cleanLower || cLow === cleanLower) {
+            referrerUid = String(data?.uid || docSnap.id);
+            referrerName = String(data?.displayName || 'Farmer');
+            break;
+          }
+        }
+      }
+    }
+
+    if (!referrerUid) {
       return { ok: true, applied: false, reason: 'invalid_code' };
     }
     if (referrerUid === referredUid) {

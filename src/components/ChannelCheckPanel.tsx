@@ -122,6 +122,13 @@ export function ChannelCheckCard({
           'bg-sky-50 dark:bg-sky-950/60 border-sky-200 dark:border-sky-800/70 text-sky-700 dark:text-sky-300',
       };
     }
+    if (mode === 'static_preview') {
+      return {
+        label: 'Static Preview',
+        className:
+          'bg-sky-50 dark:bg-sky-950/60 border-sky-200 dark:border-sky-800/70 text-sky-700 dark:text-sky-300',
+      };
+    }
     return {
       label: mode === 'bot_unconfigured' ? 'Bot Setup Needed' : 'TG Check Ready',
       className:
@@ -246,6 +253,12 @@ export function ChannelCheckCard({
       {verification && mode === 'guest_browser' && (
         <div className="rounded-xl bg-sky-50/90 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800/60 px-3 py-2 text-[11px] font-semibold text-sky-800 dark:text-sky-300">
           Telegram ID not detected in this browser preview — open via your Telegram Bot Mini App to auto-verify membership.
+        </div>
+      )}
+
+      {verification && mode === 'static_preview' && (
+        <div className="rounded-xl bg-sky-50/90 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800/60 px-3 py-2 text-[11px] font-semibold text-sky-800 dark:text-sky-300">
+          Static preview host detected (no Node backend on this URL) — tap Join above or open from your Node backend / set Backend Server URL in Admin Panel for live membership verification.
         </div>
       )}
 
@@ -438,6 +451,12 @@ export function ChannelCheckModal({
         {verification?.verificationMode === 'guest_browser' && (
           <div className="rounded-xl bg-sky-50/90 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800/60 px-3 py-2 text-[11px] font-semibold text-sky-800 dark:text-sky-300">
             Open this Mini App inside your Telegram Bot so we can verify your Telegram membership automatically.
+          </div>
+        )}
+
+        {verification?.verificationMode === 'static_preview' && (
+          <div className="rounded-xl bg-sky-50/90 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800/60 px-3 py-2 text-[11px] font-semibold text-sky-800 dark:text-sky-300">
+            Static preview host detected (no Node backend on this URL). Join the channels above and tap Continue or Retry once connected to your Bot backend.
           </div>
         )}
 

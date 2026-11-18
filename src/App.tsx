@@ -11,6 +11,7 @@ import {
   Users,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
+import firebaseConfig from '../firebase-applet-config.json';
 import { testFirestoreConnection } from './firebase';
 import {
   activateCoopFever,
@@ -191,14 +192,20 @@ import {
   syncAmbientMusic,
 } from './utils/sound';
 import {
+  appendLocalChannelLog,
   cacheDetectedTelegramBotConfig,
+  clearLocalAdminBotConfig,
   detectBrowserTelegramBotConfig,
+  getLocalAdminBotConfig,
   getTelegramChannelUrl,
   getTelegramInitData,
+  loadLocalChannelLogs,
   resolveApiUrl,
   safeFetchJson,
+  setLocalAdminBotConfig,
   type TelegramBotConfig,
   triggerHapticFeedback,
+  verifyTelegramBotTokenDirect,
 } from './utils/telegram';
 import { applyThemeToDocument, getStoredTheme, setStoredTheme, type ThemeMode } from './utils/theme';
 import { AdminPanelView } from './components/AdminPanelView';
@@ -391,7 +398,7 @@ export default function App() {
   const [serverBotConfigured, setServerBotConfigured] = useState<boolean | undefined>(undefined);
   const [botConfigStatus, setBotConfigStatus] = useState<{
     configured: boolean;
-    source: 'runtime' | 'env' | 'none';
+    source: 'runtime' | 'env' | 'local_preview' | 'none';
     maskedToken: string;
     botUsername: string | null;
     updatedAtMs: number;
@@ -1362,23 +1369,121 @@ export default function App() {
           }),
         });
         const contentType = (res.headers.get('content-type') || '').toLowerCase();
+        const isJson = contentType.includes('application/json');
         const rawPayload = (
-          contentType.includes('application/json') ? await res.json().catch(() => null) : null
+          isJson ? await res.json().catch(() => null) : null
         ) as (ChannelVerificationResult & { error?: string }) | null;
 
-        if (!res.ok || !rawPayload) {
+        let data: ChannelVerificationResult | null = null;
+
+        if (!isJson || res.status === 404 || res.status === 405) {
+          // Static preview host without Express /api server:
+          // Use Admin's local browser Bot Token directly via Telegram Bot API if configured,
+          // otherwise present an informational static_preview state instead of an HTTP 404 failure.
+          const localBot = getLocalAdminBotConfig();
+          const tgNumericId = extractTelegramNumericUserId(latestProfileRef.current.uid);
+          const nowMs = Date.now();
+
+          if (localBot && tgNumericId) {
+            const chResults = await Promise.all(
+              activeRequiredChannels.map(async (ch) => {
+                const targetChatId = /^-?\d+$/.test(ch.handle.trim())
+                  ? ch.handle.trim()
+                  : `@${ch.handle.trim().replace(/^@+/, '')}`;
+                try {
+                  const tgRes = await fetch(
+                    `https://api.telegram.org/bot${localBot.token}/getChatMember?chat_id=${encodeURIComponent(targetChatId)}&user_id=${encodeURIComponent(tgNumericId)}`,
+                    { cache: 'no-store' },
+                  );
+                  const tgJson = (await tgRes.json().catch(() => ({}))) as {
+                    ok?: boolean;
+                    description?: string;
+                    result?: { status?: string; is_member?: boolean };
+                  };
+                  const statusStr = String(tgJson.result?.status || '');
+                  const joined =
+                    Boolean(tgJson.ok) &&
+                    (statusStr === 'creator' ||
+                      statusStr === 'administrator' ||
+                      statusStr === 'member' ||
+                      (statusStr === 'restricted' && tgJson.result?.is_member === true));
+                  return {
+                    ...ch,
+                    joined,
+                    status: tgJson.ok ? statusStr || (joined ? 'member' : 'left') : 'api_error',
+                    error: tgJson.ok ? undefined : tgJson.description || 'Channel check failed',
+                  };
+                } catch {
+                  return {
+                    ...ch,
+                    joined: false,
+                    status: 'network_error',
+                    error: 'Network error reaching Telegram API',
+                  };
+                }
+              }),
+            );
+            const allJoined = chResults.every((c) => c.joined);
+            data = {
+              ok: true,
+              allJoined,
+              verificationMode: 'telegram_bot',
+              telegramUserId: tgNumericId,
+              channels: chResults,
+              checkedAtMs: nowMs,
+            };
+          } else {
+            const previewMode: ChannelVerificationResult['verificationMode'] = !tgNumericId
+              ? 'guest_browser'
+              : 'static_preview';
+            data = {
+              ok: true,
+              allJoined: false,
+              verificationMode: previewMode,
+              telegramUserId: tgNumericId,
+              channels: activeRequiredChannels.map((ch) => ({
+                ...ch,
+                joined: false,
+                status: previewMode === 'guest_browser' ? 'no_telegram_user' : 'static_preview',
+              })),
+              checkedAtMs: nowMs,
+            };
+          }
+
+          const logEntry: ChannelCheckDiagnosticLog = {
+            id: `local_${nowMs}`,
+            timestampMs: nowMs,
+            endpoint: 'check-channels',
+            userIdSource: 'static_preview_fallback',
+            telegramUserId: data.telegramUserId,
+            verificationMode: data.verificationMode,
+            allJoined: data.allJoined,
+            fromFirestore: true,
+            botConfigured: Boolean(localBot),
+            botUsername: localBot?.botUsername ?? null,
+            error: null,
+            channels: data.channels.map((c) => ({
+              handle: c.handle,
+              joined: c.joined,
+              status: c.status,
+              rawDescription: c.error,
+            })),
+          };
+          const updatedLogs = appendLocalChannelLog(logEntry as unknown as Record<string, unknown>);
+          setChannelDiagnosticLogs(updatedLogs.slice(0, 5) as unknown as ChannelCheckDiagnosticLog[]);
+          setChannelLogsError(null);
+        } else if (!res.ok || !rawPayload) {
           const errMsg =
-            rawPayload?.error ||
-            (res.status === 404
-              ? 'Verification server endpoint not found (HTTP 404). Tap Retry or open from the backend server.'
-              : `Membership check failed (HTTP ${res.status}). Tap Retry.`);
+            rawPayload?.error || `Membership check failed (HTTP ${res.status}). Tap Retry.`;
           setChannelCheckError(errMsg);
           if (!opts?.silent) {
             showToast(errMsg);
           }
           return null;
+        } else {
+          data = rawPayload;
         }
-        const data: ChannelVerificationResult = rawPayload;
+
         setChannelVerification(data);
 
         if (data.verificationMode === 'disabled') {
@@ -1444,6 +1549,8 @@ export default function App() {
           if (data.verificationMode === 'guest_browser') {
             triggerHapticFeedback('warning');
             showToast('Open this Mini App inside your Telegram Bot to verify your membership.');
+          } else if (data.verificationMode === 'static_preview') {
+            showToast('Static preview host: open via Bot server or add Bot Token in Admin Panel.');
           } else {
             showToast('Bot verification pending TELEGRAM_BOT_TOKEN on server.');
           }
@@ -2246,10 +2353,10 @@ export default function App() {
         }),
       });
       const contentType = (response.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.includes('application/json')) {
-        setChannelLogsError(
-          `Diagnostic logs endpoint returned HTTP ${response.status} (static preview without Node backend).`,
-        );
+      if (!contentType.includes('application/json') || response.status === 404 || response.status === 405) {
+        const localLogs = loadLocalChannelLogs() as unknown as ChannelCheckDiagnosticLog[];
+        setChannelDiagnosticLogs(localLogs.slice(0, 5));
+        setChannelLogsError(null);
         return;
       }
       const payload = (await response.json().catch(() => ({}))) as {
@@ -2263,7 +2370,13 @@ export default function App() {
       }
       setChannelLogsError(payload.error || `Failed to load diagnostic logs (HTTP ${response.status}).`);
     } catch {
-      setChannelLogsError('Network error while loading channel check diagnostic logs.');
+      const localLogs = loadLocalChannelLogs() as unknown as ChannelCheckDiagnosticLog[];
+      if (localLogs.length > 0) {
+        setChannelDiagnosticLogs(localLogs.slice(0, 5));
+        setChannelLogsError(null);
+      } else {
+        setChannelLogsError('Network error while loading channel check diagnostic logs.');
+      }
     } finally {
       setLoadingChannelLogs(false);
     }
@@ -2287,10 +2400,96 @@ export default function App() {
           }),
         });
         const contentType = (response.headers.get('content-type') || '').toLowerCase();
-        if (!contentType.includes('application/json')) {
-          setSystemDiagnosticsError(
-            `System diagnostics endpoint returned HTTP ${response.status} (static preview without Node backend).`,
-          );
+        if (!contentType.includes('application/json') || response.status === 404 || response.status === 405) {
+          const fsStart = Date.now();
+          const fsConnected = await testFirestoreConnection();
+          const fsLatencyMs = Math.max(1, Date.now() - fsStart);
+          const localBot = getLocalAdminBotConfig();
+          let botOk = false;
+          let botLatencyMs: number | null = null;
+          let botUsername = localBot?.botUsername ?? null;
+          let botId = localBot?.botId ?? null;
+          let botError: string | null = localBot
+            ? null
+            : 'Static preview mode (no Node backend). Save a Bot Token above to run live browser heartbeat.';
+
+          if (localBot) {
+            const probe = await verifyTelegramBotTokenDirect(localBot.token);
+            botOk = probe.ok;
+            botLatencyMs = probe.latencyMs ?? null;
+            if (probe.ok) {
+              botUsername = probe.botUsername || botUsername;
+              botId = probe.botId ?? botId;
+              botError = null;
+            } else {
+              botError = probe.error || 'Bot heartbeat probe failed.';
+            }
+          }
+
+          const localLogs = loadLocalChannelLogs() as unknown as ChannelCheckDiagnosticLog[];
+          const nowMs = Date.now();
+          const subscriberCount = recentPlayers.filter((p) =>
+            Boolean(extractTelegramNumericUserId(p.uid)),
+          ).length;
+
+          const previewSnapshot: SystemDiagnosticsSnapshot = {
+            ok: true,
+            serverTimeMs: nowMs,
+            uptimeSec: Math.round(typeof performance !== 'undefined' ? performance.now() / 1000 : 0),
+            nodeVersion: 'Static Preview (Browser)',
+            env: 'static-preview',
+            memoryMb: { rss: 0, heapUsed: 0, heapTotal: 0 },
+            bot: {
+              configured: Boolean(localBot),
+              username: botUsername,
+              botId,
+              lastHeartbeatAtMs: nowMs,
+              lastHeartbeatOk: botOk,
+              latencyMs: botLatencyMs,
+              error: botError,
+              webhookUrl: null,
+              pendingUpdateCount: 0,
+              subscriberCount,
+              activePollIntervalSec: 0,
+            },
+            firestore: {
+              connected: fsConnected,
+              databaseId: firebaseConfig.firestoreDatabaseId || '(default)',
+              projectId: firebaseConfig.projectId || '',
+              readOk: fsConnected,
+              latencyMs: fsLatencyMs,
+              error: fsConnected ? null : 'Firestore read check failed',
+            },
+            channelCheckStats: {
+              totalLogsRecorded: localLogs.length,
+              lastCheckAtMs: localLogs[0]?.timestampMs ?? null,
+            },
+            rateLimitBucketsCount: 0,
+            serverLogs: [
+              {
+                id: `prev_fs_${nowMs}`,
+                timestampMs: nowMs,
+                level: fsConnected ? 'info' : 'error',
+                source: 'firestore',
+                message: fsConnected
+                  ? `Firestore connected in ${fsLatencyMs} ms (${firebaseConfig.projectId})`
+                  : 'Firestore health check failed',
+              },
+              {
+                id: `prev_bot_${nowMs}`,
+                timestampMs: nowMs,
+                level: botOk ? 'info' : 'warn',
+                source: 'telegram-bot',
+                message: localBot
+                  ? botOk
+                    ? `Direct Bot API heartbeat OK (@${botUsername}) in ${botLatencyMs ?? 0} ms`
+                    : `Direct Bot API error: ${botError}`
+                  : 'Running on static preview host without Express server; add Bot Token above for direct checks',
+              },
+            ],
+          };
+          setSystemDiagnostics(previewSnapshot);
+          setSystemDiagnosticsError(null);
           return;
         }
         const payload = (await response.json().catch(() => ({}))) as Partial<SystemDiagnosticsSnapshot> & {
@@ -2309,7 +2508,7 @@ export default function App() {
         setLoadingSystemDiagnostics(false);
       }
     },
-    [adminSessionToken],
+    [adminSessionToken, recentPlayers],
   );
 
   const handleTestChannelsDiagnostic = async (
@@ -2328,6 +2527,129 @@ export default function App() {
           requiredChannels: channelsOverride,
         }),
       });
+      const contentType = (response.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('application/json') || response.status === 404 || response.status === 405) {
+        const localBot = getLocalAdminBotConfig();
+        const targetChannels = channelsOverride && channelsOverride.length > 0 ? channelsOverride : activeRequiredChannels;
+        if (!localBot) {
+          const existingLogs = loadLocalChannelLogs() as unknown as ChannelCheckDiagnosticLog[];
+          return {
+            ok: false,
+            botConfigured: false,
+            botError:
+              'Static preview detected (no Express server). Save your Telegram Bot Token above to run live channel tests directly, or open from the Node backend.',
+            recentLogs: existingLogs.slice(0, 5),
+          };
+        }
+        const probe = await verifyTelegramBotTokenDirect(localBot.token);
+        if (!probe.ok || !probe.botId) {
+          return {
+            ok: false,
+            botConfigured: true,
+            botUsername: localBot.botUsername,
+            botError: probe.error || 'Bot token verification failed.',
+          };
+        }
+        setServerBotConfigured(true);
+        const tgNumericId = extractTelegramNumericUserId(profile.uid);
+        const results = await Promise.all(
+          targetChannels.map(async (ch) => {
+            const chatTarget = /^-?\d+$/.test(ch.handle.trim())
+              ? ch.handle.trim()
+              : `@${ch.handle.trim().replace(/^@+/, '')}`;
+            let botIsAdmin = false;
+            let botStatus = 'unknown';
+            let userJoined: boolean | null = null;
+            let userStatus: string | null = null;
+            let errMsg: string | undefined;
+
+            try {
+              const bRes = await fetch(
+                `https://api.telegram.org/bot${localBot.token}/getChatMember?chat_id=${encodeURIComponent(chatTarget)}&user_id=${probe.botId}`,
+                { cache: 'no-store' },
+              );
+              const bData = (await bRes.json().catch(() => ({}))) as {
+                ok?: boolean;
+                description?: string;
+                result?: { status?: string };
+              };
+              botStatus = String(bData.result?.status || (bData.ok ? 'unknown' : 'api_error'));
+              botIsAdmin = Boolean(bData.ok && (botStatus === 'administrator' || botStatus === 'creator'));
+              if (!bData.ok) errMsg = bData.description || 'Failed to inspect bot channel status';
+            } catch {
+              botStatus = 'network_error';
+              errMsg = 'Network error calling Telegram API';
+            }
+
+            if (tgNumericId) {
+              try {
+                const uRes = await fetch(
+                  `https://api.telegram.org/bot${localBot.token}/getChatMember?chat_id=${encodeURIComponent(chatTarget)}&user_id=${encodeURIComponent(tgNumericId)}`,
+                  { cache: 'no-store' },
+                );
+                const uData = (await uRes.json().catch(() => ({}))) as {
+                  ok?: boolean;
+                  result?: { status?: string; is_member?: boolean };
+                };
+                userStatus = String(uData.result?.status || '');
+                userJoined =
+                  Boolean(uData.ok) &&
+                  (userStatus === 'creator' ||
+                    userStatus === 'administrator' ||
+                    userStatus === 'member' ||
+                    (userStatus === 'restricted' && uData.result?.is_member === true));
+              } catch {
+                userJoined = false;
+              }
+            }
+
+            return {
+              id: ch.id,
+              handle: ch.handle,
+              botIsAdmin,
+              botStatus,
+              userJoined,
+              userStatus,
+              error: errMsg,
+            };
+          }),
+        );
+
+        const nowMs = Date.now();
+        const logEntry: ChannelCheckDiagnosticLog = {
+          id: `test_${nowMs}`,
+          timestampMs: nowMs,
+          endpoint: 'test-channels',
+          userIdSource: 'static_preview_direct',
+          telegramUserId: tgNumericId,
+          verificationMode: 'telegram_bot',
+          allJoined: results.every((r) => r.userJoined === true),
+          fromFirestore: true,
+          botConfigured: true,
+          botUsername: probe.botUsername || localBot.botUsername,
+          error: null,
+          channels: results.map((r) => ({
+            handle: r.handle,
+            joined: r.userJoined === true,
+            status: r.userStatus || r.botStatus,
+            botIsAdmin: r.botIsAdmin,
+            botStatus: r.botStatus,
+            rawDescription: r.error,
+          })),
+        };
+        const updatedLogs = appendLocalChannelLog(logEntry as unknown as Record<string, unknown>);
+        const sliced = updatedLogs.slice(0, 5) as unknown as ChannelCheckDiagnosticLog[];
+        setChannelDiagnosticLogs(sliced);
+        setChannelLogsError(null);
+        return {
+          ok: true,
+          botConfigured: true,
+          botUsername: probe.botUsername || localBot.botUsername,
+          channels: results,
+          recentLogs: sliced,
+        };
+      }
+
       const payload = (await response.json().catch(() => ({}))) as {
         ok?: boolean;
         botConfigured?: boolean;
@@ -2475,6 +2797,35 @@ export default function App() {
   };
 
   const handleFetchBotConfig = useCallback(async () => {
+    const applyLocalFallback = () => {
+      const localBot = getLocalAdminBotConfig();
+      if (localBot) {
+        setBotConfigStatus({
+          configured: true,
+          source: 'local_preview',
+          maskedToken: localBot.maskedToken,
+          botUsername: localBot.botUsername,
+          updatedAtMs: localBot.updatedAtMs,
+        });
+        setServerBotConfigured(true);
+        cacheDetectedTelegramBotConfig(localBot.botUsername, telegramBotConfig.appShortName);
+        setTelegramBotConfig(
+          detectBrowserTelegramBotConfig({
+            serverBotUsername: localBot.botUsername,
+            serverAppShortName: telegramBotConfig.appShortName,
+          }),
+        );
+      } else {
+        setBotConfigStatus({
+          configured: false,
+          source: 'none',
+          maskedToken: '',
+          botUsername: null,
+          updatedAtMs: 0,
+        });
+      }
+    };
+
     try {
       const res = await fetch(resolveApiUrl('/api/admin/bot-config/get'), {
         method: 'POST',
@@ -2487,7 +2838,10 @@ export default function App() {
         }),
       });
       const contentType = (res.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.includes('application/json')) return;
+      if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
+        applyLocalFallback();
+        return;
+      }
       const payload = (await res.json().catch(() => null)) as {
         ok?: boolean;
         configured?: boolean;
@@ -2516,7 +2870,7 @@ export default function App() {
         }
       }
     } catch {
-      // ignore fetch errors
+      applyLocalFallback();
     }
   }, [adminSessionToken, telegramBotConfig.appShortName]);
 
@@ -2526,6 +2880,45 @@ export default function App() {
   }, [adminUnlocked, handleFetchBotConfig]);
 
   const handleSaveBotToken = async (botToken: string) => {
+    const saveViaDirectTelegramPreview = async () => {
+      const verified = await verifyTelegramBotTokenDirect(botToken);
+      if (!verified.ok || !verified.token || !verified.botUsername) {
+        return { ok: false, error: verified.error || 'Failed to verify Bot Token.' };
+      }
+      const nowMs = Date.now();
+      setLocalAdminBotConfig({
+        token: verified.token,
+        maskedToken: verified.maskedToken || '',
+        botUsername: verified.botUsername,
+        botId: verified.botId ?? null,
+        updatedAtMs: nowMs,
+      });
+      setBotConfigStatus({
+        configured: true,
+        source: 'local_preview',
+        maskedToken: verified.maskedToken || '',
+        botUsername: verified.botUsername,
+        updatedAtMs: nowMs,
+      });
+      setServerBotConfigured(true);
+      cacheDetectedTelegramBotConfig(verified.botUsername, telegramBotConfig.appShortName);
+      setTelegramBotConfig(
+        detectBrowserTelegramBotConfig({
+          serverBotUsername: verified.botUsername,
+          serverAppShortName: telegramBotConfig.appShortName,
+        }),
+      );
+      playClaimSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      showToast(`Telegram bot @${verified.botUsername} connected (Static Preview)!`);
+      void handleFetchSystemDiagnostics(true);
+      return {
+        ok: true,
+        botUsername: verified.botUsername,
+        maskedToken: verified.maskedToken,
+      };
+    };
+
     try {
       const res = await fetch(resolveApiUrl('/api/admin/bot-config'), {
         method: 'POST',
@@ -2539,11 +2932,8 @@ export default function App() {
         }),
       });
       const contentType = (res.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.includes('application/json')) {
-        return {
-          ok: false,
-          error: `Bot config endpoint returned HTTP ${res.status}. Open from the Express backend or configure Backend Server URL.`,
-        };
+      if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
+        return saveViaDirectTelegramPreview();
       }
       const payload = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
@@ -2588,11 +2978,26 @@ export default function App() {
       }
       return { ok: false, error: payload.error || 'Failed to save Bot Token.' };
     } catch {
-      return { ok: false, error: 'Network error while saving Bot Token.' };
+      return saveViaDirectTelegramPreview();
     }
   };
 
   const handleClearBotToken = async () => {
+    const clearLocalFallback = () => {
+      clearLocalAdminBotConfig();
+      setBotConfigStatus({
+        configured: false,
+        source: 'none',
+        maskedToken: '',
+        botUsername: null,
+        updatedAtMs: Date.now(),
+      });
+      setServerBotConfigured(false);
+      showToast('Cleared saved Telegram Bot Token.');
+      void handleFetchSystemDiagnostics(true);
+      return { ok: true };
+    };
+
     try {
       const res = await fetch(resolveApiUrl('/api/admin/bot-config/clear'), {
         method: 'POST',
@@ -2604,6 +3009,10 @@ export default function App() {
           initData: getTelegramInitData(),
         }),
       });
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
+        return clearLocalFallback();
+      }
       const payload = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
         configured?: boolean;
@@ -2613,6 +3022,7 @@ export default function App() {
         error?: string;
       };
       if (res.ok && payload.ok) {
+        clearLocalAdminBotConfig();
         setBotConfigStatus({
           configured: Boolean(payload.configured),
           source: payload.source || 'none',
@@ -2627,7 +3037,7 @@ export default function App() {
       }
       return { ok: false, error: payload.error || 'Failed to clear Bot Token.' };
     } catch {
-      return { ok: false, error: 'Network error clearing Bot Token.' };
+      return clearLocalFallback();
     }
   };
 
@@ -2650,6 +3060,27 @@ export default function App() {
         return p;
       }),
     );
+    if (latestProfileRef.current.uid === res.referrerProfile.uid) {
+      latestProfileRef.current = res.referrerProfile;
+      setProfile(res.referrerProfile);
+    } else if (latestProfileRef.current.uid === res.referredProfile.uid) {
+      latestProfileRef.current = res.referredProfile;
+      setProfile(res.referredProfile);
+    }
+    void safeFetchJson('/api/referrals/notify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event: 'signup_bonus',
+        referrerUid: res.referrerProfile.uid,
+        referredUid: res.referredProfile.uid,
+        referredName: res.referredProfile.displayName,
+        referredHandle: res.referredProfile.handle,
+        rewardCoins: res.referralRecord.coinsEarned,
+        initData: getTelegramInitData(),
+        token: playerSessionTokenRef.current,
+      }),
+    });
     showToast(
       `Linked ${res.referredProfile.displayName} under ${res.referrerProfile.displayName}!`,
     );
@@ -2750,6 +3181,22 @@ export default function App() {
 
   const handleFetchBroadcastStats = useCallback(
     async (excludeBanned: boolean) => {
+      const buildStaticStats = () => {
+        const bannedSet = new Set(bannedUsers.map((b) => b.uid));
+        const tgPlayers = recentPlayers.filter((p) => {
+          if (!extractTelegramNumericUserId(p.uid)) return false;
+          if (excludeBanned && bannedSet.has(p.uid)) return false;
+          return true;
+        });
+        return {
+          ok: true,
+          totalRecipients: tgPlayers.length,
+          botSubscriberCount: tgPlayers.length,
+          blockedBotCount: 0,
+          playerRecipientCount: tgPlayers.length,
+        };
+      };
+
       try {
         const res = await fetch(resolveApiUrl('/api/admin/broadcast/stats'), {
           method: 'POST',
@@ -2760,6 +3207,10 @@ export default function App() {
             excludeBanned,
           }),
         });
+        const contentType = (res.headers.get('content-type') || '').toLowerCase();
+        if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
+          return buildStaticStats();
+        }
         const payload = (await res.json().catch(() => ({}))) as {
           ok?: boolean;
           totalRecipients?: number;
@@ -2770,10 +3221,10 @@ export default function App() {
         };
         return { ok: Boolean(res.ok && payload.ok), ...payload };
       } catch {
-        return { ok: false, error: 'Failed to load broadcast audience.' };
+        return buildStaticStats();
       }
     },
-    [adminSessionToken],
+    [adminSessionToken, bannedUsers, recentPlayers],
   );
 
   const handleSyncBotSubscribers = useCallback(async () => {
@@ -2786,6 +3237,20 @@ export default function App() {
           initData: getTelegramInitData(),
         }),
       });
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
+        const tgCount = recentPlayers.filter((p) => Boolean(extractTelegramNumericUserId(p.uid))).length;
+        showToast(`Static preview: ${tgCount} active Telegram farm players ready.`);
+        return {
+          ok: true,
+          totalRecipients: tgCount,
+          botSubscriberCount: tgCount,
+          blockedBotCount: 0,
+          playerRecipientCount: tgCount,
+          newUpdates: 0,
+          webhookActive: false,
+        };
+      }
       const payload = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
         totalRecipients?: number;
@@ -2820,7 +3285,7 @@ export default function App() {
       showToast(errMsg);
       return { ok: false, error: errMsg };
     }
-  }, [adminSessionToken, showToast]);
+  }, [adminSessionToken, recentPlayers, showToast]);
 
   const handleSendBroadcast = async (input: {
     title: string;
@@ -2834,6 +3299,115 @@ export default function App() {
     excludeBanned?: boolean;
     testOnlyToAdmin?: boolean;
   }) => {
+    const sendDirectFromBrowserPreview = async () => {
+      const localBot = getLocalAdminBotConfig();
+      if (!localBot) {
+        const errMsg =
+          'Static preview: Paste & verify your Telegram Bot Token above first to broadcast from browser.';
+        showToast(errMsg);
+        return { ok: false, error: errMsg };
+      }
+
+      const bannedSet = new Set(bannedUsers.map((b) => b.uid));
+      const adminNumeric = extractTelegramNumericUserId(profile.uid);
+      const targets = input.testOnlyToAdmin
+        ? adminNumeric
+          ? [adminNumeric]
+          : []
+        : Array.from(
+            new Set(
+              recentPlayers
+                .filter((p) => !(input.excludeBanned !== false && bannedSet.has(p.uid)))
+                .map((p) => extractTelegramNumericUserId(p.uid))
+                .filter((id): id is string => Boolean(id)),
+            ),
+          );
+
+      if (targets.length === 0) {
+        const errMsg = 'No reachable Telegram user IDs found for broadcast.';
+        showToast(errMsg);
+        return { ok: false, error: errMsg };
+      }
+
+      const fullText = [input.title?.trim(), input.message.trim()]
+        .filter(Boolean)
+        .join('\n\n')
+        .slice(0, 4000);
+      const replyMarkup =
+        input.buttonText?.trim() && input.buttonUrl?.trim()
+          ? {
+              inline_keyboard: [
+                [{ text: input.buttonText.trim(), url: input.buttonUrl.trim() }],
+              ],
+            }
+          : undefined;
+
+      let sentCount = 0;
+      let failedCount = 0;
+      let sampleError = '';
+      for (const chatId of targets) {
+        try {
+          const usePhoto = input.mediaType === 'photo' && Boolean(input.mediaUrl?.trim());
+          const endpoint = usePhoto ? 'sendPhoto' : 'sendMessage';
+          const bodyPayload: Record<string, unknown> = {
+            chat_id: chatId,
+            ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+          };
+          if (usePhoto) {
+            bodyPayload.photo = input.mediaUrl!.trim();
+            bodyPayload.caption = fullText.slice(0, 1024);
+          } else {
+            bodyPayload.text = fullText;
+          }
+          const tgRes = await fetch(
+            `https://api.telegram.org/bot${localBot.token}/${endpoint}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(bodyPayload),
+            },
+          );
+          const tgJson = (await tgRes.json().catch(() => ({}))) as {
+            ok?: boolean;
+            description?: string;
+          };
+          if (tgRes.ok && tgJson.ok) {
+            sentCount += 1;
+          } else {
+            failedCount += 1;
+            if (!sampleError) sampleError = tgJson.description || 'Delivery failed';
+          }
+        } catch (err) {
+          failedCount += 1;
+          if (!sampleError) {
+            sampleError = err instanceof Error ? err.message : 'Network error';
+          }
+        }
+      }
+
+      if (sentCount > 0) {
+        playClaimSound(soundsEnabled);
+        triggerHapticFeedback('success');
+        showToast(
+          input.testOnlyToAdmin
+            ? `Test DM sent (${sentCount}/${targets.length})`
+            : `Broadcast complete: ${sentCount} delivered`,
+        );
+        return {
+          ok: true,
+          totalTargets: targets.length,
+          sentCount,
+          failedCount,
+          blockedCount: 0,
+          testOnlyToAdmin: input.testOnlyToAdmin,
+          sampleError: sampleError || undefined,
+        };
+      }
+      const errMsg = sampleError || 'Failed to deliver broadcast via Telegram API.';
+      showToast(errMsg);
+      return { ok: false, error: errMsg, totalTargets: targets.length, sentCount, failedCount };
+    };
+
     try {
       const response = await fetch(resolveApiUrl('/api/admin/broadcast'), {
         method: 'POST',
@@ -2844,6 +3418,10 @@ export default function App() {
           initData: getTelegramInitData(),
         }),
       });
+      const contentType = (response.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('application/json') || response.status === 404 || response.status === 405) {
+        return sendDirectFromBrowserPreview();
+      }
       const payload = (await response.json().catch(() => ({}))) as {
         ok?: boolean;
         totalTargets?: number;

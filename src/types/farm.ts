@@ -281,6 +281,7 @@ export type ChannelVerificationMode =
   | 'telegram_bot'
   | 'bot_unconfigured'
   | 'guest_browser'
+  | 'static_preview'
   | 'disabled';
 
 export interface RequiredTelegramChannel {

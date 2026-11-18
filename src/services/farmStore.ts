@@ -600,6 +600,14 @@ export async function applyReferralCodeInFirestore(
     }
 
     if (!referrerUid) {
+      const resolvedByHandleOrScan = await fetchPlayerByIdOrCodeFromFirestore(rawTrimmed);
+      if (resolvedByHandleOrScan) {
+        referrerUid = resolvedByHandleOrScan.uid;
+        referrerName = String(resolvedByHandleOrScan.displayName || 'Farmer');
+      }
+    }
+
+    if (!referrerUid) {
       return { error: `Referral ID "${rawTrimmed}" not found.` };
     }
 
@@ -2883,10 +2891,13 @@ export async function fetchPlayerByIdOrCodeFromFirestore(
   const trimmed = rawIdOrCode.trim();
   if (!trimmed) return null;
 
+  const cleanNoAt = trimmed.replace(/^@+/, '').trim();
+  const cleanLower = cleanNoAt.toLowerCase();
   const normalized = normalizePlayerBanId(trimmed);
+  const normalizedNoAt = normalizePlayerBanId(cleanNoAt);
   const candidateIds = Array.from(
     new Set(
-      [normalized, trimmed].filter(
+      [normalized, normalizedNoAt, trimmed, cleanNoAt].filter(
         (id): id is string => Boolean(id && /^[a-zA-Z0-9_-]{3,64}$/.test(id)),
       ),
     ),
@@ -2903,24 +2914,115 @@ export async function fetchPlayerByIdOrCodeFromFirestore(
     }
   }
 
-  // Fallback to referral code lookup in leaderboard
+  // Fallback 1: exact referralCode lookup in leaderboard & players
   try {
-    const codeUpper = trimmed.toUpperCase();
-    const q = query(
-      collection(db, 'leaderboard'),
-      where('referralCode', '==', codeUpper),
-      limit(1),
+    const codeCandidates = Array.from(
+      new Set([trimmed, cleanNoAt, trimmed.toUpperCase(), cleanNoAt.toUpperCase()].filter(Boolean)),
     );
-    const lbMatches = await getDocs(q);
-    if (!lbMatches.empty) {
-      const uid = lbMatches.docs[0].id;
-      const pSnap = await getDoc(doc(db, 'players', uid));
-      if (pSnap.exists()) {
-        return parseProfileDoc(pSnap.data(), pSnap.id);
+    for (const codeVal of codeCandidates) {
+      const lbMatches = await getDocs(
+        query(collection(db, 'leaderboard'), where('referralCode', '==', codeVal), limit(1)),
+      );
+      if (!lbMatches.empty) {
+        const uid = lbMatches.docs[0].id;
+        const pSnap = await getDoc(doc(db, 'players', uid));
+        if (pSnap.exists()) {
+          return parseProfileDoc(pSnap.data(), pSnap.id);
+        }
+      }
+      const pMatches = await getDocs(
+        query(collection(db, 'players'), where('referralCode', '==', codeVal), limit(1)),
+      );
+      if (!pMatches.empty) {
+        const d = pMatches.docs[0];
+        return parseProfileDoc(d.data(), d.id);
       }
     }
   } catch {
     // ignore fallback miss
+  }
+
+  // Fallback 2: exact @handle queries across players and leaderboard
+  if (cleanNoAt) {
+    const handleCandidates = Array.from(
+      new Set(
+        [
+          trimmed.startsWith('@') ? trimmed : `@${cleanNoAt}`,
+          `@${cleanNoAt.toLowerCase()}`,
+          `@${cleanNoAt.toUpperCase()}`,
+          cleanNoAt,
+        ].filter(Boolean),
+      ),
+    );
+    for (const handleVal of handleCandidates) {
+      try {
+        const pMatches = await getDocs(
+          query(collection(db, 'players'), where('handle', '==', handleVal), limit(1)),
+        );
+        if (!pMatches.empty) {
+          const d = pMatches.docs[0];
+          return parseProfileDoc(d.data(), d.id);
+        }
+        const lbMatches = await getDocs(
+          query(collection(db, 'leaderboard'), where('handle', '==', handleVal), limit(1)),
+        );
+        if (!lbMatches.empty) {
+          const uid = lbMatches.docs[0].id;
+          const pSnap = await getDoc(doc(db, 'players', uid));
+          if (pSnap.exists()) {
+            return parseProfileDoc(pSnap.data(), pSnap.id);
+          }
+        }
+      } catch {
+        // ignore query errors
+      }
+    }
+  }
+
+  // Fallback 3: case-insensitive scan (strictly limit <= 50 per firestore.rules)
+  if (cleanLower) {
+    try {
+      const [playersSnap, lbSnap] = await Promise.all([
+        getDocs(query(collection(db, 'players'), orderBy('createdAtMs', 'desc'), limit(50))),
+        getDocs(query(collection(db, 'leaderboard'), limit(50))),
+      ]);
+
+      const matchesRecord = (data: Record<string, unknown>, id: string): boolean => {
+        const uidLow = String(data.uid || id).trim().toLowerCase();
+        const numId = (extractTelegramNumericUserId(String(data.uid || id)) || '').toLowerCase();
+        const handleLow = String(data.handle || '')
+          .trim()
+          .replace(/^@+/, '')
+          .toLowerCase();
+        const codeLow = String(data.referralCode || '').trim().toLowerCase();
+        const nameLow = String(data.displayName || '').trim().toLowerCase();
+        return (
+          uidLow === cleanLower ||
+          uidLow === `tg_${cleanLower}` ||
+          (numId !== '' && numId === cleanLower) ||
+          (handleLow !== '' && handleLow === cleanLower) ||
+          (codeLow !== '' && codeLow === cleanLower) ||
+          (nameLow !== '' && nameLow === cleanLower)
+        );
+      };
+
+      for (const d of playersSnap.docs) {
+        if (matchesRecord(d.data(), d.id)) {
+          return parseProfileDoc(d.data(), d.id);
+        }
+      }
+      for (const lbDoc of lbSnap.docs) {
+        if (matchesRecord(lbDoc.data(), lbDoc.id)) {
+          const uid = String(lbDoc.data().uid || lbDoc.id);
+          const pSnap = await getDoc(doc(db, 'players', uid));
+          if (pSnap.exists()) {
+            return parseProfileDoc(pSnap.data(), pSnap.id);
+          }
+        }
+      }
+    } catch {
+      // ignore scan miss
+    }
   }
 
   return null;
@@ -3326,8 +3428,8 @@ export async function adminAddReferralRelationInFirestore(params: {
         id: referredUid,
         referrerUid,
         referredUid,
-        referredName: curReferred.displayName.slice(0, 60),
-        referredHandle: curReferred.handle.slice(0, 40),
+        referredName: (curReferred.displayName || 'Farmer').trim().slice(0, 60) || 'Farmer',
+        referredHandle: formatReferralHandle(curReferred.handle, referredUid).slice(0, 40),
         status: 'active',
         coinsEarned: rewardCoins,
         toppedUpUsd: 0,

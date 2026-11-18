@@ -160,19 +160,19 @@ export function playEggCollectSound(enabled: boolean): void {
   if (!ctx) return;
 
   const now = ctx.currentTime;
-  const notes = [523.25, 659.25, 783.99, 1046.5];
+  const notes = [587.33, 739.99, 880, 1174.66, 1479.98];
   notes.forEach((freq, i) => {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
-    osc.type = i === notes.length - 1 ? 'sine' : 'triangle';
-    const start = now + i * 0.048;
+    osc.type = i >= notes.length - 2 ? 'triangle' : 'sine';
+    const start = now + i * 0.036;
     osc.frequency.setValueAtTime(freq, start);
-    gain.gain.setValueAtTime(0.095, start);
-    gain.gain.exponentialRampToValueAtTime(0.001, start + 0.17);
+    gain.gain.setValueAtTime(0.11, start);
+    gain.gain.exponentialRampToValueAtTime(0.001, start + 0.16);
     osc.connect(gain);
     gain.connect(ctx.destination);
     osc.start(start);
-    osc.stop(start + 0.18);
+    osc.stop(start + 0.17);
   });
 }
 
@@ -182,18 +182,18 @@ export function playCoinChimeSound(enabled: boolean): void {
   if (!ctx) return;
 
   const now = ctx.currentTime;
-  [1046.5, 1318.51, 1567.98].forEach((freq, i) => {
+  [1174.66, 1479.98, 1760.0, 2349.32].forEach((freq, i) => {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
-    osc.type = 'sine';
-    const start = now + i * 0.05;
+    osc.type = i === 3 ? 'triangle' : 'sine';
+    const start = now + i * 0.038;
     osc.frequency.setValueAtTime(freq, start);
-    gain.gain.setValueAtTime(0.085, start);
-    gain.gain.exponentialRampToValueAtTime(0.001, start + 0.19);
+    gain.gain.setValueAtTime(0.095, start);
+    gain.gain.exponentialRampToValueAtTime(0.001, start + 0.18);
     osc.connect(gain);
     gain.connect(ctx.destination);
     osc.start(start);
-    osc.stop(start + 0.2);
+    osc.stop(start + 0.19);
   });
 }
 
@@ -206,14 +206,14 @@ export function playTabTapSound(enabled: boolean): void {
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
   osc.type = 'triangle';
-  osc.frequency.setValueAtTime(620, now);
-  osc.frequency.exponentialRampToValueAtTime(940, now + 0.032);
-  gain.gain.setValueAtTime(0.065, now);
-  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.048);
+  osc.frequency.setValueAtTime(720, now);
+  osc.frequency.exponentialRampToValueAtTime(1180, now + 0.028);
+  gain.gain.setValueAtTime(0.075, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.045);
   osc.connect(gain);
   gain.connect(ctx.destination);
   osc.start(now);
-  osc.stop(now + 0.055);
+  osc.stop(now + 0.05);
 }
 
 export function playClaimSound(enabled: boolean): void {
@@ -222,15 +222,15 @@ export function playClaimSound(enabled: boolean): void {
   if (!ctx) return;
 
   const now = ctx.currentTime;
-  const notes = [587.33, 739.99, 880, 1174.66];
+  const notes = [523.25, 659.25, 783.99, 1046.5, 1318.51];
   notes.forEach((freq, i) => {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
-    osc.type = i === notes.length - 1 ? 'triangle' : 'sine';
-    const start = now + i * 0.05;
-    const duration = i === notes.length - 1 ? 0.26 : 0.14;
+    osc.type = i >= 3 ? 'triangle' : 'sine';
+    const start = now + i * 0.04;
+    const duration = i === notes.length - 1 ? 0.28 : 0.14;
     osc.frequency.setValueAtTime(freq, start);
-    gain.gain.setValueAtTime(0.09, start);
+    gain.gain.setValueAtTime(0.105, start);
     gain.gain.exponentialRampToValueAtTime(0.001, start + duration);
     osc.connect(gain);
     gain.connect(ctx.destination);
@@ -245,14 +245,14 @@ export function playPurchaseSuccessSound(enabled: boolean): void {
   if (!ctx) return;
 
   const now = ctx.currentTime;
-  const notes = [523.25, 659.25, 783.99, 987.77, 1046.5];
+  const notes = [523.25, 659.25, 783.99, 1046.5, 1318.51, 1567.98];
   notes.forEach((freq, i) => {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'triangle';
-    const start = now + i * 0.042;
+    const start = now + i * 0.036;
     osc.frequency.setValueAtTime(freq, start);
-    gain.gain.setValueAtTime(0.085, start);
+    gain.gain.setValueAtTime(0.095, start);
     gain.gain.exponentialRampToValueAtTime(0.001, start + 0.22);
     osc.connect(gain);
     gain.connect(ctx.destination);
@@ -267,32 +267,31 @@ export function playChickenCluckSound(enabled: boolean): void {
   if (!ctx) return;
 
   const now = ctx.currentTime;
-  // Cheerful two-chirp farm cluck
-  [0, 0.095].forEach((offset, idx) => {
+  [0, 0.082].forEach((offset, idx) => {
     const osc = ctx.createOscillator();
     const filter = ctx.createBiquadFilter();
     const gain = ctx.createGain();
 
     osc.type = 'triangle';
     const start = now + offset;
-    const baseFreq = idx === 0 ? 490 : 580;
+    const baseFreq = idx === 0 ? 540 : 660;
     osc.frequency.setValueAtTime(baseFreq, start);
-    osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.42, start + 0.03);
-    osc.frequency.exponentialRampToValueAtTime(baseFreq * 0.78, start + 0.078);
+    osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.48, start + 0.026);
+    osc.frequency.exponentialRampToValueAtTime(baseFreq * 0.82, start + 0.072);
 
     filter.type = 'bandpass';
-    filter.frequency.setValueAtTime(980, start);
-    filter.Q.setValueAtTime(2.2, start);
+    filter.frequency.setValueAtTime(1120, start);
+    filter.Q.setValueAtTime(2.0, start);
 
     gain.gain.setValueAtTime(0.001, start);
-    gain.gain.linearRampToValueAtTime(0.11, start + 0.012);
-    gain.gain.exponentialRampToValueAtTime(0.001, start + 0.082);
+    gain.gain.linearRampToValueAtTime(0.125, start + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.001, start + 0.076);
 
     osc.connect(filter);
     filter.connect(gain);
     gain.connect(ctx.destination);
     osc.start(start);
-    osc.stop(start + 0.088);
+    osc.stop(start + 0.082);
   });
 }
 
@@ -304,15 +303,15 @@ export function playSoftTapSound(enabled: boolean): void {
   const now = ctx.currentTime;
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
-  osc.type = 'sine';
-  osc.frequency.setValueAtTime(460, now);
-  osc.frequency.exponentialRampToValueAtTime(300, now + 0.05);
-  gain.gain.setValueAtTime(0.05, now);
-  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+  osc.type = 'triangle';
+  osc.frequency.setValueAtTime(520, now);
+  osc.frequency.exponentialRampToValueAtTime(760, now + 0.036);
+  gain.gain.setValueAtTime(0.055, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.048);
   osc.connect(gain);
   gain.connect(ctx.destination);
   osc.start(now);
-  osc.stop(now + 0.065);
+  osc.stop(now + 0.052);
 }
 
 export function playGoldenEggSound(enabled: boolean): void {
@@ -321,14 +320,14 @@ export function playGoldenEggSound(enabled: boolean): void {
   if (!ctx) return;
 
   const now = ctx.currentTime;
-  const shimmer = [659.25, 783.99, 987.77, 1318.51, 1567.98];
+  const shimmer = [659.25, 880, 1046.5, 1318.51, 1567.98, 2093.0];
   shimmer.forEach((freq, i) => {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'triangle';
-    const start = now + i * 0.045;
+    const start = now + i * 0.038;
     osc.frequency.setValueAtTime(freq, start);
-    gain.gain.setValueAtTime(0.09, start);
+    gain.gain.setValueAtTime(0.105, start);
     gain.gain.exponentialRampToValueAtTime(0.001, start + 0.28);
     osc.connect(gain);
     gain.connect(ctx.destination);
@@ -338,34 +337,34 @@ export function playGoldenEggSound(enabled: boolean): void {
 }
 
 // ============================================================================
-// COZY PASTORAL FARM BGM SYNTHESIZER (32-step C Major / A Minor / F / G Loop)
-// Warm acoustic kalimba/guitar pluck + marimba chord pad + soft bass + light shaker
+// ENERGETIC UPBEAT ARCADE FARM BGM SYNTHESIZER (32-step C -> G -> Am -> F Loop)
+// Driving octave bassline + syncopated chord stabs + bright lead + kick/snare/hat
 // ============================================================================
 const FARM_MELODY_STEPS: ReadonlyArray<number | null> = [
-  // Bar 1 (Cmaj7)
-  523.25, 659.25, 783.99, 659.25, 880.0, 783.99, 659.25, 587.33,
-  // Bar 2 (Am7)
-  440.0, 523.25, 659.25, 523.25, 783.99, 659.25, 523.25, 493.88,
-  // Bar 3 (Fmaj7)
-  349.23, 440.0, 523.25, 659.25, 587.33, 523.25, 440.0, 392.0,
-  // Bar 4 (G6 -> G7 resolve)
-  392.0, 493.88, 587.33, 659.25, 587.33, 493.88, 440.0, 392.0,
+  // Bar 1 (C major upbeat hook)
+  523.25, 659.25, 783.99, null, 1046.5, 783.99, 659.25, 783.99,
+  // Bar 2 (G major bounce)
+  783.99, 587.33, 659.25, 783.99, 880.0, 783.99, 659.25, 587.33,
+  // Bar 3 (A minor energy lift)
+  523.25, 659.25, 880.0, null, 1046.5, 880.0, 783.99, 659.25,
+  // Bar 4 (F -> G triumphant turnaround)
+  698.46, 880.0, 783.99, 659.25, 587.33, 659.25, 783.99, 987.77,
 ];
 
 const BAR_CHORDS: ReadonlyArray<{ bass: number; chord: readonly [number, number, number] }> = [
-  { bass: 130.81, chord: [261.63, 329.63, 392.0] }, // Cmaj
-  { bass: 110.0, chord: [220.0, 261.63, 329.63] },  // Am
-  { bass: 87.31, chord: [174.61, 220.0, 261.63] },  // Fmaj
-  { bass: 98.0, chord: [196.0, 246.94, 293.66] },   // Gmaj
+  { bass: 130.81, chord: [261.63, 329.63, 392.0] },  // C major
+  { bass: 98.0, chord: [196.0, 246.94, 293.66] },    // G major
+  { bass: 110.0, chord: [220.0, 261.63, 329.63] },   // A minor
+  { bass: 87.31, chord: [174.61, 220.0, 261.63] },   // F major
 ];
 
 function ensureMusicMasterGain(ctx: AudioContext): GainNode {
   if (!musicMasterGain) {
     musicMasterGain = ctx.createGain();
-    musicMasterGain.gain.setValueAtTime(0.32, ctx.currentTime);
+    musicMasterGain.gain.setValueAtTime(0.36, ctx.currentTime);
     musicMasterGain.connect(ctx.destination);
   } else {
-    musicMasterGain.gain.setTargetAtTime(0.32, ctx.currentTime, 0.1);
+    musicMasterGain.gain.setTargetAtTime(0.36, ctx.currentTime, 0.08);
   }
   return musicMasterGain;
 }
@@ -384,111 +383,148 @@ function triggerCozyFarmBeat(): void {
 
   const melodyFreq = FARM_MELODY_STEPS[step];
   if (melodyFreq) {
-    // Acoustic pluck filter
-    const pluckFilter = ctx.createBiquadFilter();
-    pluckFilter.type = 'lowpass';
-    pluckFilter.frequency.setValueAtTime(2200, now);
-    pluckFilter.frequency.exponentialRampToValueAtTime(750, now + 0.42);
+    const leadFilter = ctx.createBiquadFilter();
+    leadFilter.type = 'lowpass';
+    leadFilter.frequency.setValueAtTime(4200, now);
+    leadFilter.frequency.exponentialRampToValueAtTime(1600, now + 0.16);
 
     const leadOsc = ctx.createOscillator();
+    const leadHarm = ctx.createOscillator();
     const leadGain = ctx.createGain();
     leadOsc.type = 'triangle';
     leadOsc.frequency.setValueAtTime(melodyFreq, now);
+    leadHarm.type = 'square';
+    leadHarm.frequency.setValueAtTime(melodyFreq, now);
 
-    const accent = stepInBar === 0 || stepInBar === 4 ? 0.17 : 0.125;
+    const harmGain = ctx.createGain();
+    harmGain.gain.setValueAtTime(0.18, now);
+
+    const accent = stepInBar === 0 || stepInBar === 4 ? 0.17 : 0.13;
     leadGain.gain.setValueAtTime(0.0005, now);
-    leadGain.gain.linearRampToValueAtTime(accent, now + 0.018);
-    leadGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.52);
+    leadGain.gain.linearRampToValueAtTime(accent, now + 0.01);
+    leadGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.21);
 
-    leadOsc.connect(pluckFilter);
-    pluckFilter.connect(leadGain);
+    leadOsc.connect(leadFilter);
+    leadHarm.connect(harmGain);
+    harmGain.connect(leadFilter);
+    leadFilter.connect(leadGain);
     leadGain.connect(master);
-    leadOsc.start(now);
-    leadOsc.stop(now + 0.55);
 
-    // Subtle soft octave shimmer on bar downbeat & beat 3
+    leadOsc.start(now);
+    leadHarm.start(now);
+    leadOsc.stop(now + 0.23);
+    leadHarm.stop(now + 0.23);
+
     if (stepInBar === 0 || stepInBar === 4) {
-      const shimmerOsc = ctx.createOscillator();
-      const shimmerGain = ctx.createGain();
-      shimmerOsc.type = 'sine';
-      shimmerOsc.frequency.setValueAtTime(melodyFreq * 2, now);
-      shimmerGain.gain.setValueAtTime(0.0005, now);
-      shimmerGain.gain.linearRampToValueAtTime(0.032, now + 0.025);
-      shimmerGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.36);
-      shimmerOsc.connect(shimmerGain);
-      shimmerGain.connect(master);
-      shimmerOsc.start(now);
-      shimmerOsc.stop(now + 0.38);
+      const sparkOsc = ctx.createOscillator();
+      const sparkGain = ctx.createGain();
+      sparkOsc.type = 'sine';
+      sparkOsc.frequency.setValueAtTime(melodyFreq * 2, now);
+      sparkGain.gain.setValueAtTime(0.0005, now);
+      sparkGain.gain.linearRampToValueAtTime(0.042, now + 0.012);
+      sparkGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.18);
+      sparkOsc.connect(sparkGain);
+      sparkGain.connect(master);
+      sparkOsc.start(now);
+      sparkOsc.stop(now + 0.2);
     }
   }
 
   const bar = BAR_CHORDS[barIdx];
 
-  // Warm bass pulse on beats 1 and 3 (steps 0 and 4)
-  if (stepInBar === 0 || stepInBar === 4) {
+  // Energetic driving octave bassline on every 8th-note groove pulse
+  {
+    const isDownbeat = stepInBar % 2 === 0;
+    const bassFreq = isDownbeat ? bar.bass : bar.bass * 2;
     const bassFilter = ctx.createBiquadFilter();
     bassFilter.type = 'lowpass';
-    bassFilter.frequency.setValueAtTime(420, now);
+    bassFilter.frequency.setValueAtTime(isDownbeat ? 680 : 900, now);
 
     const bassOsc = ctx.createOscillator();
     const bassGain = ctx.createGain();
-    bassOsc.type = 'triangle';
-    bassOsc.frequency.setValueAtTime(
-      stepInBar === 0 ? bar.bass : bar.bass * 1.5,
-      now,
-    );
+    bassOsc.type = isDownbeat ? 'triangle' : 'sawtooth';
+    bassOsc.frequency.setValueAtTime(bassFreq, now);
     bassGain.gain.setValueAtTime(0.0005, now);
-    bassGain.gain.linearRampToValueAtTime(0.14, now + 0.03);
-    bassGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.72);
+    bassGain.gain.linearRampToValueAtTime(isDownbeat ? 0.16 : 0.075, now + 0.012);
+    bassGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.17);
     bassOsc.connect(bassFilter);
     bassFilter.connect(bassGain);
     bassGain.connect(master);
     bassOsc.start(now);
-    bassOsc.stop(now + 0.75);
+    bassOsc.stop(now + 0.185);
   }
 
-  // Soft warm chord pad on the start of each bar
-  if (stepInBar === 0) {
-    const padFilter = ctx.createBiquadFilter();
-    padFilter.type = 'lowpass';
-    padFilter.frequency.setValueAtTime(900, now);
-    padFilter.connect(master);
+  // Upbeat syncopated arcade chord stabs
+  if (stepInBar === 0 || stepInBar === 3 || stepInBar === 6) {
+    const stabFilter = ctx.createBiquadFilter();
+    stabFilter.type = 'lowpass';
+    stabFilter.frequency.setValueAtTime(2400, now);
+    stabFilter.frequency.exponentialRampToValueAtTime(850, now + 0.15);
+    stabFilter.connect(master);
 
     bar.chord.forEach((chordFreq) => {
-      const padOsc = ctx.createOscillator();
-      const padGain = ctx.createGain();
-      padOsc.type = 'sine';
-      padOsc.frequency.setValueAtTime(chordFreq, now);
-      padGain.gain.setValueAtTime(0.0005, now);
-      padGain.gain.linearRampToValueAtTime(0.042, now + 0.18);
-      padGain.gain.exponentialRampToValueAtTime(0.0008, now + 2.1);
-      padOsc.connect(padGain);
-      padGain.connect(padFilter);
-      padOsc.start(now);
-      padOsc.stop(now + 2.15);
+      const stabOsc = ctx.createOscillator();
+      const stabGain = ctx.createGain();
+      stabOsc.type = 'triangle';
+      stabOsc.frequency.setValueAtTime(chordFreq, now);
+      stabGain.gain.setValueAtTime(0.0005, now);
+      stabGain.gain.linearRampToValueAtTime(0.048, now + 0.012);
+      stabGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.16);
+      stabOsc.connect(stabGain);
+      stabGain.connect(stabFilter);
+      stabOsc.start(now);
+      stabOsc.stop(now + 0.175);
     });
   }
 
-  // Soft cozy acoustic shaker / brush tick on off-beats
+  // Punchy kick drum on beats 1 & 3 (+ syncopation in bar 2 & 4)
+  if (stepInBar === 0 || stepInBar === 4 || (barIdx % 2 === 1 && stepInBar === 5)) {
+    const kickOsc = ctx.createOscillator();
+    const kickGain = ctx.createGain();
+    kickOsc.type = 'sine';
+    kickOsc.frequency.setValueAtTime(145, now);
+    kickOsc.frequency.exponentialRampToValueAtTime(44, now + 0.085);
+    kickGain.gain.setValueAtTime(0.22, now);
+    kickGain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
+    kickOsc.connect(kickGain);
+    kickGain.connect(master);
+    kickOsc.start(now);
+    kickOsc.stop(now + 0.12);
+  }
+
+  // Snappy clap/snare on beats 2 & 4
+  if (stepInBar === 2 || stepInBar === 6) {
+    const snrSrc = ctx.createBufferSource();
+    snrSrc.buffer = getNoiseBuffer(ctx);
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(2100, now);
+    bp.Q.setValueAtTime(1.1, now);
+    const snrGain = ctx.createGain();
+    snrGain.gain.setValueAtTime(0.075, now);
+    snrGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.075);
+    snrSrc.connect(bp);
+    bp.connect(snrGain);
+    snrGain.connect(master);
+    snrSrc.start(now);
+    snrSrc.stop(now + 0.08);
+  }
+
+  // Crisp hi-hat tick on off-beats
   if (stepInBar % 2 === 1) {
-    const src = ctx.createBufferSource();
-    src.buffer = getNoiseBuffer(ctx);
+    const hatSrc = ctx.createBufferSource();
+    hatSrc.buffer = getNoiseBuffer(ctx);
     const hp = ctx.createBiquadFilter();
     hp.type = 'highpass';
-    hp.frequency.setValueAtTime(4200, now);
-    const lp = ctx.createBiquadFilter();
-    lp.type = 'lowpass';
-    lp.frequency.setValueAtTime(7200, now);
-    const tickGain = ctx.createGain();
-    tickGain.gain.setValueAtTime(0.024, now);
-    tickGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.045);
-
-    src.connect(hp);
-    hp.connect(lp);
-    lp.connect(tickGain);
-    tickGain.connect(master);
-    src.start(now);
-    src.stop(now + 0.05);
+    hp.frequency.setValueAtTime(6200, now);
+    const hatGain = ctx.createGain();
+    hatGain.gain.setValueAtTime(0.036, now);
+    hatGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.04);
+    hatSrc.connect(hp);
+    hp.connect(hatGain);
+    hatGain.connect(master);
+    hatSrc.start(now);
+    hatSrc.stop(now + 0.045);
   }
 }
 
@@ -543,5 +579,5 @@ export function syncAmbientMusic(enabled: boolean): void {
     if (musicRunning && musicShouldPlay) {
       triggerCozyFarmBeat();
     }
-  }, 290);
+  }, 190);
 }

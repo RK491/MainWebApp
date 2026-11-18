@@ -163,8 +163,11 @@ import {
   DEFAULT_TELEGRAM_MINIAPP_SHORT_NAME,
   detectTelegramBotConfig,
   getTelegramChannelUrl,
+  maskTelegramBotToken,
   normalizeTelegramBotUsername,
   resolveTelegramUserIdentity,
+  sanitizeTelegramBotTokenInput,
+  verifyTelegramBotTokenDirect,
 } from '../utils/telegram';
 import { isValidLanguageCode, LANGUAGE_OPTIONS, t } from '../utils/i18n';
 import {
@@ -1316,8 +1319,11 @@ test('referralShare builds Telegram Mini App t.me startapp URL with auto-detecte
   );
 
   const tgDirectShare = buildTelegramDirectShareUrl(url, '7508911853', 'Rahul');
-  assert.ok(tgDirectShare.startsWith('https://t.me/share/url?url='));
-  assert.ok(tgDirectShare.includes(encodeURIComponent(url)));
+  assert.ok(tgDirectShare.startsWith('https://t.me/share/url?text='));
+  assert.ok(!tgDirectShare.includes('?url='));
+  const decodedTgText = decodeURIComponent(tgDirectShare.replace('https://t.me/share/url?text=', ''));
+  assert.ok(decodedTgText.endsWith(url));
+  assert.ok(decodedTgText.includes("Rahul's"));
 
   const payload = buildReferralShareData('7508911853', url, 'Rahul');
   assert.equal(payload.title, 'Join Alpha Gram!');
@@ -3173,4 +3179,32 @@ test('getUnifiedUserId removes CL- codes cleanly and Admin withdraw-ads controls
   });
   assert.equal(tgStartIdentity.playerId, 'tg_99887766');
   assert.equal(tgStartIdentity.startParam, '7508911853');
+});
+
+test('bot token sanitization, masking, validation, and case-insensitive @handle search work reliably', async () => {
+  assert.equal(
+    sanitizeTelegramBotTokenInput('  "bot123456789:ABCDEFghijklmnop_1234567890"  '),
+    '123456789:ABCDEFghijklmnop_1234567890',
+  );
+  assert.equal(
+    maskTelegramBotToken('123456789:ABCDEFghijklmnop_1234567890'),
+    '12345678...567890',
+  );
+
+  const emptyRes = await verifyTelegramBotTokenDirect('   ');
+  assert.equal(emptyRes.ok, false);
+  const badFormatRes = await verifyTelegramBotTokenDirect('not-a-valid-token');
+  assert.equal(badFormatRes.ok, false);
+  assert.ok(badFormatRes.error?.includes('Invalid bot token format'));
+
+  const pMixed = createDefaultProfile('tg_7508911853', 'RK', '@ImTheRk1', NOW).profile;
+  const pUpper = createDefaultProfile('tg_7474513009', 'Tanishq', '@TANISHQAI', NOW).profile;
+  assert.deepEqual(
+    filterPlayersBySearchQuery([pMixed, pUpper], '@imtherk1').map((p) => p.uid),
+    ['tg_7508911853'],
+  );
+  assert.deepEqual(
+    filterPlayersBySearchQuery([pMixed, pUpper], '@tanishqai').map((p) => p.uid),
+    ['tg_7474513009'],
+  );
 });
