@@ -79,6 +79,10 @@ export default defineConfig(() => {
           globPatterns: ['**/*.{ico,png,svg,jpg,woff,woff2}'],
           runtimeCaching: [
             {
+              urlPattern: /^\/api\/.*/,
+              handler: 'NetworkOnly',
+            },
+            {
               urlPattern: ({ request }) => request.mode === 'navigate',
               handler: 'NetworkFirst',
               options: {

@@ -835,6 +835,10 @@ async function loadChannelsConfigWithSourceFromFirestore(): Promise<{
       config: {
         enabled: d.enabled !== false,
         channels: parsedChannels,
+        getCodeChannelUrl:
+          typeof d.getCodeChannelUrl === 'string' && d.getCodeChannelUrl.trim()
+            ? String(d.getCodeChannelUrl).trim().slice(0, 256)
+            : DEFAULT_CHANNELS_CONFIG.getCodeChannelUrl,
         updatedAtMs: Number(d.updatedAtMs ?? 0),
       },
       fromFirestore: true,
@@ -1361,8 +1365,13 @@ async function saveWithdrawApproveTemplateServer(
         ...template,
         updatedAt: serverTimestamp(),
       });
-    } catch {
-      // Disk record already persisted
+    } catch (err) {
+      recordServerLog(
+        'warn',
+        'payout_template',
+        'Saved payout template to server disk (Firestore write failed)',
+        err instanceof Error ? err.message : 'Firestore write error',
+      );
     }
   }
   return template;
@@ -1465,6 +1474,10 @@ async function pollTelegramBotUpdates(): Promise<{
       result?: { url?: string };
     };
     if (infoData.ok && infoData.result?.url) {
+      botHeartbeatState.lastHeartbeatAtMs = Date.now();
+      botHeartbeatState.lastHeartbeatOk = true;
+      botHeartbeatState.webhookUrl = infoData.result.url;
+      botHeartbeatState.error = null;
       return { ok: true, webhookActive: true, newUpdates: 0 };
     }
 
@@ -1486,11 +1499,16 @@ async function pollTelegramBotUpdates(): Promise<{
       result?: TelegramUpdatePayload[];
     };
     if (!updData.ok || !Array.isArray(updData.result)) {
+      const errMsg = redactBotToken(updData.description || 'Failed to poll updates');
+      botHeartbeatState.lastHeartbeatAtMs = Date.now();
+      botHeartbeatState.lastHeartbeatOk = false;
+      botHeartbeatState.error = errMsg;
+      recordServerLog('warn', 'bot_poller', 'Telegram getUpdates returned error', errMsg);
       return {
         ok: false,
         webhookActive: false,
         newUpdates: 0,
-        error: redactBotToken(updData.description || 'Failed to poll updates'),
+        error: errMsg,
       };
     }
 
@@ -1982,6 +2000,13 @@ async function startServer() {
         await new Promise((r) => setTimeout(r, 50));
       }
     }
+
+    recordServerLog(
+      failedCount > 0 && sentCount === 0 ? 'error' : failedCount > 0 ? 'warn' : 'info',
+      'broadcast',
+      `Broadcast finished: ${sentCount}/${targetChatIds.length} sent (${failedCount} failed, ${blockedCount} blocked)`,
+      sampleError || (body.testOnlyToAdmin ? 'Admin test broadcast' : 'All subscribers'),
+    );
 
     res.json({
       ok: true,
@@ -2892,9 +2917,17 @@ async function startServer() {
       }
     }
     try {
-      await processTelegramUpdate(req.body as TelegramUpdatePayload);
-    } catch {
-      // Acknowledge cleanly to avoid Telegram retry storms
+      const processed = await processTelegramUpdate(req.body as TelegramUpdatePayload);
+      if (processed) {
+        recordServerLog('info', 'telegram_webhook', 'Processed Telegram webhook subscriber update');
+      }
+    } catch (err) {
+      recordServerLog(
+        'warn',
+        'telegram_webhook',
+        'Telegram webhook handler error',
+        err instanceof Error ? err.message : 'Unknown error',
+      );
     }
     res.json({ ok: true });
   });
@@ -3135,6 +3168,12 @@ async function startServer() {
     }
     const poll = await pollTelegramBotUpdates();
     const stats = await collectBroadcastAudienceDetails(true);
+    recordServerLog(
+      poll.ok ? 'info' : 'warn',
+      'bot_sync',
+      `Manual bot subscriber sync: +${poll.newUpdates} updates, ${stats.recipients.length} total reachable`,
+      poll.error,
+    );
     res.json({
       ok: true,
       poll,
@@ -3170,6 +3209,7 @@ async function startServer() {
       buttonText: String(body.buttonText ?? ''),
       buttonUrlTemplate: String(body.buttonUrlTemplate || ''),
     });
+    recordServerLog('info', 'payout_template', `Payout approval DM template updated by ${resolvedPlayerId}`);
     res.json({ ok: true, template: saved });
   });
 
@@ -3831,6 +3871,13 @@ async function startServer() {
     } else if (status === 'approved' || status === 'rejected') {
       userDmReason = 'User does not have a Telegram numeric chat ID';
     }
+
+    recordServerLog(
+      channelSent || userDmSent ? 'info' : 'warn',
+      'withdraw_notify',
+      `Withdrawal ${status} notification (${authGram} GRAM): channel=${channelSent ? 'sent' : 'failed'}${status !== 'pending' ? `, dm=${userDmSent ? 'sent' : 'failed'}` : ''}`,
+      [channelReason, userDmReason].filter(Boolean).join(' · ') || undefined,
+    );
 
     res.json({
       ok: true,

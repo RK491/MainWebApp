@@ -490,6 +490,10 @@ export function AdminPanelView({
   const [newChannelUrl, setNewChannelUrl] = useState('');
   const [channelFormError, setChannelFormError] = useState<string | null>(null);
   const [savingChannels, setSavingChannels] = useState(false);
+  const [channelsSaveFeedback, setChannelsSaveFeedback] = useState<{
+    type: 'ok' | 'error';
+    text: string;
+  } | null>(null);
   const [testingChannels, setTestingChannels] = useState(false);
   const [channelDiagnostic, setChannelDiagnostic] = useState<ChannelDiagnosticResult | null>(null);
 
@@ -593,6 +597,10 @@ export function AdminPanelView({
     bannerUrl: adConfig.bannerUrl,
   }));
   const [savingAds, setSavingAds] = useState(false);
+  const [adsSaveFeedback, setAdsSaveFeedback] = useState<{
+    type: 'ok' | 'error';
+    text: string;
+  } | null>(null);
   const [templateInput, setTemplateInput] = useState<string>(() =>
     formatAdConfigTemplate({
       provider: adConfig.provider,
@@ -735,10 +743,20 @@ export function AdminPanelView({
   const handleSaveAdsSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSavingAds(true);
+    setAdsSaveFeedback(null);
     try {
       const ok = await onSaveAdConfig(adDraft);
       if (ok !== false) {
-        setTemplateStatus('Saved live to database! Reloading app...');
+        setTemplateStatus('Saved live to database & synced across users!');
+        setAdsSaveFeedback({
+          type: 'ok',
+          text: 'Ad settings saved & synced live across all active players.',
+        });
+      } else {
+        setAdsSaveFeedback({
+          type: 'error',
+          text: 'Could not save ad settings — check Firestore permissions or network.',
+        });
       }
     } finally {
       setSavingAds(false);
@@ -881,15 +899,27 @@ export function AdminPanelView({
 
   const handleSaveChannelsSubmit = async () => {
     setSavingChannels(true);
+    setChannelsSaveFeedback(null);
     try {
       const resolvedGetCode =
         normalizeGetCodeChannelUrl(getCodeChannelDraft) || getCodeChannelDraft.trim();
       setGetCodeChannelDraft(resolvedGetCode);
-      await onSaveChannelsConfig({
+      const ok = await onSaveChannelsConfig({
         enabled: channelsEnabledDraft,
         channels: channelsDraft,
         getCodeChannelUrl: resolvedGetCode,
       });
+      if (ok !== false) {
+        setChannelsSaveFeedback({
+          type: 'ok',
+          text: 'Channel settings saved & synced live!',
+        });
+      } else {
+        setChannelsSaveFeedback({
+          type: 'error',
+          text: 'Could not save channel settings — check Firestore permissions or network.',
+        });
+      }
     } finally {
       setSavingChannels(false);
     }
@@ -1726,7 +1756,7 @@ export function AdminPanelView({
             { id: 'ads', label: 'Ads', icon: Megaphone, count: 0 },
             { id: 'ad_ids', label: 'Block IDs', icon: KeyRound, count: savedAdIdsCount },
             { id: 'broadcast', label: 'Broadcast', icon: Send, count: 0 },
-            { id: 'diagnostics', label: 'System', icon: Activity, count: 0 },
+            { id: 'diagnostics', label: 'System Diagnostics', icon: Activity, count: 0 },
           ] as const
         ).map((item) => {
           const Icon = item.icon;
@@ -3295,6 +3325,19 @@ export function AdminPanelView({
                 Resolved URL: {normalizeGetCodeChannelUrl(getCodeChannelDraft) || 'Not set (uses default payout channel)'}
               </div>
             </div>
+
+            {channelsSaveFeedback && (
+              <div
+                role={channelsSaveFeedback.type === 'error' ? 'alert' : 'status'}
+                className={`rounded-xl border px-3 py-2 text-xs font-bold ${
+                  channelsSaveFeedback.type === 'error'
+                    ? 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-800/70 text-rose-700 dark:text-rose-300'
+                    : 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                }`}
+              >
+                {channelsSaveFeedback.text}
+              </div>
+            )}
 
             <button
               type="button"
@@ -5102,6 +5145,19 @@ export function AdminPanelView({
             )}
           </div>
 
+          {adsSaveFeedback && (
+            <div
+              role={adsSaveFeedback.type === 'error' ? 'alert' : 'status'}
+              className={`rounded-xl border px-3 py-2 text-xs font-bold ${
+                adsSaveFeedback.type === 'error'
+                  ? 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-800/70 text-rose-700 dark:text-rose-300'
+                  : 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+              }`}
+            >
+              {adsSaveFeedback.text}
+            </div>
+          )}
+
           <button
             type="submit"
             disabled={savingAds}
@@ -5395,6 +5451,19 @@ export function AdminPanelView({
                 ))}
               </div>
             </div>
+
+            {adsSaveFeedback && (
+              <div
+                role={adsSaveFeedback.type === 'error' ? 'alert' : 'status'}
+                className={`rounded-xl border px-3 py-2 text-xs font-bold ${
+                  adsSaveFeedback.type === 'error'
+                    ? 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-800/70 text-rose-700 dark:text-rose-300'
+                    : 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                }`}
+              >
+                {adsSaveFeedback.text}
+              </div>
+            )}
 
             <button
               type="submit"
@@ -5998,11 +6067,30 @@ export function AdminPanelView({
               </div>
 
               {systemDiagnosticsError && (
-                <div className="rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/70 px-3 py-2 text-xs font-semibold text-rose-700 dark:text-rose-300">
-                  {systemDiagnosticsError}
+                <div className="rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/70 px-3 py-2 text-xs font-semibold text-rose-700 dark:text-rose-300 flex items-center justify-between gap-2 flex-wrap">
+                  <span>{systemDiagnosticsError}</span>
+                  {onFetchSystemDiagnostics && (
+                    <button
+                      type="button"
+                      disabled={loadingSystemDiagnostics}
+                      onClick={() => void onFetchSystemDiagnostics(true)}
+                      className="clay-btn clay-btn-neutral min-h-[28px] px-2.5 rounded-lg text-[11px] font-extrabold shrink-0"
+                    >
+                      Retry
+                    </button>
+                  )}
                 </div>
               )}
             </div>
+
+            {loadingSystemDiagnostics && !systemDiagnostics && (
+              <div className="clay-card p-6 text-center space-y-2">
+                <RefreshCw className="w-5 h-5 animate-spin text-sky-600 dark:text-sky-400 mx-auto" />
+                <div className="text-xs font-bold text-stone-600 dark:text-stone-300">
+                  Loading live server status logs &amp; bot heartbeat...
+                </div>
+              </div>
+            )}
 
             {systemDiagnostics && (
               <>

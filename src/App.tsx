@@ -220,6 +220,35 @@ function getTodayDateString(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+function formatSyncErrorMessage(err: unknown, fallback: string): string {
+  if (!(err instanceof Error) || !err.message) return fallback;
+  let raw = err.message.trim();
+  let path = '';
+  if (raw.startsWith('{') && raw.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(raw) as { error?: unknown; path?: unknown };
+      if (typeof parsed.error === 'string' && parsed.error.trim()) {
+        raw = parsed.error.trim();
+      }
+      if (typeof parsed.path === 'string' && parsed.path.trim()) {
+        path = parsed.path.trim();
+      }
+    } catch {
+      // Keep original message
+    }
+  }
+  const low = raw.toLowerCase();
+  if (low.includes('missing or insufficient permissions') || low.includes('permission-denied')) {
+    return path
+      ? `Permission denied saving ${path} — deploy firestore.rules or check Admin ID.`
+      : 'Permission denied by Firestore rules — deploy firestore.rules or check Admin ID.';
+  }
+  if (low.includes('client is offline') || low.includes('unavailable')) {
+    return 'Network offline — check internet connection and retry.';
+  }
+  return raw || fallback;
+}
+
 // SHA-256('alphagram:admin:' + passcode) — used only for already-verified Admin IDs when
 // running on a static CDN/preview host where the Express /api/admin/auth backend returns HTTP 404.
 const STATIC_HOST_ADMIN_PASSCODE_SHA256 =
@@ -1081,8 +1110,8 @@ export default function App() {
           setDeposits((prev) => [params.deposit!, ...prev].slice(0, 40));
         }
         return applied;
-      } catch {
-        showToast('Database sync failed — please check connection');
+      } catch (err) {
+        showToast(formatSyncErrorMessage(err, 'Database sync failed — please check connection'));
         return false;
       }
     },
@@ -1698,8 +1727,8 @@ export default function App() {
     try {
       await createCustomTaskInFirestore(input);
       showToast(`Added task "${input.title}"!`);
-    } catch {
-      showToast('Failed to add custom task.');
+    } catch (err) {
+      showToast(formatSyncErrorMessage(err, 'Failed to add custom task.'));
     }
   };
 
@@ -1858,8 +1887,8 @@ export default function App() {
     try {
       await toggleCustomTaskInFirestore(taskId, isActive);
       showToast(isActive ? 'Task activated!' : 'Task paused.');
-    } catch {
-      showToast('Failed to update task.');
+    } catch (err) {
+      showToast(formatSyncErrorMessage(err, 'Failed to update task.'));
     }
   };
 
@@ -1867,16 +1896,10 @@ export default function App() {
     try {
       await deleteCustomTaskInFirestore(taskId);
       showToast('Task deleted.');
-    } catch {
-      showToast('Failed to delete task.');
+    } catch (err) {
+      showToast(formatSyncErrorMessage(err, 'Failed to delete task.'));
     }
   };
-
-  const scheduleAppReload = useCallback(() => {
-    window.setTimeout(() => {
-      window.location.reload();
-    }, 900);
-  }, []);
 
   const handleSaveAdConfig = async (cfg: Omit<AdConfig, 'updatedAtMs'>): Promise<boolean> => {
     try {
@@ -1884,11 +1907,10 @@ export default function App() {
       setAdConfig(saved);
       playClaimSound(soundsEnabled);
       triggerHapticFeedback('success');
-      showToast('Ad settings saved to database! Reloading...');
-      scheduleAppReload();
+      showToast('Ad settings saved & synced live!');
       return true;
-    } catch {
-      showToast('Failed to save ad settings to database.');
+    } catch (err) {
+      showToast(formatSyncErrorMessage(err, 'Failed to save ad settings to database.'));
       return false;
     }
   };
@@ -1901,11 +1923,10 @@ export default function App() {
       setChannelsConfig(saved);
       playClaimSound(soundsEnabled);
       triggerHapticFeedback('success');
-      showToast('Channel settings saved to database! Reloading...');
-      scheduleAppReload();
+      showToast('Channel settings saved & synced live!');
       return true;
-    } catch {
-      showToast('Failed to save channel settings to database.');
+    } catch (err) {
+      showToast(formatSyncErrorMessage(err, 'Failed to save channel settings to database.'));
       return false;
     }
   };
@@ -1926,7 +1947,7 @@ export default function App() {
       showToast(`Gift code ${created.code} ready (${formatPromoRewardSummary(created)})!`);
       return created;
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to create gift code.');
+      showToast(formatSyncErrorMessage(err, 'Failed to create gift code.'));
       return null;
     }
   };
@@ -1935,8 +1956,8 @@ export default function App() {
     try {
       await togglePromoCodeInFirestore(code, isActive);
       showToast(isActive ? `Promo ${code} activated!` : `Promo ${code} paused.`);
-    } catch {
-      showToast('Failed to update promo code.');
+    } catch (err) {
+      showToast(formatSyncErrorMessage(err, 'Failed to update promo code.'));
     }
   };
 
@@ -1944,8 +1965,8 @@ export default function App() {
     try {
       await deletePromoCodeInFirestore(code);
       showToast(`Promo ${code} deleted.`);
-    } catch {
-      showToast('Failed to delete promo code.');
+    } catch (err) {
+      showToast(formatSyncErrorMessage(err, 'Failed to delete promo code.'));
     }
   };
 
@@ -2341,26 +2362,42 @@ export default function App() {
   const handleSaveWithdrawApproveTemplate = async (
     tpl: Omit<WithdrawApproveMessageTemplate, 'updatedAtMs'>,
   ): Promise<boolean> => {
+    let firestoreSaved: WithdrawApproveMessageTemplate | null = null;
+    let firestoreErr: unknown = null;
     try {
-      const saved = await saveWithdrawApproveTemplateInFirestore(tpl);
-      setWithdrawApproveTemplate(saved);
-      await safeFetchJson('/api/admin/payout-template', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...tpl,
-          token: adminSessionToken,
-          initData: getTelegramInitData(),
-        }),
-      });
+      firestoreSaved = await saveWithdrawApproveTemplateInFirestore(tpl);
+    } catch (err) {
+      firestoreErr = err;
+    }
+
+    const serverRes = await safeFetchJson<{
+      ok?: boolean;
+      template?: WithdrawApproveMessageTemplate;
+    }>('/api/admin/payout-template', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...tpl,
+        token: adminSessionToken,
+        initData: getTelegramInitData(),
+      }),
+    });
+
+    const finalSaved = firestoreSaved || (serverRes?.ok ? serverRes.template || { ...tpl, updatedAtMs: Date.now() } : null);
+    if (finalSaved) {
+      setWithdrawApproveTemplate(finalSaved);
       playClaimSound(soundsEnabled);
       triggerHapticFeedback('success');
-      showToast('Withdrawal approval DM message saved!');
+      showToast(
+        firestoreSaved
+          ? 'Withdrawal approval DM message saved & synced!'
+          : 'Approval DM message saved to bot server!',
+      );
       return true;
-    } catch {
-      showToast('Failed to save approval DM template.');
-      return false;
     }
+
+    showToast(formatSyncErrorMessage(firestoreErr, 'Failed to save approval DM template.'));
+    return false;
   };
 
   const handleFetchBroadcastStats = useCallback(
