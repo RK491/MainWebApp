@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  Activity,
   ArrowLeft,
   ArrowRight,
   Ban,
@@ -11,6 +12,7 @@ import {
   Coins,
   Copy,
   Crown,
+  Database,
   Dices,
   ExternalLink,
   Eye,
@@ -36,6 +38,7 @@ import {
   RotateCcw,
   Search,
   Send,
+  Server,
   Share2,
   ShieldAlert,
   ShieldCheck,
@@ -67,6 +70,7 @@ import type {
   PromoRewardType,
   ReferralRecord,
   RequiredTelegramChannel,
+  SystemDiagnosticsSnapshot,
   TaskDefinition,
   UserFarmProfile,
   WithdrawApproveMessageTemplate,
@@ -150,6 +154,10 @@ interface AdminPanelViewProps {
   loadingChannelLogs?: boolean;
   channelLogsError?: string | null;
   onRefreshChannelLogs?: () => Promise<void> | void;
+  systemDiagnostics?: SystemDiagnosticsSnapshot | null;
+  loadingSystemDiagnostics?: boolean;
+  systemDiagnosticsError?: string | null;
+  onFetchSystemDiagnostics?: (forceHeartbeat?: boolean) => Promise<void> | void;
   onLockAdmin?: () => void;
   withdrawRequests: WithdrawRequestRecord[];
   withdrawApproveTemplate?: WithdrawApproveMessageTemplate;
@@ -338,6 +346,10 @@ export function AdminPanelView({
   loadingChannelLogs = false,
   channelLogsError = null,
   onRefreshChannelLogs,
+  systemDiagnostics = null,
+  loadingSystemDiagnostics = false,
+  systemDiagnosticsError = null,
+  onFetchSystemDiagnostics,
   onLockAdmin,
   withdrawRequests,
   withdrawApproveTemplate = DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
@@ -386,8 +398,19 @@ export function AdminPanelView({
   const [verifyingPasscode, setVerifyingPasscode] = useState(false);
 
   const [tab, setTab] = useState<
-    'withdrawals' | 'users' | 'admins' | 'channels' | 'promos' | 'tasks' | 'ads' | 'ad_ids' | 'broadcast'
+    | 'withdrawals'
+    | 'users'
+    | 'admins'
+    | 'channels'
+    | 'promos'
+    | 'tasks'
+    | 'ads'
+    | 'ad_ids'
+    | 'broadcast'
+    | 'diagnostics'
   >('withdrawals');
+  const [diagnosticsAutoRefresh, setDiagnosticsAutoRefresh] = useState(false);
+  const [diagnosticsLogFilter, setDiagnosticsLogFilter] = useState<'all' | 'issues' | 'bot'>('all');
   const [wdFilter, setWdFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
   const [wdSearch, setWdSearch] = useState('');
   const [noteById, setNoteById] = useState<Record<string, string>>({});
@@ -520,7 +543,19 @@ export function AdminPanelView({
     return () => {
       cancelled = true;
     };
-  }, [adminUnlocked, tab, bcastExcludeBanned, onFetchBroadcastStats]);
+  }, [adminUnlocked, bcastExcludeBanned, onFetchBroadcastStats, tab]);
+
+  useEffect(() => {
+    if (!adminUnlocked || tab !== 'diagnostics' || !onFetchSystemDiagnostics) return;
+    void onFetchSystemDiagnostics(false);
+    if (!diagnosticsAutoRefresh) return;
+    const timer = window.setInterval(() => {
+      void onFetchSystemDiagnostics(true);
+    }, 10_000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [adminUnlocked, diagnosticsAutoRefresh, onFetchSystemDiagnostics, tab]);
 
   // Guided 3-step Gift Code Generator state
   const [giftStep, setGiftStep] = useState<1 | 2 | 3>(1);
@@ -1678,7 +1713,7 @@ export function AdminPanelView({
       <div
         role="tablist"
         aria-label="Admin console sections"
-        className="clay-inset !rounded-2xl grid grid-cols-3 gap-1 p-1.5"
+        className="clay-inset !rounded-2xl grid grid-cols-2 sm:grid-cols-5 gap-1 p-1.5"
       >
         {(
           [
@@ -1691,6 +1726,7 @@ export function AdminPanelView({
             { id: 'ads', label: 'Ads', icon: Megaphone, count: 0 },
             { id: 'ad_ids', label: 'Block IDs', icon: KeyRound, count: savedAdIdsCount },
             { id: 'broadcast', label: 'Broadcast', icon: Send, count: 0 },
+            { id: 'diagnostics', label: 'System', icon: Activity, count: 0 },
           ] as const
         ).map((item) => {
           const Icon = item.icon;
@@ -5882,6 +5918,352 @@ export function AdminPanelView({
                   </p>
                 )}
               </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* ========================================================================
+          SYSTEM DIAGNOSTICS TAB
+         ======================================================================== */}
+      {tab === 'diagnostics' && (() => {
+        const formatUptime = (sec: number) => {
+          const hrs = Math.floor(sec / 3600);
+          const mins = Math.floor((sec % 3600) / 60);
+          const rem = sec % 60;
+          return `${hrs}h ${String(mins).padStart(2, '0')}m ${String(rem).padStart(2, '0')}s`;
+        };
+        const allServerLogs = systemDiagnostics?.serverLogs ?? [];
+        const visibleLogs = allServerLogs.filter((entry) => {
+          if (diagnosticsLogFilter === 'issues') {
+            return entry.level === 'warn' || entry.level === 'error';
+          }
+          if (diagnosticsLogFilter === 'bot') {
+            return (
+              entry.source.includes('bot') ||
+              entry.source.includes('channel') ||
+              entry.source.includes('telegram')
+            );
+          }
+          return true;
+        });
+
+        return (
+          <div key="admin-tab-diagnostics" className="animate-clay-enter space-y-4">
+            {/* Control Header */}
+            <div className="clay-card p-4 space-y-3">
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div>
+                  <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+                    <Activity className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                    <span>System Diagnostics &amp; Bot Heartbeat</span>
+                  </h2>
+                  <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
+                    Real-time server health, Telegram bot heartbeat latency, Firestore connectivity, and live status logs.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onTabTap?.();
+                      setDiagnosticsAutoRefresh((v) => !v);
+                    }}
+                    className={`clay-btn min-h-[36px] px-3 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 ${
+                      diagnosticsAutoRefresh ? 'clay-btn-emerald' : 'clay-btn-neutral'
+                    }`}
+                  >
+                    <Clock className="w-3.5 h-3.5" />
+                    <span>{diagnosticsAutoRefresh ? 'Auto 10s: ON' : 'Auto 10s: OFF'}</span>
+                  </button>
+
+                  {onFetchSystemDiagnostics && (
+                    <button
+                      type="button"
+                      disabled={loadingSystemDiagnostics}
+                      onClick={() => {
+                        onTabTap?.();
+                        void onFetchSystemDiagnostics(true);
+                      }}
+                      className="clay-btn clay-btn-sky min-h-[36px] px-3.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      <RefreshCw
+                        className={`w-3.5 h-3.5 ${loadingSystemDiagnostics ? 'animate-spin' : ''}`}
+                      />
+                      <span>{loadingSystemDiagnostics ? 'Probing...' : 'Run Heartbeat & Refresh'}</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {systemDiagnosticsError && (
+                <div className="rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/70 px-3 py-2 text-xs font-semibold text-rose-700 dark:text-rose-300">
+                  {systemDiagnosticsError}
+                </div>
+              )}
+            </div>
+
+            {systemDiagnostics && (
+              <>
+                {/* Bot Connectivity Heartbeat Stats */}
+                <div className="clay-card p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+                      <Send className="w-4 h-4 text-sky-600 dark:text-sky-400" />
+                      <span>Bot Connectivity Heartbeat</span>
+                    </div>
+                    <span
+                      className={`px-2 py-0.5 rounded-lg border text-[11px] font-extrabold ${
+                        systemDiagnostics.bot.lastHeartbeatOk
+                          ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                          : 'bg-rose-50 dark:bg-rose-950/60 border-rose-200 dark:border-rose-800/70 text-rose-700 dark:text-rose-300'
+                      }`}
+                    >
+                      {systemDiagnostics.bot.lastHeartbeatOk
+                        ? 'HEARTBEAT ONLINE'
+                        : systemDiagnostics.bot.configured
+                          ? 'HEARTBEAT ERROR'
+                          : 'TOKEN MISSING'}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <div className="clay-inset !rounded-xl p-2.5">
+                      <div className="text-[10px] font-bold uppercase text-stone-500 dark:text-stone-400">
+                        Telegram Bot
+                      </div>
+                      <div className="text-xs font-extrabold font-mono-num text-stone-900 dark:text-stone-100 mt-0.5 truncate">
+                        {systemDiagnostics.bot.username ? `@${systemDiagnostics.bot.username}` : 'Not set'}
+                      </div>
+                      {systemDiagnostics.bot.botId && (
+                        <div className="text-[10px] font-mono-num text-stone-500 dark:text-stone-400">
+                          ID: {systemDiagnostics.bot.botId}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="clay-inset !rounded-xl p-2.5">
+                      <div className="text-[10px] font-bold uppercase text-stone-500 dark:text-stone-400">
+                        API Latency
+                      </div>
+                      <div className="text-xs font-extrabold font-mono-num text-stone-900 dark:text-stone-100 mt-0.5">
+                        {systemDiagnostics.bot.latencyMs !== null
+                          ? `${systemDiagnostics.bot.latencyMs} ms`
+                          : 'N/A'}
+                      </div>
+                      <div className="text-[10px] font-mono-num text-stone-500 dark:text-stone-400">
+                        {systemDiagnostics.bot.lastHeartbeatAtMs > 0
+                          ? new Date(systemDiagnostics.bot.lastHeartbeatAtMs).toLocaleTimeString()
+                          : 'Never'}
+                      </div>
+                    </div>
+
+                    <div className="clay-inset !rounded-xl p-2.5">
+                      <div className="text-[10px] font-bold uppercase text-stone-500 dark:text-stone-400">
+                        Update Transport
+                      </div>
+                      <div className="text-xs font-extrabold text-stone-900 dark:text-stone-100 mt-0.5">
+                        {systemDiagnostics.bot.webhookUrl
+                          ? 'Webhook'
+                          : `Polling (${systemDiagnostics.bot.activePollIntervalSec}s)`}
+                      </div>
+                      <div className="text-[10px] font-mono-num text-stone-500 dark:text-stone-400">
+                        Pending: {systemDiagnostics.bot.pendingUpdateCount ?? 0}
+                      </div>
+                    </div>
+
+                    <div className="clay-inset !rounded-xl p-2.5">
+                      <div className="text-[10px] font-bold uppercase text-stone-500 dark:text-stone-400">
+                        Bot Subscribers
+                      </div>
+                      <div className="text-xs font-extrabold font-mono-num text-stone-900 dark:text-stone-100 mt-0.5">
+                        {(systemDiagnostics.bot.subscriberCount ?? 0).toLocaleString()}
+                      </div>
+                      <div className="text-[10px] font-mono-num text-stone-500 dark:text-stone-400">
+                        Token: {systemDiagnostics.bot.configured ? 'Configured' : 'Missing'}
+                      </div>
+                    </div>
+                  </div>
+
+                  {systemDiagnostics.bot.error && (
+                    <div className="rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/70 px-3 py-2 text-[11px] font-mono-num font-semibold text-rose-700 dark:text-rose-300 break-words">
+                      Bot Error: {systemDiagnostics.bot.error}
+                    </div>
+                  )}
+                </div>
+
+                {/* Server Runtime & Firestore Health */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="clay-card p-4 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+                        <Server className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                        <span>Express Runtime</span>
+                      </div>
+                      <span className="px-2 py-0.5 rounded-md bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800/70 text-[10px] font-extrabold text-emerald-700 dark:text-emerald-300">
+                        {systemDiagnostics.env.toUpperCase()}
+                      </span>
+                    </div>
+
+                    <div className="space-y-1.5 text-xs font-mono-num">
+                      <div className="flex items-center justify-between">
+                        <span className="text-stone-500 dark:text-stone-400 font-sans font-semibold">Uptime</span>
+                        <span className="font-bold text-stone-900 dark:text-stone-100">
+                          {formatUptime(systemDiagnostics.uptimeSec)}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-stone-500 dark:text-stone-400 font-sans font-semibold">Memory (Heap / RSS)</span>
+                        <span className="font-bold text-stone-900 dark:text-stone-100">
+                          {systemDiagnostics.memoryMb.heapUsed} MB / {systemDiagnostics.memoryMb.rss} MB
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-stone-500 dark:text-stone-400 font-sans font-semibold">Node Runtime</span>
+                        <span className="font-bold text-stone-900 dark:text-stone-100">
+                          {systemDiagnostics.nodeVersion}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-stone-500 dark:text-stone-400 font-sans font-semibold">Channel Checks Logged</span>
+                        <span className="font-bold text-stone-900 dark:text-stone-100">
+                          {systemDiagnostics.channelCheckStats.totalLogsRecorded}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="clay-card p-4 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+                        <Database className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                        <span>Firestore Database</span>
+                      </div>
+                      <span
+                        className={`px-2 py-0.5 rounded-md border text-[10px] font-extrabold ${
+                          systemDiagnostics.firestore.connected
+                            ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                            : 'bg-rose-50 dark:bg-rose-950/60 border-rose-200 dark:border-rose-800/70 text-rose-700 dark:text-rose-300'
+                        }`}
+                      >
+                        {systemDiagnostics.firestore.connected ? 'CONNECTED' : 'UNAVAILABLE'}
+                      </span>
+                    </div>
+
+                    <div className="space-y-1.5 text-xs font-mono-num">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-stone-500 dark:text-stone-400 font-sans font-semibold">Read Latency</span>
+                        <span className="font-bold text-stone-900 dark:text-stone-100">
+                          {systemDiagnostics.firestore.latencyMs !== null
+                            ? `${systemDiagnostics.firestore.latencyMs} ms`
+                            : 'N/A'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-stone-500 dark:text-stone-400 font-sans font-semibold">Project ID</span>
+                        <span className="font-bold text-stone-900 dark:text-stone-100 truncate">
+                          {systemDiagnostics.firestore.projectId || 'default'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-stone-500 dark:text-stone-400 font-sans font-semibold">Database ID</span>
+                        <span className="font-bold text-stone-900 dark:text-stone-100 truncate max-w-[180px]">
+                          {systemDiagnostics.firestore.databaseId || '(default)'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-stone-500 dark:text-stone-400 font-sans font-semibold">Server Time</span>
+                        <span className="font-bold text-stone-900 dark:text-stone-100">
+                          {new Date(systemDiagnostics.serverTimeMs).toLocaleTimeString()}
+                        </span>
+                      </div>
+                    </div>
+
+                    {systemDiagnostics.firestore.error && (
+                      <div className="rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/70 px-2.5 py-1.5 text-[11px] font-mono-num text-rose-700 dark:text-rose-300 break-words">
+                        {systemDiagnostics.firestore.error}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Real-Time Server Status Logs */}
+                <div className="clay-card p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+                      <ShieldAlert className="w-4 h-4 text-sky-600 dark:text-sky-400" />
+                      <span>Real-Time Server Status Logs ({visibleLogs.length})</span>
+                    </div>
+
+                    <div className="flex items-center gap-1">
+                      {(
+                        [
+                          { id: 'all', label: 'All' },
+                          { id: 'issues', label: 'Warn/Error' },
+                          { id: 'bot', label: 'Bot/Channels' },
+                        ] as const
+                      ).map((f) => (
+                        <button
+                          key={f.id}
+                          type="button"
+                          onClick={() => setDiagnosticsLogFilter(f.id)}
+                          className={`clay-btn min-h-[28px] px-2.5 rounded-lg text-[11px] font-extrabold ${
+                            diagnosticsLogFilter === f.id ? 'clay-btn-amber' : 'clay-btn-neutral'
+                          }`}
+                        >
+                          {f.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {visibleLogs.length === 0 ? (
+                    <div className="clay-inset !rounded-xl p-4 text-center text-xs font-semibold text-stone-500 dark:text-stone-400">
+                      No matching server logs recorded yet.
+                    </div>
+                  ) : (
+                    <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+                      {visibleLogs.map((log) => (
+                        <div
+                          key={log.id}
+                          className="clay-inset !rounded-xl px-3 py-2 space-y-1 text-[11px]"
+                        >
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span
+                                className={`px-1.5 py-0.5 rounded font-mono-num font-extrabold text-[10px] ${
+                                  log.level === 'error'
+                                    ? 'bg-rose-100 dark:bg-rose-950/70 text-rose-700 dark:text-rose-300'
+                                    : log.level === 'warn'
+                                      ? 'bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300'
+                                      : 'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300'
+                                }`}
+                              >
+                                {log.level.toUpperCase()}
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded bg-stone-200/80 dark:bg-stone-800 font-mono-num font-bold text-stone-700 dark:text-stone-300 text-[10px]">
+                                {log.source}
+                              </span>
+                            </div>
+                            <span className="font-mono-num text-[10px] text-stone-500 dark:text-stone-400">
+                              {new Date(log.timestampMs).toLocaleTimeString()}
+                            </span>
+                          </div>
+                          <div className="font-semibold text-stone-900 dark:text-stone-100 break-words">
+                            {log.message}
+                          </div>
+                          {log.detail && (
+                            <div className="font-mono-num text-[10px] text-stone-500 dark:text-stone-400 break-words">
+                              {log.detail}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
             )}
           </div>
         );

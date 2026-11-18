@@ -138,6 +138,7 @@ import type {
   ReferralRecord,
   SeasonConfig,
   SubView,
+  SystemDiagnosticsSnapshot,
   TaskCategory,
   TaskDefinition,
   TransactionEntry,
@@ -355,6 +356,9 @@ export default function App() {
   const [channelDiagnosticLogs, setChannelDiagnosticLogs] = useState<ChannelCheckDiagnosticLog[]>([]);
   const [loadingChannelLogs, setLoadingChannelLogs] = useState(false);
   const [channelLogsError, setChannelLogsError] = useState<string | null>(null);
+  const [systemDiagnostics, setSystemDiagnostics] = useState<SystemDiagnosticsSnapshot | null>(null);
+  const [loadingSystemDiagnostics, setLoadingSystemDiagnostics] = useState(false);
+  const [systemDiagnosticsError, setSystemDiagnosticsError] = useState<string | null>(null);
   const [banRecord, setBanRecord] = useState<BannedUserRecord | null>(() =>
     loadCachedBanRecord(activePlayerId),
   );
@@ -2073,6 +2077,52 @@ export default function App() {
     }
   }, [adminSessionToken]);
 
+  const handleFetchSystemDiagnostics = useCallback(
+    async (forceHeartbeat = false) => {
+      setLoadingSystemDiagnostics(true);
+      setSystemDiagnosticsError(null);
+      try {
+        const endpointUrl =
+          typeof window !== 'undefined'
+            ? new URL('/api/admin/system-diagnostics', window.location.origin).toString()
+            : '/api/admin/system-diagnostics';
+        const response = await fetch(endpointUrl, {
+          method: 'POST',
+          cache: 'no-store',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            playerId: latestProfileRef.current.uid,
+            initData: getTelegramInitData(),
+            token: adminSessionToken,
+            forceHeartbeat,
+          }),
+        });
+        const contentType = (response.headers.get('content-type') || '').toLowerCase();
+        if (!contentType.includes('application/json')) {
+          setSystemDiagnosticsError(
+            `System diagnostics endpoint returned HTTP ${response.status} (static preview without Node backend).`,
+          );
+          return;
+        }
+        const payload = (await response.json().catch(() => ({}))) as Partial<SystemDiagnosticsSnapshot> & {
+          error?: string;
+        };
+        if (response.ok && payload.ok && payload.bot && payload.firestore && Array.isArray(payload.serverLogs)) {
+          setSystemDiagnostics(payload as SystemDiagnosticsSnapshot);
+          return;
+        }
+        setSystemDiagnosticsError(
+          payload.error || `Failed to load system diagnostics (HTTP ${response.status}).`,
+        );
+      } catch {
+        setSystemDiagnosticsError('Network error while loading system diagnostics.');
+      } finally {
+        setLoadingSystemDiagnostics(false);
+      }
+    },
+    [adminSessionToken],
+  );
+
   const handleTestChannelsDiagnostic = async (
     channelsOverride?: typeof activeRequiredChannels,
   ) => {
@@ -3072,6 +3122,10 @@ export default function App() {
           loadingChannelLogs={loadingChannelLogs}
           channelLogsError={channelLogsError}
           onRefreshChannelLogs={handleFetchChannelDiagnosticLogs}
+          systemDiagnostics={systemDiagnostics}
+          loadingSystemDiagnostics={loadingSystemDiagnostics}
+          systemDiagnosticsError={systemDiagnosticsError}
+          onFetchSystemDiagnostics={handleFetchSystemDiagnostics}
           onLockAdmin={handleLockAdmin}
           withdrawRequests={allWithdrawRequests}
           customTasks={customTasks}

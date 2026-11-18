@@ -375,3 +375,53 @@ export interface ChannelCheckDiagnosticLog {
     targetChatIdUsed?: string;
   }>;
 }
+
+export interface SystemServerLogEntry {
+  id: string;
+  timestampMs: number;
+  level: 'info' | 'warn' | 'error';
+  source: string;
+  message: string;
+  detail?: string;
+}
+
+export interface SystemDiagnosticsSnapshot {
+  ok: boolean;
+  serverTimeMs: number;
+  uptimeSec: number;
+  nodeVersion: string;
+  env: string;
+  memoryMb: {
+    rss: number;
+    heapUsed: number;
+    heapTotal: number;
+  };
+  bot: {
+    configured: boolean;
+    username: string | null;
+    botId: number | null;
+    lastHeartbeatAtMs: number;
+    lastHeartbeatOk: boolean;
+    latencyMs: number | null;
+    error?: string | null;
+    webhookUrl?: string | null;
+    pendingUpdateCount?: number;
+    subscriberCount?: number;
+    activePollIntervalSec: number;
+  };
+  firestore: {
+    connected: boolean;
+    databaseId: string;
+    projectId: string;
+    readOk: boolean;
+    latencyMs: number | null;
+    error?: string | null;
+  };
+  channelCheckStats: {
+    totalLogsRecorded: number;
+    lastCheckAtMs: number | null;
+  };
+  rateLimitBucketsCount: number;
+  serverLogs: SystemServerLogEntry[];
+}
+

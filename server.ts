@@ -53,6 +53,8 @@ import type {
   ChannelCheckDiagnosticLog,
   ChannelsConfig,
   RequiredTelegramChannel,
+  SystemDiagnosticsSnapshot,
+  SystemServerLogEntry,
   WithdrawApproveMessageTemplate,
 } from './src/types/farm.ts';
 import {
@@ -883,6 +885,134 @@ function loadChannelCheckLogsFromDisk(): void {
   }
 }
 
+const serverDiagnosticLogs: SystemServerLogEntry[] = [];
+
+function recordServerLog(
+  level: SystemServerLogEntry['level'],
+  source: string,
+  message: string,
+  detail?: string,
+): void {
+  const entry: SystemServerLogEntry = {
+    id: `slog_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    timestampMs: Date.now(),
+    level,
+    source: source.slice(0, 40),
+    message: redactBotToken(message).slice(0, 220),
+    ...(detail ? { detail: redactBotToken(detail).slice(0, 320) } : {}),
+  };
+  serverDiagnosticLogs.unshift(entry);
+  if (serverDiagnosticLogs.length > 60) {
+    serverDiagnosticLogs.length = 60;
+  }
+}
+
+const botHeartbeatState: {
+  lastHeartbeatAtMs: number;
+  lastHeartbeatOk: boolean;
+  latencyMs: number | null;
+  username: string | null;
+  botId: number | null;
+  webhookUrl: string | null;
+  pendingUpdateCount: number;
+  error: string | null;
+} = {
+  lastHeartbeatAtMs: 0,
+  lastHeartbeatOk: false,
+  latencyMs: null,
+  username: null,
+  botId: null,
+  webhookUrl: null,
+  pendingUpdateCount: 0,
+  error: null,
+};
+
+async function probeBotHeartbeat(forceFresh = false): Promise<typeof botHeartbeatState> {
+  if (!TELEGRAM_BOT_TOKEN) {
+    botHeartbeatState.lastHeartbeatAtMs = Date.now();
+    botHeartbeatState.lastHeartbeatOk = false;
+    botHeartbeatState.latencyMs = null;
+    botHeartbeatState.username = TELEGRAM_BOT_USERNAME_ENV || null;
+    botHeartbeatState.botId = null;
+    botHeartbeatState.webhookUrl = null;
+    botHeartbeatState.pendingUpdateCount = 0;
+    botHeartbeatState.error = 'TELEGRAM_BOT_TOKEN not configured on server';
+    return botHeartbeatState;
+  }
+
+  const now = Date.now();
+  if (!forceFresh && botHeartbeatState.lastHeartbeatAtMs > 0 && now - botHeartbeatState.lastHeartbeatAtMs < 15_000) {
+    return botHeartbeatState;
+  }
+
+  const startedAt = Date.now();
+  try {
+    const [meRes, whRes] = await Promise.all([
+      fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`, {
+        signal: AbortSignal.timeout(6000),
+      }),
+      fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo`, {
+        signal: AbortSignal.timeout(6000),
+      }).catch(() => null),
+    ]);
+    const latencyMs = Math.max(1, Date.now() - startedAt);
+    const meData = (await meRes.json()) as {
+      ok?: boolean;
+      description?: string;
+      result?: { id?: number; username?: string };
+    };
+
+    let webhookUrl: string | null = null;
+    let pendingUpdateCount = 0;
+    if (whRes && whRes.ok) {
+      const whData = (await whRes.json().catch(() => null)) as {
+        ok?: boolean;
+        result?: { url?: string; pending_update_count?: number };
+      } | null;
+      if (whData?.ok && whData.result) {
+        webhookUrl = whData.result.url || null;
+        pendingUpdateCount = Number(whData.result.pending_update_count ?? 0);
+      }
+    }
+
+    botHeartbeatState.lastHeartbeatAtMs = Date.now();
+    botHeartbeatState.latencyMs = latencyMs;
+    botHeartbeatState.webhookUrl = webhookUrl;
+    botHeartbeatState.pendingUpdateCount = pendingUpdateCount;
+
+    if (meData.ok && meData.result) {
+      const cleanUser = normalizeTelegramBotUsername(meData.result.username);
+      if (cleanUser) {
+        cachedBotUsername = cleanUser;
+      }
+      botHeartbeatState.lastHeartbeatOk = true;
+      botHeartbeatState.username = cleanUser || cachedBotUsername || DEFAULT_TELEGRAM_BOT_USERNAME;
+      botHeartbeatState.botId = typeof meData.result.id === 'number' ? meData.result.id : null;
+      botHeartbeatState.error = null;
+      recordServerLog(
+        'info',
+        'bot_heartbeat',
+        `Bot @${botHeartbeatState.username} online (${latencyMs}ms)`,
+        webhookUrl ? `Webhook active · pending=${pendingUpdateCount}` : `Polling mode · pending=${pendingUpdateCount}`,
+      );
+    } else {
+      const errMsg = redactBotToken(meData.description || 'Telegram getMe returned negative');
+      botHeartbeatState.lastHeartbeatOk = false;
+      botHeartbeatState.error = errMsg;
+      recordServerLog('error', 'bot_heartbeat', 'Bot heartbeat failed', errMsg);
+    }
+  } catch (err) {
+    const latencyMs = Math.max(1, Date.now() - startedAt);
+    const errMsg = redactBotToken(err instanceof Error ? err.message : 'Telegram Bot API unreachable');
+    botHeartbeatState.lastHeartbeatAtMs = Date.now();
+    botHeartbeatState.lastHeartbeatOk = false;
+    botHeartbeatState.latencyMs = latencyMs;
+    botHeartbeatState.error = errMsg;
+    recordServerLog('error', 'bot_heartbeat', 'Bot API connection failed', errMsg);
+  }
+  return botHeartbeatState;
+}
+
 function recordChannelCheckDiagnosticLog(
   entry: Omit<ChannelCheckDiagnosticLog, 'id' | 'timestampMs'>,
 ): ChannelCheckDiagnosticLog {
@@ -895,6 +1025,13 @@ function recordChannelCheckDiagnosticLog(
   if (channelCheckLogs.length > 20) {
     channelCheckLogs.length = 20;
   }
+  recordServerLog(
+    fullEntry.error ? 'warn' : fullEntry.allJoined ? 'info' : 'warn',
+    fullEntry.endpoint,
+    `Channel check ${fullEntry.allJoined ? 'PASSED' : 'NEGATIVE'} (mode=${fullEntry.verificationMode}, user=${fullEntry.telegramUserId || 'none'})`,
+    fullEntry.error ||
+      fullEntry.channels.map((c) => `${c.handle}:${c.joined ? 'joined' : c.status}`).join(', '),
+  );
   try {
     const dir = path.dirname(CHANNEL_CHECK_LOGS_FILE);
     if (!fs.existsSync(dir)) {
@@ -1370,13 +1507,24 @@ async function pollTelegramBotUpdates(): Promise<{
     if (highestId >= cachedTelegramUpdateOffset) {
       persistTelegramUpdateOffset(highestId + 1);
     }
+    botHeartbeatState.lastHeartbeatAtMs = Date.now();
+    botHeartbeatState.lastHeartbeatOk = true;
+    botHeartbeatState.error = null;
+    if (newUpdates > 0) {
+      recordServerLog('info', 'bot_poller', `Processed ${newUpdates} new Telegram bot update(s)`);
+    }
     return { ok: true, webhookActive: false, newUpdates };
   } catch (err) {
+    const errMsg = redactBotToken(err instanceof Error ? err.message : 'Poll failed');
+    botHeartbeatState.lastHeartbeatAtMs = Date.now();
+    botHeartbeatState.lastHeartbeatOk = false;
+    botHeartbeatState.error = errMsg;
+    recordServerLog('warn', 'bot_poller', 'Telegram update poll failed', errMsg);
     return {
       ok: false,
       webhookActive: false,
       newUpdates: 0,
-      error: redactBotToken(err instanceof Error ? err.message : 'Poll failed'),
+      error: errMsg,
     };
   } finally {
     botPollInFlight = false;
@@ -2579,6 +2727,120 @@ async function startServer() {
     });
   });
 
+  const handleSystemDiagnosticsRequest = async (
+    req: express.Request,
+    res: express.Response,
+    params: { token?: string; initData?: string; forceHeartbeat?: boolean },
+  ) => {
+    const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
+    const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
+    const resolvedPlayerId = resolveVerifiedAdminActor({
+      req,
+      token: params.token,
+      initData: params.initData,
+      extraAdminIds: effectiveExtraAdmins,
+    });
+    if (!resolvedPlayerId) {
+      res.status(403).json({ ok: false, error: 'Verified Admin session required.' });
+      return;
+    }
+
+    const heartbeat = await probeBotHeartbeat(Boolean(params.forceHeartbeat));
+
+    let firestoreReadOk = false;
+    let firestoreLatencyMs: number | null = null;
+    let firestoreError: string | null = serverDb ? null : 'Firestore client not initialized on server';
+    let projectId = '';
+    let databaseId = '';
+    try {
+      const cfgPath = path.resolve(__dirname, 'firebase-applet-config.json');
+      if (fs.existsSync(cfgPath)) {
+        const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as {
+          projectId?: string;
+          firestoreDatabaseId?: string;
+        };
+        projectId = cfg.projectId || '';
+        databaseId = cfg.firestoreDatabaseId || '';
+      }
+    } catch {
+      // Ignore config read issues
+    }
+
+    if (serverDb) {
+      const dbStart = Date.now();
+      try {
+        await getFreshDoc(doc(serverDb, 'app_config', 'channels'));
+        firestoreReadOk = true;
+        firestoreLatencyMs = Math.max(1, Date.now() - dbStart);
+      } catch (err) {
+        firestoreReadOk = false;
+        firestoreLatencyMs = Math.max(1, Date.now() - dbStart);
+        firestoreError = err instanceof Error ? err.message : 'Firestore read probe failed';
+        recordServerLog('error', 'firestore', 'Firestore heartbeat read failed', firestoreError);
+      }
+    }
+
+    const mem = process.memoryUsage();
+    const snapshot: SystemDiagnosticsSnapshot = {
+      ok: true,
+      serverTimeMs: Date.now(),
+      uptimeSec: Math.floor(process.uptime()),
+      nodeVersion: process.version,
+      env: process.env.NODE_ENV || 'development',
+      memoryMb: {
+        rss: Math.round(mem.rss / (1024 * 1024)),
+        heapUsed: Math.round(mem.heapUsed / (1024 * 1024)),
+        heapTotal: Math.round(mem.heapTotal / (1024 * 1024)),
+      },
+      bot: {
+        configured: Boolean(TELEGRAM_BOT_TOKEN),
+        username: heartbeat.username || cachedBotUsername || (TELEGRAM_BOT_USERNAME_ENV || null),
+        botId: heartbeat.botId,
+        lastHeartbeatAtMs: heartbeat.lastHeartbeatAtMs,
+        lastHeartbeatOk: heartbeat.lastHeartbeatOk,
+        latencyMs: heartbeat.latencyMs,
+        error: heartbeat.error,
+        webhookUrl: heartbeat.webhookUrl,
+        pendingUpdateCount: heartbeat.pendingUpdateCount,
+        subscriberCount: botSubscriberMap.size,
+        activePollIntervalSec: 20,
+      },
+      firestore: {
+        connected: Boolean(serverDb) && firestoreReadOk,
+        databaseId,
+        projectId,
+        readOk: firestoreReadOk,
+        latencyMs: firestoreLatencyMs,
+        error: firestoreError,
+      },
+      channelCheckStats: {
+        totalLogsRecorded: channelCheckLogs.length,
+        lastCheckAtMs: channelCheckLogs[0]?.timestampMs ?? null,
+      },
+      rateLimitBucketsCount: rateLimitBuckets.size,
+      serverLogs: serverDiagnosticLogs.slice(0, 40),
+    };
+
+    res.json(snapshot);
+  };
+
+  app.post('/api/admin/system-diagnostics', async (req, res) => {
+    const body = (req.body || {}) as {
+      token?: string;
+      initData?: string;
+      forceHeartbeat?: boolean;
+    };
+    await handleSystemDiagnosticsRequest(req, res, body);
+  });
+
+  app.get('/api/admin/system-diagnostics', async (req, res) => {
+    await handleSystemDiagnosticsRequest(req, res, {
+      token: typeof req.query.token === 'string' ? req.query.token : undefined,
+      initData: typeof req.query.initData === 'string' ? req.query.initData : undefined,
+      forceHeartbeat: req.query.forceHeartbeat === '1' || req.query.forceHeartbeat === 'true',
+    });
+  });
+
   app.post('/api/auth/verify-telegram', (req, res) => {
     const body = req.body as { initData?: string };
     const rawInitData = String(body.initData || '').trim();
@@ -2770,6 +3032,7 @@ async function startServer() {
     if (!authResult.ok) {
       checkRateLimit(failIpKey, 15, 15 * 60_000);
       checkRateLimit(failIdKey, 15, 15 * 60_000);
+      recordServerLog('warn', 'admin_auth', `Rejected admin passcode for ${resolvedPlayerId}`, `source=${authResult.source}`);
       res.status(403).json({
         ok: false,
         requiresPasscode: true,
@@ -2781,6 +3044,7 @@ async function startServer() {
 
     rateLimitBuckets.delete(failIpKey);
     rateLimitBuckets.delete(failIdKey);
+    recordServerLog('info', 'admin_auth', `Admin Console unlocked by ${resolvedPlayerId}`, `source=${authResult.source}`);
 
     const token = signSessionToken({
       role: 'admin',
@@ -3623,6 +3887,15 @@ async function startServer() {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`Alpha Gram server running on http://0.0.0.0:${PORT}`);
     });
+  }
+  recordServerLog(
+    'info',
+    'server',
+    `Alpha Gram server initialized on port ${PORT} (${process.env.NODE_ENV || 'development'})`,
+    `botToken=${Boolean(TELEGRAM_BOT_TOKEN)} · firestore=${Boolean(serverDb)}`,
+  );
+  if (TELEGRAM_BOT_TOKEN) {
+    void probeBotHeartbeat(true);
   }
 }
 
