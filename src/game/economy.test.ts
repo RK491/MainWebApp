@@ -159,6 +159,13 @@ import {
   type RejectedGramTransfer,
 } from './tonGram';
 import {
+  getMergedReferralsForUser,
+  getReferrals,
+  getReferrer,
+  resetReferralStorage,
+  saveReferral,
+} from '../server/referralStorage';
+import {
   calculateMsUntilBasketFull,
   shouldTriggerBasketFullNotification,
 } from '../utils/notifications';
@@ -1857,45 +1864,45 @@ test('task slots enforcement blocks completion when remaining slots reach 0 and 
   assert.ok('error' in fullErr);
 });
 
-test('paid user task creation enforces 5k min (30 joins, 150/join, 10% fee min 500), deducts coins, and blocks self-claim', () => {
-  // Minimum criteria: 150 coins * 30 slots = 4,500 pool + 500 fee (10% of 5,000 budget) = 5,000 total
-  const minCost = calculatePaidTaskCost(150, 30);
-  assert.equal(minCost.rewardPoolCoins, 4500);
-  assert.equal(minCost.platformFeeCoins, 500);
-  assert.equal(minCost.totalCostCoins, 5000);
+test('paid user task creation enforces 10k min (60 joins @ 150/join, 10% fee = 1,000), deducts coins, and blocks self-claim', () => {
+  // Minimum criteria: 150 coins * 60 slots = 9,000 pool + 1,000 fee (10% of 10,000 gross) = 10,000 total
+  const minCost = calculatePaidTaskCost(150, 60);
+  assert.equal(minCost.rewardPoolCoins, 9000);
+  assert.equal(minCost.platformFeeCoins, 1000);
+  assert.equal(minCost.totalCostCoins, 10000);
 
-  // Scaling above minimum: 200 coins * 40 slots = 8,000 pool + 800 fee (10%) = 8,800 total
+  // Scaling: 200 coins * 40 slots = 8,000 pool -> gross Math.round(8000 / 0.9) = 8,889 -> 889 fee
   const scaledCost = calculatePaidTaskCost(200, 40);
   assert.equal(scaledCost.rewardPoolCoins, 8000);
-  assert.equal(scaledCost.platformFeeCoins, 800);
-  assert.equal(scaledCost.totalCostCoins, 8800);
+  assert.equal(scaledCost.platformFeeCoins, 889);
+  assert.equal(scaledCost.totalCostCoins, 8889);
 
-  // Inputs below minimums clamp safely to 50 reward / 30 slots
-  const clampedCost = calculatePaidTaskCost(20, 10);
+  // Inputs below minimums clamp safely to 50 reward / 1 min slot
+  const clampedCost = calculatePaidTaskCost(20, 0);
   assert.equal(clampedCost.rewardCoins, USER_TASK_MIN_REWARD_COINS);
   assert.equal(clampedCost.rewardCoins, 50);
-  assert.equal(clampedCost.totalSlots, 30);
-  assert.equal(clampedCost.totalCostCoins, 2000);
+  assert.equal(clampedCost.totalSlots, 1);
+  assert.equal(clampedCost.totalCostCoins, 56);
 
   const { profile } = createDefaultProfile('player_creator1', 'Aarav', '@aarav', NOW);
   assert.equal(profile.coins, 1000);
 
-  // Under 5,000 coins balance cannot publish even minimum task
-  const under5k = createPaidTaskOrder(
-    { ...profile, coins: 4999 },
+  // Under 10,000 coins balance cannot publish even minimum task
+  const under10k = createPaidTaskOrder(
+    { ...profile, coins: 9999 },
     {
       title: 'Join My Channel',
       category: 'partner',
       rewardCoins: 150,
-      totalSlots: 30,
+      totalSlots: 60,
       icon: 'send',
       actionUrl: 'https://t.me/test',
     },
     NOW,
   );
-  assert.ok('error' in under5k);
+  assert.ok('error' in under10k);
 
-  const fundedCreator = { ...profile, coins: 6000 };
+  const fundedCreator = { ...profile, coins: 11000 };
 
   // Below min reward (< 50) rejected
   const lowReward = createPaidTaskOrder(
@@ -1904,7 +1911,7 @@ test('paid user task creation enforces 5k min (30 joins, 150/join, 10% fee min 5
       title: 'Low Reward Task',
       category: 'social',
       rewardCoins: 49,
-      totalSlots: 120,
+      totalSlots: 200,
       icon: 'send',
       actionUrl: '',
     },
@@ -1912,14 +1919,14 @@ test('paid user task creation enforces 5k min (30 joins, 150/join, 10% fee min 5
   );
   assert.ok('error' in lowReward);
 
-  // Below min slots (< 30) rejected
+  // Zero slots rejected
   const lowSlots = createPaidTaskOrder(
     fundedCreator,
     {
-      title: 'Low Slots Task',
+      title: 'Zero Slots Task',
       category: 'social',
       rewardCoins: 150,
-      totalSlots: 29,
+      totalSlots: 0,
       icon: 'send',
       actionUrl: '',
     },
@@ -1927,23 +1934,23 @@ test('paid user task creation enforces 5k min (30 joins, 150/join, 10% fee min 5
   );
   assert.ok('error' in lowSlots);
 
-  // Valid minimum paid task deducts 5,000 coins and emits negative coin transaction
+  // Valid minimum paid task deducts 10,000 coins and emits negative coin transaction
   const ok = createPaidTaskOrder(
     fundedCreator,
     {
       title: 'Join My Channel',
       category: 'partner',
       rewardCoins: 150,
-      totalSlots: 30,
+      totalSlots: 60,
       icon: 'send',
       actionUrl: 'https://t.me/test',
     },
     NOW,
   );
   assert.ok(!('error' in ok));
-  assert.equal(ok.cost.totalCostCoins, 5000);
+  assert.equal(ok.cost.totalCostCoins, 10000);
   assert.equal(ok.profile.coins, 1000);
-  assert.equal(ok.transaction.amount, -5000);
+  assert.equal(ok.transaction.amount, -10000);
   assert.equal(ok.transaction.currency, 'coins');
 
   // Creator cannot claim their own posted task, while another player can
@@ -1954,10 +1961,10 @@ test('paid user task creation enforces 5k min (30 joins, 150/join, 10% fee min 5
     rewardCoins: 150,
     icon: 'send',
     actionUrl: 'https://t.me/test',
-    totalSlots: 30,
+    totalSlots: 60,
     claimedCount: 0,
     creatorUid: 'player_creator1',
-    paidCoins: 5000,
+    paidCoins: 10000,
     isCustom: true,
     isActive: true,
     createdAtMs: NOW,
@@ -2874,51 +2881,51 @@ test('normalizeTelegramChannelHandle parses telegram.me URLs, private t.me/c lin
 });
 
 test('calculatePaidTaskFromBudget computes exact slots, posting fee, and total coins deducted from coin budget', () => {
-  // Exact minimum 5,000 coins at 150 coins/join -> 30 slots (4,500) + 500 fee = 5,000 deducted
-  const minBudget = calculatePaidTaskFromBudget(5000, 150);
+  // Exact minimum 10,000 coins at 150 coins/join -> 60 slots (9,000 pool) + 1,000 fee (10%) = 10,000 deducted
+  const minBudget = calculatePaidTaskFromBudget(10000, 150);
   assert.equal(minBudget.valid, true);
-  assert.equal(minBudget.totalSlots, 30);
-  assert.equal(minBudget.rewardPoolCoins, 4500);
-  assert.equal(minBudget.platformFeeCoins, 500);
-  assert.equal(minBudget.totalCostCoins, 5000);
+  assert.equal(minBudget.totalSlots, 60);
+  assert.equal(minBudget.rewardPoolCoins, 9000);
+  assert.equal(minBudget.platformFeeCoins, 1000);
+  assert.equal(minBudget.totalCostCoins, 10000);
   assert.equal(minBudget.unspentCoins, 0);
 
-  // 11,000 coins at 200 coins/join -> 50 slots (10,000) + 1,000 fee = 11,000 deducted
-  const larger = calculatePaidTaskFromBudget(11000, 200);
+  // 20,000 coins at 200 coins/join -> 90 slots (18,000 pool) + 2,000 fee = 20,000 deducted
+  const larger = calculatePaidTaskFromBudget(20000, 200);
   assert.equal(larger.valid, true);
-  assert.equal(larger.totalSlots, 50);
-  assert.equal(larger.rewardPoolCoins, 10000);
-  assert.equal(larger.platformFeeCoins, 1000);
-  assert.equal(larger.totalCostCoins, 11000);
+  assert.equal(larger.totalSlots, 90);
+  assert.equal(larger.rewardPoolCoins, 18000);
+  assert.equal(larger.platformFeeCoins, 2000);
+  assert.equal(larger.totalCostCoins, 20000);
   assert.equal(larger.unspentCoins, 0);
 
-  // 10,000 coins at 150 coins/join -> 60 slots (9,000) + 900 fee = 9,900 deducted, 100 left unspent
-  const partial = calculatePaidTaskFromBudget(10000, 150);
+  // 10,100 coins at 150 coins/join -> 60 slots (9,000) + 1,000 fee = 10,000 deducted, 100 left unspent
+  const partial = calculatePaidTaskFromBudget(10100, 150);
   assert.equal(partial.valid, true);
   assert.equal(partial.totalSlots, 60);
-  assert.equal(partial.platformFeeCoins, 900);
-  assert.equal(partial.totalCostCoins, 9900);
+  assert.equal(partial.platformFeeCoins, 1000);
+  assert.equal(partial.totalCostCoins, 10000);
   assert.equal(partial.unspentCoins, 100);
 
-  // Below 5,000 coins rejected
-  const tooLow = calculatePaidTaskFromBudget(4999, 150);
+  // Below 10,000 coins rejected
+  const tooLow = calculatePaidTaskFromBudget(9999, 150);
   assert.equal(tooLow.valid, false);
-  assert.ok(tooLow.error?.includes('5,000'));
+  assert.ok(tooLow.error?.includes('10,000'));
 
-  // High reward per join requiring > 5,000 for 30 slots surfaces minimum required coins
-  const highReward = calculatePaidTaskFromBudget(5000, 500);
+  // High reward per join requiring > 10,000 for 1 slot surfaces minimum required coins
+  const highReward = calculatePaidTaskFromBudget(10000, 15000);
   assert.equal(highReward.valid, false);
-  assert.equal(highReward.minBudgetForReward, 16500);
-  assert.ok(highReward.error?.includes('16,500'));
+  assert.equal(highReward.minBudgetForReward, 16667);
+  assert.ok(highReward.error?.includes('16,667'));
 
-  // 50 coins/click with 5,000 coin budget yields 90 slots (4,500 pool + 500 fee = 5,000)
-  const min50Budget = calculatePaidTaskFromBudget(5000, 50);
+  // 50 coins/click with 10,000 coin budget yields 180 slots (9,000 pool + 1,000 fee = 10,000)
+  const min50Budget = calculatePaidTaskFromBudget(10000, 50);
   assert.equal(min50Budget.valid, true);
   assert.equal(min50Budget.rewardCoins, 50);
-  assert.equal(min50Budget.totalSlots, 90);
-  assert.equal(min50Budget.rewardPoolCoins, 4500);
-  assert.equal(min50Budget.platformFeeCoins, 500);
-  assert.equal(min50Budget.totalCostCoins, 5000);
+  assert.equal(min50Budget.totalSlots, 180);
+  assert.equal(min50Budget.rewardPoolCoins, 9000);
+  assert.equal(min50Budget.platformFeeCoins, 1000);
+  assert.equal(min50Budget.totalCostCoins, 10000);
 });
 
 test('paid task top-up and refund calculate added slots, fees, and unused pool refunds cleanly', () => {
@@ -3215,35 +3222,37 @@ test('bot token sanitization, masking, validation, and case-insensitive @handle 
   );
 });
 
-test('paid task optional Channel Check adds +1,000 coins surcharge and round-trips inside subtitle metadata', () => {
-  assert.equal(USER_TASK_CHANNEL_CHECK_FEE_COINS, 1000);
+test('paid task optional Channel Check adds +5,000 coins surcharge (15k min, 6k fees) and round-trips inside subtitle metadata', () => {
+  assert.equal(USER_TASK_CHANNEL_CHECK_FEE_COINS, 5000);
 
-  const withoutCheck = calculatePaidTaskFromBudget(6000, 50, false);
+  const withoutCheck = calculatePaidTaskFromBudget(15000, 50, false);
   assert.equal(withoutCheck.valid, true);
   assert.equal(withoutCheck.requireChannelCheck, false);
   assert.equal(withoutCheck.channelCheckFeeCoins, 0);
+  assert.equal(withoutCheck.totalSlots, 270);
 
-  // With channel check ON, 6,000 budget reserves 1,000 channel check fee -> 5,000 remaining (4,500 pool + 500 platform fee = 90 slots)
-  const withCheck = calculatePaidTaskFromBudget(6000, 50, true);
+  // With channel check ON, 15,000 budget reserves 5,000 channel check fee -> 10,000 remaining (9,000 pool + 1,000 platform fee = 180 slots; 6,000 total fees)
+  const withCheck = calculatePaidTaskFromBudget(15000, 50, true);
   assert.equal(withCheck.valid, true);
   assert.equal(withCheck.requireChannelCheck, true);
-  assert.equal(withCheck.channelCheckFeeCoins, 1000);
-  assert.equal(withCheck.totalSlots, 90);
-  assert.equal(withCheck.rewardPoolCoins, 4500);
-  assert.equal(withCheck.platformFeeCoins, 500);
-  assert.equal(withCheck.totalCostCoins, 6000);
+  assert.equal(withCheck.channelCheckFeeCoins, 5000);
+  assert.equal(withCheck.totalSlots, 180);
+  assert.equal(withCheck.rewardPoolCoins, 9000);
+  assert.equal(withCheck.platformFeeCoins, 1000);
+  assert.equal(withCheck.totalCostCoins, 15000);
 
-  // Exact 5,000 budget is insufficient when channel check (+1,000) is ticked (requires >= 6,000)
-  const tooLowWithCheck = calculatePaidTaskFromBudget(5000, 50, true);
+  // 10,000 budget is insufficient when channel check (+5,000) is ticked (requires >= 15,000)
+  const tooLowWithCheck = calculatePaidTaskFromBudget(10000, 50, true);
   assert.equal(tooLowWithCheck.valid, false);
-  assert.equal(tooLowWithCheck.minBudgetForReward, 6000);
+  assert.equal(tooLowWithCheck.minBudgetForReward, 15000);
 
-  const costDirect = calculatePaidTaskCost(50, 90, true);
-  assert.equal(costDirect.channelCheckFeeCoins, 1000);
-  assert.equal(costDirect.totalCostCoins, 6000);
+  const costDirect = calculatePaidTaskCost(50, 180, true);
+  assert.equal(costDirect.channelCheckFeeCoins, 5000);
+  assert.equal(costDirect.platformFeeCoins, 1000);
+  assert.equal(costDirect.totalCostCoins, 15000);
 
   const { profile } = createDefaultProfile('player_sponsor_chk', 'Sponsor', '@sponsor', NOW);
-  const funded = { ...profile, coins: 10000 };
+  const funded = { ...profile, coins: 20000 };
   const order = createPaidTaskOrder(
     funded,
     {
@@ -3252,36 +3261,36 @@ test('paid task optional Channel Check adds +1,000 coins surcharge and round-tri
       icon: 'send',
       actionUrl: 'https://t.me/AlphaGramTestChannel',
       rewardCoins: 50,
-      totalSlots: 90,
+      totalSlots: 180,
       requireChannelCheck: true,
     },
     NOW,
   );
   assert.ok(!('error' in order));
-  assert.equal(order.cost.totalCostCoins, 6000);
-  assert.equal(order.profile.coins, 4000);
+  assert.equal(order.cost.totalCostCoins, 15000);
+  assert.equal(order.profile.coins, 5000);
 
   // Metadata encode/decode round-trip stays under 120 chars & preserves channel check flag
   const encodedOn = encodeTaskSubtitleMeta({
     subtitle: 'Join & tap Claim',
-    totalSlots: 90,
+    totalSlots: 180,
     creatorUid: 'tg_7508911853',
-    paidCoins: 6000,
+    paidCoins: 15000,
     requireChannelCheck: true,
   });
   assert.ok(encodedOn);
   assert.ok(encodedOn.length <= 120);
   const decodedOn = decodeTaskSubtitleMeta(encodedOn);
   assert.equal(decodedOn.requireChannelCheck, true);
-  assert.equal(decodedOn.totalSlots, 90);
-  assert.equal(decodedOn.paidCoins, 6000);
+  assert.equal(decodedOn.totalSlots, 180);
+  assert.equal(decodedOn.paidCoins, 15000);
   assert.equal(decodedOn.subtitle, 'Join & tap Claim');
 
   const encodedOff = encodeTaskSubtitleMeta({
     subtitle: 'Quick link task',
-    totalSlots: 90,
+    totalSlots: 180,
     creatorUid: 'tg_7508911853',
-    paidCoins: 5000,
+    paidCoins: 10000,
     requireChannelCheck: false,
   });
   const decodedOff = decodeTaskSubtitleMeta(encodedOff);
@@ -3344,5 +3353,39 @@ test('renderPayoutChannelApproveMessage matches approval style with farmer name 
   assert.ok(!chMsg.htmlText.includes(fullWallet), 'must not expose full wallet in public channel');
   assert.ok(!chMsg.buttonUrl.includes(fullWallet), 'must not put full wallet in channel button URL');
 });
+
+test('server referralStorage saves, deduplicates, guards self-referrals, merges tg_ variants, and resets cleanly', () => {
+  resetReferralStorage();
+  try {
+    // Rejects self-referrals including across tg_ prefix
+    assert.equal(saveReferral('123456', '123456'), false);
+    assert.equal(saveReferral('tg_123456', '123456'), false);
+    assert.equal(saveReferral('123456', 'tg_123456'), false);
+
+    // Saves valid referral and deduplicates repeat calls
+    assert.equal(saveReferral('tg_200200', 'tg_100100'), true);
+    assert.equal(saveReferral('tg_200200', 'tg_100100'), true);
+    assert.deepEqual(getReferrals('tg_100100'), ['tg_200200']);
+    assert.equal(getReferrer('tg_200200'), 'tg_100100');
+
+    // Existing referrer cannot be overwritten by a different referrer
+    assert.equal(saveReferral('tg_200200', 'tg_999999'), false);
+    assert.equal(getReferrer('tg_200200'), 'tg_100100');
+
+    // Merges tg_100100 and 100100 lookup keys seamlessly
+    assert.equal(saveReferral('300300', '100100'), true);
+    const merged = getMergedReferralsForUser('100100');
+    assert.deepEqual(merged.referrals.sort(), ['300300', 'tg_200200'].sort());
+    assert.equal(merged.referrer, null);
+
+    // Reset clears referrals and referredBy
+    resetReferralStorage();
+    assert.deepEqual(getReferrals('tg_100100'), []);
+    assert.equal(getReferrer('tg_200200'), null);
+  } finally {
+    resetReferralStorage();
+  }
+});
+
 
 

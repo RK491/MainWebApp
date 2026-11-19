@@ -2113,78 +2113,113 @@ export function AdminPanelView({
           className="clay-card clay-hover-lift !rounded-2xl p-3.5 text-left cursor-pointer"
         >
           <div className="flex items-center justify-between text-[11px] font-bold text-stone-500 dark:text-stone-400">
-            <span>Live Tasks · Ads</span>
+            <span>Tasks · Min Price</span>
             <ListPlus className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
           </div>
           <div className="mt-1 text-xl font-extrabold text-stone-900 dark:text-stone-100 font-mono-num">
             {activeTaskCount}
           </div>
-          <div className="mt-0.5 text-[11px] text-stone-500 dark:text-stone-400 truncate">
-            {activeProviderLabel}
+          <div className="mt-0.5 text-[11px] text-stone-500 dark:text-stone-400 font-mono-num truncate">
+            Min {(Number(minTaskPriceDraft) || DEFAULT_TASK_PRICING_CONFIG.minBudgetCoins).toLocaleString()}c · {activeProviderLabel}
           </div>
         </button>
       </div>
 
-      {/* Section Navigation */}
-      <div
-        role="tablist"
+      {/* Organized Multi-Group Admin Navigation */}
+      <nav
         aria-label="Admin console sections"
-        className="clay-inset !rounded-2xl grid grid-cols-2 sm:grid-cols-5 gap-1 p-1.5"
+        className="clay-card !rounded-3xl p-3 space-y-2.5"
       >
         {(
           [
-            { id: 'withdrawals', label: 'Payouts', icon: Wallet, count: pendingRequests.length },
-            { id: 'users', label: 'User Search', icon: Users, count: bannedUsers.length },
-            { id: 'admins', label: 'Admins', icon: ShieldCheck, count: 1 + adminsConfig.admins.length },
-            { id: 'channels', label: 'Channels', icon: Radio, count: activeChannelsCount },
-            { id: 'promos', label: 'Gift Codes', icon: Gift, count: activePromoCount },
-            { id: 'tasks', label: 'Tasks', icon: ListPlus, count: 0 },
-            { id: 'ads', label: 'Ads', icon: Megaphone, count: 0 },
-            { id: 'ad_ids', label: 'Block IDs', icon: KeyRound, count: savedAdIdsCount },
-            { id: 'broadcast', label: 'Broadcast', icon: Send, count: 0 },
-            { id: 'diagnostics', label: 'System Diagnostics', icon: Activity, count: 0 },
-            { id: 'reset', label: 'Data Reset', icon: RotateCcw, count: 0 },
+            {
+              group: 'Operations',
+              colsClass: 'grid-cols-2 sm:grid-cols-4',
+              items: [
+                { id: 'withdrawals', label: 'Payouts', icon: Wallet, count: pendingRequests.length },
+                { id: 'users', label: 'Users', icon: Users, count: bannedUsers.length },
+                { id: 'channels', label: 'Channels', icon: Radio, count: activeChannelsCount },
+                { id: 'admins', label: 'Admins', icon: ShieldCheck, count: 1 + adminsConfig.admins.length },
+              ],
+            },
+            {
+              group: 'Economy & Growth',
+              colsClass: 'grid-cols-2 sm:grid-cols-4',
+              items: [
+                { id: 'tasks', label: 'Tasks', icon: ListPlus, count: activeTaskCount },
+                { id: 'promos', label: 'Gift Codes', icon: Gift, count: activePromoCount },
+                { id: 'ads', label: 'Ads', icon: Megaphone, count: 0 },
+                { id: 'ad_ids', label: 'Block IDs', icon: KeyRound, count: savedAdIdsCount },
+              ],
+            },
+            {
+              group: 'System & Maintenance',
+              colsClass: 'grid-cols-3',
+              items: [
+                { id: 'broadcast', label: 'Broadcast', icon: Send, count: 0 },
+                { id: 'diagnostics', label: 'Health', icon: Activity, count: 0 },
+                { id: 'reset', label: 'Data Reset', icon: RotateCcw, count: 0 },
+              ],
+            },
           ] as const
-        ).map((item) => {
-          const Icon = item.icon;
-          const isActive = tab === item.id;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              role="tab"
-              aria-selected={isActive}
-              onClick={() => {
-                onTabTap?.();
-                setTab(item.id);
-              }}
-              className={`clay-btn min-h-[42px] px-2 rounded-xl text-[11px] sm:text-xs font-extrabold flex items-center justify-center gap-1.5 transition-all ${
-                isActive
-                  ? 'clay-btn-amber'
-                  : 'text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-100'
-              }`}
+        ).map((section) => (
+          <div key={section.group} className="space-y-1">
+            <div className="px-1 text-[10px] font-extrabold uppercase tracking-wider text-stone-400 dark:text-stone-500">
+              {section.group}
+            </div>
+            <div
+              role="tablist"
+              aria-label={section.group}
+              className={`clay-inset !rounded-2xl grid ${section.colsClass} gap-1 p-1`}
             >
-              <Icon className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate">{item.label}</span>
-              {item.count > 0 && (
-                <span
-                  className={`px-1.5 py-0.5 rounded-md text-[10px] font-mono-num font-extrabold ${
-                    isActive
-                      ? 'bg-amber-950/20 text-amber-950'
-                      : item.id === 'channels'
-                        ? 'bg-sky-500 text-white'
-                        : item.id === 'ad_ids' || item.id === 'admins'
-                          ? 'bg-emerald-600 text-white'
-                          : 'bg-rose-500 text-white'
-                  }`}
-                >
-                  {item.id === 'ad_ids' ? `${item.count}/3` : item.count}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </div>
+              {section.items.map((item) => {
+                const Icon = item.icon;
+                const isActive = tab === item.id;
+                const isResetTab = item.id === 'reset';
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    onClick={() => {
+                      onTabTap?.();
+                      setTab(item.id);
+                    }}
+                    className={`clay-btn min-h-[40px] px-2 rounded-xl text-[11px] sm:text-xs font-extrabold flex items-center justify-center gap-1.5 whitespace-nowrap transition-all ${
+                      isActive
+                        ? isResetTab
+                          ? 'clay-btn-rose'
+                          : 'clay-btn-amber'
+                        : isResetTab
+                          ? 'text-rose-600 dark:text-rose-400 hover:bg-rose-500/10'
+                          : 'text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-100'
+                    }`}
+                  >
+                    <Icon className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">{item.label}</span>
+                    {item.count > 0 && (
+                      <span
+                        className={`px-1.5 py-0.5 rounded-md text-[10px] font-mono-num font-extrabold leading-none ${
+                          isActive
+                            ? 'bg-amber-950/20 text-amber-950'
+                            : item.id === 'channels'
+                              ? 'bg-sky-500 text-white'
+                              : item.id === 'ad_ids' || item.id === 'admins' || item.id === 'tasks'
+                                ? 'bg-emerald-600 text-white'
+                                : 'bg-rose-500 text-white'
+                        }`}
+                      >
+                        {item.id === 'ad_ids' ? `${item.count}/3` : item.count}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </nav>
 
       {/* ========================================================================
           USER SEARCH, COINS, REFERS & MODERATION TAB

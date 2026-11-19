@@ -391,6 +391,7 @@ export default function App() {
   const [deposits, setDeposits] = useState<DepositOrder[]>([]);
   const [withdrawals, setWithdrawals] = useState<WithdrawalOrder[]>([]);
   const [referrals, setReferrals] = useState<ReferralRecord[]>([]);
+  const [serverReferralIds, setServerReferralIds] = useState<string[]>([]);
   const [customTasks, setCustomTasks] = useState<TaskDefinition[]>([]);
   const [adConfig, setAdConfig] = useState<AdConfig>(DEFAULT_AD_CONFIG);
   const [channelsConfig, setChannelsConfig] = useState<ChannelsConfig>(DEFAULT_CHANNELS_CONFIG);
@@ -960,6 +961,8 @@ export default function App() {
       localStorage.setItem(seenEpochKey, String(epochMs));
       localStorage.removeItem(`chickenland_profile_cache_v1_${targetUid}`);
       localStorage.removeItem(`chickenland_channels_verified_v1_${targetUid}`);
+      localStorage.removeItem(`alphagram_referral_verified_v1_${targetUid}`);
+      localStorage.removeItem(`alphagram_verified_tasks_v1_${targetUid}`);
       localStorage.removeItem('chickenland_pending_ref_v1');
       localStorage.removeItem(`chickenland_signup_bonus_seen_${targetUid}`);
     } catch {
@@ -988,6 +991,7 @@ export default function App() {
     setDeposits([]);
     setWithdrawals([]);
     setReferrals([]);
+    setServerReferralIds([]);
     setChannelVerification(null);
     setAllWithdrawRequests([]);
     setBannedUsers([]);
@@ -1225,7 +1229,55 @@ export default function App() {
       }
     };
 
+    const markReferralVerifiedLocally = (referrerUid: string) => {
+      try {
+        localStorage.setItem(
+          `alphagram_referral_verified_v1_${targetUid}`,
+          JSON.stringify({
+            status: 'verified',
+            referrerId: referrerUid,
+            verifiedAtMs: Date.now(),
+          }),
+        );
+      } catch {
+        // ignore storage errors
+      }
+      setProfile((prev) => {
+        if (prev.uid !== targetUid) return prev;
+        if (prev.referredBy && prev.referralActivated) return prev;
+        const next: UserFarmProfile = {
+          ...prev,
+          referredBy: prev.referredBy || referrerUid,
+          referralActivated: true,
+        };
+        latestProfileRef.current = next;
+        saveCachedPlayerProfile(next);
+        return next;
+      });
+    };
+
+    const syncDirectReferralRecord = async (referrerIdValue: string, userProfile: UserFarmProfile) => {
+      try {
+        await fetch(resolveApiUrl('/api/referrals'), {
+          method: 'POST',
+          cache: 'no-store',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: targetUid,
+            referrerId: referrerIdValue,
+            displayName: userProfile.displayName,
+            handle: userProfile.handle,
+            photoUrl: userProfile.photoUrl,
+          }),
+        });
+      } catch {
+        // Non-fatal fallback
+      }
+    };
+
     if (currentProfile.referredBy) {
+      markReferralVerifiedLocally(currentProfile.referredBy);
+      void syncDirectReferralRecord(currentProfile.referredBy, currentProfile);
       clearPendingRef();
       return;
     }
@@ -1269,6 +1321,7 @@ export default function App() {
         }
         const latestBefore = latestProfileRef.current;
         if (latestBefore.uid === targetUid && latestBefore.referredBy) {
+          markReferralVerifiedLocally(latestBefore.referredBy);
           clearPendingRef();
           return;
         }
@@ -1293,6 +1346,7 @@ export default function App() {
           ) as {
             ok?: boolean;
             applied?: boolean;
+            alreadyLinked?: boolean;
             reason?: string;
             referrerUid?: string;
             referrerName?: string;
@@ -1308,11 +1362,12 @@ export default function App() {
             if (payload.applied) {
               const bonus = Number(payload.referredBonusCoins ?? 100);
               const serverNextCoins = Number(payload.nextReferredCoins);
+              const resolvedReferrer = payload.referrerUid || refCode;
               setProfile((prev) => {
                 if (prev.uid !== targetUid || prev.referredBy) return prev;
                 const next: UserFarmProfile = {
                   ...prev,
-                  referredBy: payload.referrerUid || prev.referredBy,
+                  referredBy: resolvedReferrer,
                   referralActivated: true,
                   coins: Number.isFinite(serverNextCoins) ? serverNextCoins : prev.coins + bonus,
                 };
@@ -1320,6 +1375,8 @@ export default function App() {
                 saveCachedPlayerProfile(next);
                 return next;
               });
+              markReferralVerifiedLocally(resolvedReferrer);
+              void syncDirectReferralRecord(resolvedReferrer, latestBefore);
               if (!payload.botDmSent && payload.referrerUid) {
                 void sendLocalReferralDmFallback(
                   payload.referrerUid,
@@ -1332,11 +1389,21 @@ export default function App() {
               clearPendingRef();
               return;
             }
-            if (
-              payload.reason === 'already_linked' ||
-              payload.reason === 'self_referral' ||
-              payload.reason === 'invalid_code'
-            ) {
+            if (payload.reason === 'already_linked') {
+              if (payload.referrerUid) {
+                markReferralVerifiedLocally(payload.referrerUid);
+              }
+              clearPendingRef();
+              return;
+            }
+            if (payload.reason === 'self_referral') {
+              clearPendingRef();
+              return;
+            }
+            if (payload.reason === 'invalid_code') {
+              // Persist direct referral entry and mark local entry verified upon landing
+              void syncDirectReferralRecord(refCode, latestBefore);
+              markReferralVerifiedLocally(refCode);
               clearPendingRef();
               return;
             }
@@ -1359,6 +1426,8 @@ export default function App() {
             latestProfileRef.current = refRes.profile;
             setProfile(refRes.profile);
             saveCachedPlayerProfile(refRes.profile);
+            markReferralVerifiedLocally(refRes.referrerUid);
+            void syncDirectReferralRecord(refRes.referrerUid, refRes.profile);
             showToast(`+100 welcome coins! Joined via ${refRes.referrerName}'s referral!`);
             const notifyPayload = await safeFetchJson<{ ok?: boolean; sent?: boolean }>('/api/referrals/notify', {
               method: 'POST',
@@ -1382,12 +1451,16 @@ export default function App() {
           }
 
           const errLow = refRes.error.toLowerCase();
-          if (
-            errLow.includes('already') ||
+          if (errLow.includes('not found') || errLow.includes('already')) {
+            if (!errLow.includes('already')) {
+              void syncDirectReferralRecord(refCode, snapshotProfile);
+              markReferralVerifiedLocally(refCode);
+            }
+            clearPendingRef();
+          } else if (
             errLow.includes('own') ||
             errLow.includes('yourself') ||
-            errLow.includes('invalid') ||
-            errLow.includes('not found')
+            errLow.includes('invalid')
           ) {
             clearPendingRef();
           } else {
@@ -1546,6 +1619,53 @@ export default function App() {
       document.removeEventListener('visibilitychange', handleResumeCheck);
     };
   }, [activePlayerId, isBanned, isPlayerSynced, pendingRefCode, profile.referredBy, showToast]);
+
+  // Sync server /api/referrals storage alongside Firestore referrals so Friends tab stays complete
+  useEffect(() => {
+    if (!activePlayerId || isBanned) return;
+    let cancelled = false;
+    const fetchServerReferrals = async () => {
+      try {
+        const res = await fetch(
+          resolveApiUrl(`/api/referrals?userId=${encodeURIComponent(activePlayerId)}`),
+          { cache: 'no-store' },
+        );
+        if (!res.ok || cancelled) return;
+        const payload = (await res.json().catch(() => null)) as {
+          referrals?: unknown;
+          referrer?: string | null;
+        } | null;
+        if (cancelled || !payload) return;
+        if (Array.isArray(payload.referrals)) {
+          setServerReferralIds(
+            payload.referrals
+              .map((id) => String(id || '').trim())
+              .filter(Boolean),
+          );
+        }
+        if (payload.referrer && !latestProfileRef.current.referredBy) {
+          try {
+            localStorage.setItem(
+              `alphagram_referral_verified_v1_${activePlayerId}`,
+              JSON.stringify({
+                status: 'verified',
+                referrerId: payload.referrer,
+                verifiedAtMs: Date.now(),
+              }),
+            );
+          } catch {
+            // ignore storage errors
+          }
+        }
+      } catch {
+        // Non-fatal fallback
+      }
+    };
+    void fetchServerReferrals();
+    return () => {
+      cancelled = true;
+    };
+  }, [activePlayerId, activeTab, isBanned, isPlayerSynced, referrals.length]);
 
   const persistMutation = useCallback(
     async (params: {
@@ -1890,7 +2010,8 @@ export default function App() {
       actionUrl: string,
       options?: { requireChannelCheck?: boolean },
     ): Promise<{ joined: boolean; handle?: string; status?: string; reason?: string }> => {
-      if (options?.requireChannelCheck === false) {
+      // Only enforce Telegram getChatMember verification when Enable Channel Check is explicitly enabled
+      if (!options?.requireChannelCheck) {
         return { joined: true };
       }
       if (!actionUrl) {
@@ -2194,6 +2315,33 @@ export default function App() {
     });
   }, [activeChannelsSignature, channelsGateEnabled, executeClaimPromo]);
 
+  // Auto-verify required Telegram channels upon returning from Telegram so users never need manual Retry
+  useEffect(() => {
+    if (!channelsGateEnabled || isBanned) return;
+    if (channelVerification?.allJoined) return;
+    const onReturnCheck = () => {
+      if (document.visibilityState === 'hidden') return;
+      if (!showChannelGateModal && subView !== 'withdraw') return;
+      const now = Date.now();
+      if (now - lastAutoChannelCheckAtRef.current < 2500) return;
+      lastAutoChannelCheckAtRef.current = now;
+      void handleCheckChannels({ silent: true });
+    };
+    window.addEventListener('focus', onReturnCheck);
+    document.addEventListener('visibilitychange', onReturnCheck);
+    return () => {
+      window.removeEventListener('focus', onReturnCheck);
+      document.removeEventListener('visibilitychange', onReturnCheck);
+    };
+  }, [
+    channelVerification?.allJoined,
+    channelsGateEnabled,
+    handleCheckChannels,
+    isBanned,
+    showChannelGateModal,
+    subView,
+  ]);
+
   const pendingEggs = useMemo(
     () => calculatePendingEggs(profile, nowMs),
     [profile, nowMs],
@@ -2209,6 +2357,31 @@ export default function App() {
     }
     return Array.from(byId.values());
   }, [referralTransactions, transactions]);
+
+  const mergedReferrals = useMemo(() => {
+    const byUid = new Map<string, ReferralRecord>();
+    for (const r of referrals) {
+      const key = (r.referredUid || r.id || '').replace(/^tg_/, '');
+      if (key) byUid.set(key, r);
+    }
+    for (const rawId of serverReferralIds) {
+      const cleanId = rawId.trim();
+      const normKey = cleanId.replace(/^tg_/, '');
+      if (!cleanId || byUid.has(normKey)) continue;
+      byUid.set(normKey, {
+        id: cleanId,
+        referrerUid: profile.uid,
+        referredUid: cleanId,
+        referredName: `Farmer ${normKey.slice(-4).toUpperCase()}`,
+        referredHandle: /^\d{4,20}$/.test(normKey) ? `@tg_${normKey}` : `@${normKey.slice(0, 16)}`,
+        status: 'active',
+        coinsEarned: REFERRER_SIGNUP_BONUS_COINS,
+        toppedUpUsd: 0,
+        createdAtMs: Date.now(),
+      });
+    }
+    return Array.from(byUid.values());
+  }, [profile.uid, referrals, serverReferralIds]);
 
   const todayStr = getTodayDateString();
   const hasClaimableTasks =
@@ -5181,7 +5354,7 @@ export default function App() {
       return (
         <FriendsView
           profile={profile}
-          referrals={referrals}
+          referrals={mergedReferrals}
           transactions={mergedReferralTransactions}
           botUsername={telegramBotConfig.botUsername}
           appShortName={telegramBotConfig.appShortName}

@@ -88,6 +88,11 @@ import {
   normalizeTelegramBotUsername,
   normalizeTelegramMiniAppShortName,
 } from './src/utils/telegram.ts';
+import {
+  getMergedReferralsForUser,
+  resetReferralStorage,
+  saveReferral,
+} from './src/server/referralStorage.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1803,8 +1808,11 @@ async function applyReferralInServerDb(params: {
     });
 
     if (alreadyLinked) {
-      return { ok: true, applied: false, alreadyLinked: true, reason: 'already_linked' };
+      saveReferral(referredUid, referrerUid);
+      return { ok: true, applied: false, alreadyLinked: true, reason: 'already_linked', referrerUid };
     }
+
+    saveReferral(referredUid, referrerUid);
 
     let botDmSent = false;
     let botDmReason: string | undefined;
@@ -4628,6 +4636,78 @@ async function startServer() {
     res.json({ ok: true, registered: true, enabled: next.enabled });
   });
 
+  app.post('/api/referrals', async (req, res) => {
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`ref_direct:${ip}`, 40, 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({ error: 'Too many requests.' });
+      return;
+    }
+    const { userId, referrerId, displayName, handle, photoUrl } = (req.body || {}) as {
+      userId?: string;
+      referrerId?: string;
+      displayName?: string;
+      handle?: string;
+      photoUrl?: string;
+    };
+    const cleanUserId = String(userId || '').trim();
+    const cleanReferrerId = String(referrerId || '').trim();
+    if (!cleanUserId || !cleanReferrerId) {
+      res.status(400).json({ error: 'Missing userId or referrerId' });
+      return;
+    }
+
+    const normUser = cleanUserId.replace(/^tg_/, '');
+    const normRef = cleanReferrerId.replace(/^tg_/, '');
+    if (cleanUserId === cleanReferrerId || (normUser && normRef && normUser === normRef)) {
+      res.status(400).json({ error: 'Cannot refer yourself' });
+      return;
+    }
+
+    saveReferral(cleanUserId, cleanReferrerId);
+
+    // Best-effort sync with Firestore reward ledger & Bot DM notification
+    let applyResult: Awaited<ReturnType<typeof applyReferralInServerDb>> | null = null;
+    if (isValidSafeId(cleanUserId)) {
+      const targetUid = /^\d{4,20}$/.test(cleanUserId) ? `tg_${cleanUserId}` : cleanUserId;
+      applyResult = await applyReferralInServerDb({
+        referredUid: targetUid,
+        refCode: cleanReferrerId,
+        displayName,
+        handle,
+        photoUrl,
+      }).catch(() => null);
+    }
+
+    res.json({
+      success: true,
+      verified: true,
+      status: 'verified',
+      ...(applyResult?.applied
+        ? {
+            applied: true,
+            referrerUid: applyResult.referrerUid,
+            referrerName: applyResult.referrerName,
+            coinsRewarded: applyResult.coinsRewarded,
+          }
+        : {}),
+    });
+  });
+
+  app.get('/api/referrals', (req, res) => {
+    const userId = String(req.query.userId || '').trim();
+    if (!userId) {
+      res.status(400).json({ error: 'Missing userId' });
+      return;
+    }
+    const merged = getMergedReferralsForUser(userId);
+    res.json({
+      referrals: merged.referrals,
+      referrer: merged.referrer,
+      status: 'verified',
+    });
+  });
+
   app.post('/api/referrals/apply', async (req, res) => {
     const ip = getClientIp(req);
     const rl = checkRateLimit(`ref_apply:${ip}`, 25, 60_000);
@@ -4662,6 +4742,10 @@ async function startServer() {
       photoUrl: body.photoUrl,
     });
 
+    if (result.ok && result.referrerUid && referredUid) {
+      saveReferral(referredUid, result.referrerUid);
+    }
+
     const numId = extractTelegramNumericUserId(referredUid);
     if (
       numId &&
@@ -4682,7 +4766,10 @@ async function startServer() {
       });
       return;
     }
-    res.json(payload);
+    res.json({
+      ...payload,
+      ...(payload.applied || payload.alreadyLinked ? { status: 'verified' } : {}),
+    });
   });
 
   app.post('/api/referrals/claim-pending', async (req, res) => {
@@ -5759,6 +5846,7 @@ async function startServer() {
 
       // Clear server in-memory runtime caches (preserve bot config & session secret)
       pendingReferralMap.clear();
+      resetReferralStorage();
       reminderStore.clear();
       channelCheckLogs.length = 0;
       processedServerTxHashes.clear();
