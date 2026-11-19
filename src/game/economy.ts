@@ -20,6 +20,7 @@ import type {
   SeasonConfig,
   TaskCategory,
   TaskDefinition,
+  TaskPricingConfig,
   TaskSortOption,
   TransactionEntry,
   UserFarmProfile,
@@ -1532,12 +1533,45 @@ export function completeTask(
 
 export const USER_TASK_MIN_REWARD_COINS = 50;
 export const USER_TASK_MAX_REWARD_COINS = 100_000;
-export const USER_TASK_MIN_SLOTS = 30;
+export const USER_TASK_MIN_SLOTS = 1;
 export const USER_TASK_MAX_SLOTS = 10_000;
 export const USER_TASK_PLATFORM_FEE_RATE = 0.1;
-export const USER_TASK_MIN_FEE_COINS = 500;
-export const USER_TASK_CHANNEL_CHECK_FEE_COINS = 1000;
-export const USER_TASK_MIN_TOTAL_COST_COINS = 5000;
+export const USER_TASK_MIN_FEE_COINS = 0;
+export const USER_TASK_CHANNEL_CHECK_FEE_COINS = 5_000;
+export const USER_TASK_MIN_TOTAL_COST_COINS = 10_000;
+
+export const DEFAULT_TASK_PRICING_CONFIG: TaskPricingConfig = {
+  minBudgetCoins: USER_TASK_MIN_TOTAL_COST_COINS,
+  channelCheckFeeCoins: USER_TASK_CHANNEL_CHECK_FEE_COINS,
+  platformFeeRate: USER_TASK_PLATFORM_FEE_RATE,
+  updatedAtMs: 0,
+};
+
+export function resolveTaskPricingConfig(
+  pricing?: Partial<TaskPricingConfig> | null,
+): TaskPricingConfig {
+  const minBudgetRaw = Number(pricing?.minBudgetCoins);
+  const checkFeeRaw = Number(pricing?.channelCheckFeeCoins);
+  const feeRateRaw = Number(pricing?.platformFeeRate);
+  const minBudgetCoins =
+    Number.isFinite(minBudgetRaw) && minBudgetRaw >= 100
+      ? Math.min(1_000_000, Math.max(1_000, Math.round(minBudgetRaw)))
+      : USER_TASK_MIN_TOTAL_COST_COINS;
+  const channelCheckFeeCoins =
+    Number.isFinite(checkFeeRaw) && checkFeeRaw >= 0
+      ? Math.min(500_000, Math.max(0, Math.round(checkFeeRaw)))
+      : USER_TASK_CHANNEL_CHECK_FEE_COINS;
+  const platformFeeRate =
+    Number.isFinite(feeRateRaw) && feeRateRaw >= 0
+      ? Math.min(0.5, Math.max(0, Number(feeRateRaw.toFixed(4))))
+      : USER_TASK_PLATFORM_FEE_RATE;
+  return {
+    minBudgetCoins,
+    channelCheckFeeCoins,
+    platformFeeRate,
+    updatedAtMs: Math.max(0, Number(pricing?.updatedAtMs ?? 0) || 0),
+  };
+}
 
 export interface PaidTaskCostBreakdown {
   rewardCoins: number;
@@ -1553,7 +1587,9 @@ export function calculatePaidTaskCost(
   rewardCoins: number,
   totalSlots: number,
   requireChannelCheck = false,
+  pricing?: Partial<TaskPricingConfig> | null,
 ): PaidTaskCostBreakdown {
+  const resolved = resolveTaskPricingConfig(pricing);
   const safeReward = Math.max(
     USER_TASK_MIN_REWARD_COINS,
     Math.min(USER_TASK_MAX_REWARD_COINS, Math.floor(Number(rewardCoins) || 0)),
@@ -1563,11 +1599,13 @@ export function calculatePaidTaskCost(
     Math.min(USER_TASK_MAX_SLOTS, Math.floor(Number(totalSlots) || 0)),
   );
   const rewardPoolCoins = safeReward * safeSlots;
-  const platformFeeCoins = Math.max(
-    USER_TASK_MIN_FEE_COINS,
-    Math.round(rewardPoolCoins * USER_TASK_PLATFORM_FEE_RATE),
-  );
-  const channelCheckFeeCoins = requireChannelCheck ? USER_TASK_CHANNEL_CHECK_FEE_COINS : 0;
+  const feeRate = resolved.platformFeeRate;
+  const grossBaseCoins =
+    feeRate > 0
+      ? Math.round(rewardPoolCoins / Math.max(0.05, 1 - feeRate))
+      : rewardPoolCoins;
+  const platformFeeCoins = Math.max(USER_TASK_MIN_FEE_COINS, grossBaseCoins - rewardPoolCoins);
+  const channelCheckFeeCoins = requireChannelCheck ? resolved.channelCheckFeeCoins : 0;
   return {
     rewardCoins: safeReward,
     totalSlots: safeSlots,
@@ -1591,7 +1629,9 @@ export function calculatePaidTaskFromBudget(
   budgetCoins: number,
   rewardCoinsInput: number = USER_TASK_MIN_REWARD_COINS,
   requireChannelCheck = false,
+  pricing?: Partial<TaskPricingConfig> | null,
 ): PaidTaskBudgetPreview {
+  const resolved = resolveTaskPricingConfig(pricing);
   const safeBudget = Math.max(0, Math.floor(Number(budgetCoins) || 0));
   const rawReward = Math.floor(Number(rewardCoinsInput) || 0);
   const rewardValid =
@@ -1600,19 +1640,21 @@ export function calculatePaidTaskFromBudget(
     USER_TASK_MIN_REWARD_COINS,
     Math.min(USER_TASK_MAX_REWARD_COINS, rawReward || USER_TASK_MIN_REWARD_COINS),
   );
-  const channelCheckFeeCoins = requireChannelCheck ? USER_TASK_CHANNEL_CHECK_FEE_COINS : 0;
-  const minTotalCostForMode = USER_TASK_MIN_TOTAL_COST_COINS + channelCheckFeeCoins;
+  const feeRate = resolved.platformFeeRate;
+  const channelCheckFeeCoins = requireChannelCheck ? resolved.channelCheckFeeCoins : 0;
+  const minTotalCostForMode = resolved.minBudgetCoins + channelCheckFeeCoins;
   const minBudgetForReward = Math.max(
     minTotalCostForMode,
-    calculatePaidTaskCost(safeReward, USER_TASK_MIN_SLOTS, requireChannelCheck).totalCostCoins,
+    calculatePaidTaskCost(safeReward, USER_TASK_MIN_SLOTS, requireChannelCheck, resolved).totalCostCoins,
   );
 
   const computeRaw = (slots: number) => {
     const rewardPoolCoins = slots * safeReward;
-    const platformFeeCoins = Math.max(
-      USER_TASK_MIN_FEE_COINS,
-      Math.round(rewardPoolCoins * USER_TASK_PLATFORM_FEE_RATE),
-    );
+    const grossBaseCoins =
+      feeRate > 0
+        ? Math.round(rewardPoolCoins / Math.max(0.05, 1 - feeRate))
+        : rewardPoolCoins;
+    const platformFeeCoins = Math.max(USER_TASK_MIN_FEE_COINS, grossBaseCoins - rewardPoolCoins);
     return {
       rewardPoolCoins,
       platformFeeCoins,
@@ -1627,7 +1669,7 @@ export function calculatePaidTaskFromBudget(
       rewardCoins: safeReward,
       totalSlots: 0,
       rewardPoolCoins: 0,
-      platformFeeCoins: USER_TASK_MIN_FEE_COINS,
+      platformFeeCoins: Math.round(resolved.minBudgetCoins * feeRate),
       channelCheckFeeCoins,
       requireChannelCheck: Boolean(requireChannelCheck),
       totalCostCoins: 0,
@@ -1644,7 +1686,7 @@ export function calculatePaidTaskFromBudget(
       rewardCoins: safeReward,
       totalSlots: 0,
       rewardPoolCoins: 0,
-      platformFeeCoins: USER_TASK_MIN_FEE_COINS,
+      platformFeeCoins: Math.round(resolved.minBudgetCoins * feeRate),
       channelCheckFeeCoins,
       requireChannelCheck: Boolean(requireChannelCheck),
       totalCostCoins: 0,
@@ -1652,16 +1694,17 @@ export function calculatePaidTaskFromBudget(
       minBudgetForReward,
       valid: false,
       error: requireChannelCheck
-        ? `Minimum ${minTotalCostForMode.toLocaleString()} coins required (includes +${USER_TASK_CHANNEL_CHECK_FEE_COINS.toLocaleString()} channel check fee).`
-        : `Minimum ${USER_TASK_MIN_TOTAL_COST_COINS.toLocaleString()} coins required.`,
+        ? `Minimum ${minTotalCostForMode.toLocaleString()} coins required (includes +${resolved.channelCheckFeeCoins.toLocaleString()} channel check fee).`
+        : `Minimum ${resolved.minBudgetCoins.toLocaleString()} coins required.`,
     };
   }
 
   const spendableAfterChannelCheck = Math.max(0, safeBudget - channelCheckFeeCoins);
-  const maxLinear = Math.floor((spendableAfterChannelCheck - USER_TASK_MIN_FEE_COINS) / safeReward);
-  const maxRate =
-    Math.floor(spendableAfterChannelCheck / (safeReward * (1 + USER_TASK_PLATFORM_FEE_RATE))) + 3;
-  let slots = Math.max(0, Math.min(USER_TASK_MAX_SLOTS, maxLinear, maxRate));
+  const netPoolBudget = Math.max(0, Math.floor(spendableAfterChannelCheck * Math.max(0.05, 1 - feeRate)));
+  let slots = Math.max(
+    0,
+    Math.min(USER_TASK_MAX_SLOTS, Math.floor(netPoolBudget / safeReward) + 2),
+  );
 
   while (slots > 0 && computeRaw(slots).totalCostCoins > safeBudget) {
     slots -= 1;
@@ -1673,14 +1716,17 @@ export function calculatePaidTaskFromBudget(
       rewardCoins: safeReward,
       totalSlots: slots,
       rewardPoolCoins: slots * safeReward,
-      platformFeeCoins: slots > 0 ? computeRaw(slots).platformFeeCoins : USER_TASK_MIN_FEE_COINS,
+      platformFeeCoins:
+        slots > 0
+          ? computeRaw(slots).platformFeeCoins
+          : Math.round(spendableAfterChannelCheck * feeRate),
       channelCheckFeeCoins,
       requireChannelCheck: Boolean(requireChannelCheck),
       totalCostCoins: slots > 0 ? computeRaw(slots).totalCostCoins : 0,
       unspentCoins: safeBudget,
       minBudgetForReward,
       valid: false,
-      error: `With ${safeReward.toLocaleString()} coins/join, enter at least ${minBudgetForReward.toLocaleString()} coins (for ${USER_TASK_MIN_SLOTS} slots).`,
+      error: `With ${safeReward.toLocaleString()} coins/join, enter at least ${minBudgetForReward.toLocaleString()} coins (for ${USER_TASK_MIN_SLOTS} slot).`,
     };
   }
 
@@ -1713,6 +1759,7 @@ export function createPaidTaskOrder(
     requireChannelCheck?: boolean;
   },
   nowMs: number,
+  pricing?: Partial<TaskPricingConfig> | null,
 ):
   | {
       profile: UserFarmProfile;
@@ -1737,12 +1784,16 @@ export function createPaidTaskOrder(
     };
   }
 
+  const resolved = resolveTaskPricingConfig(pricing);
   const requireChannelCheck = Boolean(input.requireChannelCheck);
-  const cost = calculatePaidTaskCost(rawReward, rawSlots, requireChannelCheck);
+  const cost = calculatePaidTaskCost(rawReward, rawSlots, requireChannelCheck, resolved);
   const minRequiredCost =
-    USER_TASK_MIN_TOTAL_COST_COINS +
-    (requireChannelCheck ? USER_TASK_CHANNEL_CHECK_FEE_COINS : 0);
-  if (profile.coins < minRequiredCost || profile.coins < cost.totalCostCoins) {
+    resolved.minBudgetCoins + (requireChannelCheck ? resolved.channelCheckFeeCoins : 0);
+  if (
+    profile.coins < minRequiredCost ||
+    profile.coins < cost.totalCostCoins ||
+    cost.totalCostCoins + rawReward < minRequiredCost
+  ) {
     return {
       error: `Need at least ${Math.max(minRequiredCost, cost.totalCostCoins).toLocaleString()} coins to post this task (you have ${profile.coins.toLocaleString()}).`,
     };
@@ -2864,6 +2915,7 @@ const COOP_FEVER_ADS_PREFIX = '__cf_a:';
 const AUTO_HARVEST_UNTIL_PREFIX = '__ah_u:';
 const TG_REMINDERS_PREFIX = '__tgr:';
 const REINVEST_DATE_PREFIX = '__reinv:';
+const RESET_EPOCH_PREFIX = '__rst:';
 const TASK_META_PREFIX = '__m:';
 const TASK_SUBTITLE_MAX_LEN = 120;
 
@@ -2875,6 +2927,7 @@ export interface AchievementTokenExtras {
   autoHarvestUntilMs?: number;
   telegramRemindersEnabled?: boolean;
   lastReinvestDate?: string;
+  resetEpochMs?: number;
 }
 
 function isInternalAchievementStateToken(id: string): boolean {
@@ -2886,7 +2939,8 @@ function isInternalAchievementStateToken(id: string): boolean {
     id.startsWith(COOP_FEVER_ADS_PREFIX) ||
     id.startsWith(AUTO_HARVEST_UNTIL_PREFIX) ||
     id.startsWith(TG_REMINDERS_PREFIX) ||
-    id.startsWith(REINVEST_DATE_PREFIX)
+    id.startsWith(REINVEST_DATE_PREFIX) ||
+    id.startsWith(RESET_EPOCH_PREFIX)
   );
 }
 
@@ -2938,6 +2992,10 @@ export function encodeAchievementsWithAds(
   if (/^\d{4}-\d{2}-\d{2}$/.test(cleanReinvDate)) {
     stateTokens.push(`${REINVEST_DATE_PREFIX}${cleanReinvDate}`);
   }
+  const rstEpoch = Math.max(0, Math.floor(Number(extras.resetEpochMs ?? 0) || 0));
+  if (rstEpoch > 0) {
+    stateTokens.push(`${RESET_EPOCH_PREFIX}${rstEpoch}`);
+  }
 
   const maxRealIds = Math.max(0, 50 - stateTokens.length);
   return [...cleanIds.slice(-maxRealIds), ...stateTokens];
@@ -2958,6 +3016,7 @@ export function decodeAchievementsAndAds(
   autoHarvestUntilMs: number;
   telegramRemindersEnabled: boolean;
   lastReinvestDate: string;
+  resetEpochMs: number;
 } {
   const arr = Array.isArray(rawClaimedIds) ? rawClaimedIds : [];
   const cleanIds: string[] = [];
@@ -2971,6 +3030,7 @@ export function decodeAchievementsAndAds(
   let tokenAhUntil = 0;
   let tokenTgReminders: boolean | undefined = undefined;
   let tokenReinvDate = '';
+  let tokenResetEpoch = 0;
 
   for (const item of arr) {
     const str = String(item || '').trim();
@@ -3031,6 +3091,13 @@ export function decodeAchievementsAndAds(
       }
       continue;
     }
+    if (str.startsWith(RESET_EPOCH_PREFIX)) {
+      const parsed = Math.floor(Number(str.slice(RESET_EPOCH_PREFIX.length)));
+      if (Number.isFinite(parsed) && parsed > tokenResetEpoch) {
+        tokenResetEpoch = parsed;
+      }
+      continue;
+    }
     if (!seen.has(str)) {
       seen.add(str);
       cleanIds.push(str);
@@ -3045,6 +3112,7 @@ export function decodeAchievementsAndAds(
   const explicitCfAds = Math.max(0, Math.floor(Number(explicitExtras.coopFeverAdsWatched ?? 0) || 0));
   const explicitAhUntil = Math.max(0, Math.floor(Number(explicitExtras.autoHarvestUntilMs ?? 0) || 0));
   const explicitReinvDate = String(explicitExtras.lastReinvestDate || '').trim();
+  const explicitResetEpoch = Math.max(0, Math.floor(Number(explicitExtras.resetEpochMs ?? 0) || 0));
 
   return {
     claimedAchievementIds: cleanIds,
@@ -3060,6 +3128,7 @@ export function decodeAchievementsAndAds(
         : (tokenTgReminders ?? true),
     lastReinvestDate:
       explicitReinvDate > tokenReinvDate ? explicitReinvDate : tokenReinvDate,
+    resetEpochMs: Math.max(tokenResetEpoch, explicitResetEpoch),
   };
 }
 

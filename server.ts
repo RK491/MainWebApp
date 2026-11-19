@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { initializeApp } from 'firebase/app';
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocFromServer,
@@ -21,6 +22,7 @@ import {
   serverTimestamp,
   setDoc,
   startAfter,
+  updateDoc,
   where,
   type DocumentData,
   type DocumentReference,
@@ -58,6 +60,7 @@ import {
   REFERRER_SIGNUP_BONUS_COINS,
   renderPayoutChannelApproveMessage,
   renderWithdrawApproveMessage,
+  SIGNUP_BONUS_COINS,
 } from './src/game/economy.ts';
 import type {
   ChannelCheckDiagnosticLog,
@@ -1195,6 +1198,29 @@ function getRecentChannelCheckLogs(limitCount = 5): ChannelCheckDiagnosticLog[] 
 
 loadChannelCheckLogsFromDisk();
 
+async function formatTelegramChannelCheckError(
+  rawDescription: string | undefined,
+  handle: string,
+): Promise<string> {
+  const desc = redactBotToken(String(rawDescription || '').trim());
+  const low = desc.toLowerCase();
+  if (
+    low.includes('member list is inaccessible') ||
+    low.includes('not enough rights') ||
+    low.includes('chat_admin_required') ||
+    low.includes('bot is not a member') ||
+    low.includes('administrator')
+  ) {
+    const botUsername = await resolveTelegramBotUsername().catch(() => '');
+    const botTag = botUsername ? `@${botUsername.replace(/^@+/, '')}` : 'the bot';
+    return `Make ${botTag} an Admin in ${handle} to verify joins.`;
+  }
+  if (low.includes('chat not found') || low.includes('username not found')) {
+    return `Channel ${handle} not found. Check the channel link or make sure it is public.`;
+  }
+  return desc || `Could not confirm ${handle} membership. Make sure our bot is Admin there.`;
+}
+
 async function fetchTelegramChatMember(chatId: string, userId: string): Promise<{
   ok: boolean;
   userNotFound?: boolean;
@@ -2211,7 +2237,13 @@ async function processTelegramUpdate(update: TelegramUpdatePayload): Promise<boo
     const text = String(msg.text || '').trim();
     const startMatch = text.match(/^\/start(?:@[a-zA-Z0-9_]+)?(?:\s+([^\s]+))?/i);
     const isStart = Boolean(startMatch);
-    const startPayload = (startMatch?.[1] || '').replace(/^(?:ref|r)_/i, '').trim();
+    let rawStartArg = String(startMatch?.[1] || '').trim();
+    try {
+      rawStartArg = decodeURIComponent(rawStartArg);
+    } catch {
+      // Ignore malformed URI components
+    }
+    const startPayload = rawStartArg.replace(/^(?:ref|r)_/i, '').trim();
     const saved = await upsertBotSubscriber({
       chatId: rawChatId,
       username: msg.from.username,
@@ -2305,6 +2337,7 @@ async function processTelegramUpdate(update: TelegramUpdatePayload): Promise<boo
   return captured;
 }
 
+let lastLoggedActiveWebhookUrl = '';
 let botPollInFlight = false;
 async function pollTelegramBotUpdates(): Promise<{
   ok: boolean;
@@ -2329,12 +2362,22 @@ async function pollTelegramBotUpdates(): Promise<{
       result?: { url?: string };
     };
     if (infoData.ok && infoData.result?.url) {
+      if (lastLoggedActiveWebhookUrl !== infoData.result.url) {
+        lastLoggedActiveWebhookUrl = infoData.result.url;
+        recordServerLog(
+          'warn',
+          'bot_poller',
+          'External Telegram webhook is active; /start getUpdates polling is paused',
+          infoData.result.url,
+        );
+      }
       botHeartbeatState.lastHeartbeatAtMs = Date.now();
       botHeartbeatState.lastHeartbeatOk = true;
       botHeartbeatState.webhookUrl = infoData.result.url;
       botHeartbeatState.error = null;
       return { ok: true, webhookActive: true, newUpdates: 0 };
     }
+    lastLoggedActiveWebhookUrl = '';
 
     const params = new URLSearchParams({
       limit: '100',
@@ -3189,7 +3232,7 @@ async function startServer() {
                 status: 'left',
               };
             }
-            const errText = tgData.description || 'Make sure the bot is admin in this channel';
+            const errText = await formatTelegramChannelCheckError(tgData.description, ch.handle);
             logChannelRows.push({
               handle: ch.handle,
               joined: false,
@@ -3382,6 +3425,10 @@ async function startServer() {
         return;
       }
       if (!tgData.ok || !tgData.result) {
+        const friendlyErr = await formatTelegramChannelCheckError(
+          tgData.description,
+          normalized.handle,
+        );
         recordChannelCheckDiagnosticLog({
           endpoint: 'check-task-channel',
           userIdSource: verifiedActor ? 'verified' : 'player_id',
@@ -3389,7 +3436,7 @@ async function startServer() {
           verificationMode: 'telegram_bot',
           allJoined: false,
           botConfigured: true,
-          error: tgData.description || 'channel_check_failed',
+          error: friendlyErr,
           channels: [
             {
               handle: normalized.handle,
@@ -3397,7 +3444,7 @@ async function startServer() {
               status: 'api_error',
               rawTelegramOk: false,
               errorCode: tgData.errorCode,
-              rawDescription: tgData.description || 'channel_check_failed',
+              rawDescription: tgData.description || friendlyErr,
               targetChatIdUsed: tgData.targetChatIdUsed,
             },
           ],
@@ -3408,7 +3455,7 @@ async function startServer() {
           joined: false,
           handle: normalized.handle,
           status: 'api_error',
-          reason: tgData.description || 'Could not confirm membership',
+          reason: friendlyErr,
         });
         return;
       }
@@ -3440,7 +3487,7 @@ async function startServer() {
         joined,
         handle: normalized.handle,
         status,
-        ...(!joined ? { reason: 'Not joined yet' } : {}),
+        ...(!joined ? { reason: `Not joined ${normalized.handle} yet — tap Join, then Retry.` } : {}),
       });
     } catch {
       res.json({
@@ -5442,6 +5489,318 @@ async function startServer() {
       ...(userDmReason ? { userDmReason } : {}),
       ...(channelReason ? { reason: channelReason } : {}),
     });
+  });
+
+  app.post('/api/admin/data-reset', async (req, res) => {
+    const body = (req.body || {}) as { token?: string; initData?: string; confirm?: string };
+    const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
+    const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
+    const resolvedPlayerId = resolveVerifiedAdminActor({
+      req,
+      token: body.token,
+      initData: body.initData,
+      extraAdminIds: effectiveExtraAdmins,
+    });
+    if (!resolvedPlayerId) {
+      res.status(403).json({ ok: false, error: 'Verified Admin session required.' });
+      return;
+    }
+    if (String(body.confirm || '').trim().toUpperCase() !== 'RESET') {
+      res.status(400).json({ ok: false, error: 'Confirmation text "RESET" is required.' });
+      return;
+    }
+
+    const nowMs = Date.now();
+    const resetTokens = encodeAchievementsWithAds([], 0, { resetEpochMs: nowMs });
+    let playersResetCount = 0;
+    let referralsDeletedCount = 0;
+    let tasksDeletedCount = 0;
+    let promosDeletedCount = 0;
+    let bansDeletedCount = 0;
+    let withdrawalsRejectedCount = 0;
+
+    try {
+      if (serverDb) {
+        const deleteCollectionPaged = async (colName: string, pageSize: number): Promise<number> => {
+          let removed = 0;
+          for (let page = 0; page < 50; page++) {
+            const snap = await getDocs(query(collection(serverDb!, colName), limit(pageSize)));
+            if (snap.empty) break;
+            for (const d of snap.docs) {
+              await deleteDoc(d.ref);
+              removed += 1;
+            }
+            if (snap.size < pageSize) break;
+          }
+          return removed;
+        };
+
+        tasksDeletedCount = await deleteCollectionPaged('tasks', 100);
+        promosDeletedCount = await deleteCollectionPaged('promo_codes', 50);
+        bansDeletedCount = await deleteCollectionPaged('banned_users', 100);
+
+        // Reject any pending withdraw_requests (rules forbid deletion on withdraw_requests)
+        let lastWdCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+        for (let page = 0; page < 50; page++) {
+          const wdQ: Query<DocumentData> = lastWdCursor
+            ? query(
+                collection(serverDb, 'withdraw_requests'),
+                orderBy('__name__'),
+                startAfter(lastWdCursor),
+                limit(100),
+              )
+            : query(collection(serverDb, 'withdraw_requests'), orderBy('__name__'), limit(100));
+          const wdSnap: QuerySnapshot<DocumentData> = await getDocs(wdQ);
+          if (wdSnap.empty) break;
+          for (const d of wdSnap.docs) {
+            if (String(d.data()?.status || '') === 'pending') {
+              await updateDoc(d.ref, {
+                status: 'rejected',
+                adminNote: 'System reset by Admin',
+                reviewedAtMs: nowMs,
+                updatedAt: serverTimestamp(),
+              });
+              withdrawalsRejectedCount += 1;
+            }
+          }
+          lastWdCursor = wdSnap.docs[wdSnap.docs.length - 1];
+          if (wdSnap.size < 100) break;
+        }
+
+        // Reset every player document & clean subcollections (preserve __admin_vault__)
+        let lastPlayerCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+        for (let page = 0; page < 100; page++) {
+          const pQ: Query<DocumentData> = lastPlayerCursor
+            ? query(
+                collection(serverDb, 'players'),
+                orderBy('__name__'),
+                startAfter(lastPlayerCursor),
+                limit(50),
+              )
+            : query(collection(serverDb, 'players'), orderBy('__name__'), limit(50));
+          const pSnap: QuerySnapshot<DocumentData> = await getDocs(pQ);
+          if (pSnap.empty) break;
+
+          for (const d of pSnap.docs) {
+            if (d.id === ADMIN_PASSCODE_VAULT_UID) continue;
+
+            // Delete referrals subcollection
+            for (let rPage = 0; rPage < 40; rPage++) {
+              const refSnap = await getDocs(
+                query(collection(serverDb, 'players', d.id, 'referrals'), limit(50)),
+              );
+              if (refSnap.empty) break;
+              for (const rDoc of refSnap.docs) {
+                await deleteDoc(rDoc.ref);
+                referralsDeletedCount += 1;
+              }
+              if (refSnap.size < 50) break;
+            }
+
+            // Reject pending withdrawals inside player subcollection
+            let lastUserWdCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+            for (let wPage = 0; wPage < 20; wPage++) {
+              const uWdQ: Query<DocumentData> = lastUserWdCursor
+                ? query(
+                    collection(serverDb, 'players', d.id, 'withdrawals'),
+                    orderBy('__name__'),
+                    startAfter(lastUserWdCursor),
+                    limit(40),
+                  )
+                : query(collection(serverDb, 'players', d.id, 'withdrawals'), orderBy('__name__'), limit(40));
+              const uWdSnap: QuerySnapshot<DocumentData> = await getDocs(uWdQ);
+              if (uWdSnap.empty) break;
+              for (const wDoc of uWdSnap.docs) {
+                const st = String(wDoc.data()?.status || '');
+                if (st === 'pending' || st === 'processing') {
+                  await updateDoc(wDoc.ref, {
+                    status: 'rejected',
+                    adminNote: 'System reset by Admin',
+                    reviewedAtMs: nowMs,
+                  });
+                }
+              }
+              lastUserWdCursor = uWdSnap.docs[uWdSnap.docs.length - 1];
+              if (uWdSnap.size < 40) break;
+            }
+
+            // Reject pending transactions inside player subcollection
+            let lastUserTxCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+            for (let tPage = 0; tPage < 20; tPage++) {
+              const uTxQ: Query<DocumentData> = lastUserTxCursor
+                ? query(
+                    collection(serverDb, 'players', d.id, 'transactions'),
+                    orderBy('__name__'),
+                    startAfter(lastUserTxCursor),
+                    limit(60),
+                  )
+                : query(collection(serverDb, 'players', d.id, 'transactions'), orderBy('__name__'), limit(60));
+              const uTxSnap: QuerySnapshot<DocumentData> = await getDocs(uTxQ);
+              if (uTxSnap.empty) break;
+              for (const tDoc of uTxSnap.docs) {
+                if (String(tDoc.data()?.status || '') === 'pending') {
+                  await updateDoc(tDoc.ref, { status: 'rejected' });
+                }
+              }
+              lastUserTxCursor = uTxSnap.docs[uTxSnap.docs.length - 1];
+              if (uTxSnap.size < 60) break;
+            }
+
+            const pd = d.data();
+            const safeName = String(pd.displayName || '').trim().slice(0, 60) || 'Farmer';
+            const safeHandle = formatReferralHandle(String(pd.handle || ''), d.id).slice(0, 40) || '@farmer';
+            const rawColor = String(pd.avatarColor || '').trim().slice(0, 20);
+            const safeColor = rawColor.length >= 4 ? rawColor : '#EF4444';
+            const rawLang = String(pd.language || 'en').trim().slice(0, 16);
+            const safeLang = rawLang.length >= 2 ? rawLang : 'en';
+
+            await updateDoc(d.ref, {
+              displayName: safeName,
+              handle: safeHandle,
+              photoUrl: String(pd.photoUrl || '').slice(0, 512),
+              avatarColor: safeColor,
+              language: safeLang,
+              level: 1,
+              xp: 0,
+              coins: SIGNUP_BONUS_COINS,
+              eggs: 0,
+              totalEggsCollected: 0,
+              totalCashEarnedUsd: 0,
+              totalWithdrawnUsd: 0,
+              basketCapacity: 300,
+              basketTierHours: 8,
+              leghornCount: 0,
+              rhodeCount: 0,
+              orpingtonCount: 0,
+              australorpCount: 0,
+              boughtThisWeek: 0,
+              dailyStreak: 0,
+              lastDailyClaimDate: '',
+              completedTaskIds: [],
+              claimedPromoCodes: [],
+              watchedAdsCount: 0,
+              totalAdsWatched: 0,
+              referredBy: '',
+              referralActivated: false,
+              referralCount: 0,
+              referralCoinsEarned: 0,
+              firstDepositBonusUsed: false,
+              lastCollectedAt: nowMs,
+              feedBoostUntilMs: 0,
+              lastGoldenEggAtMs: 0,
+              goldenEggsFound: 0,
+              claimedAchievementIds: resetTokens,
+              claimedReferralMilestones: [],
+              updatedAt: serverTimestamp(),
+            });
+            playersResetCount += 1;
+          }
+          lastPlayerCursor = pSnap.docs[pSnap.docs.length - 1];
+          if (pSnap.size < 50) break;
+        }
+
+        // Reset leaderboard stats
+        let lastLbCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+        for (let page = 0; page < 100; page++) {
+          const lbQ: Query<DocumentData> = lastLbCursor
+            ? query(
+                collection(serverDb, 'leaderboard'),
+                orderBy('__name__'),
+                startAfter(lastLbCursor),
+                limit(50),
+              )
+            : query(collection(serverDb, 'leaderboard'), orderBy('__name__'), limit(50));
+          const lbSnap: QuerySnapshot<DocumentData> = await getDocs(lbQ);
+          if (lbSnap.empty) break;
+          for (const d of lbSnap.docs) {
+            if (d.id === ADMIN_PASSCODE_VAULT_UID) continue;
+            await updateDoc(d.ref, {
+              buyerPoints: 0,
+              inviterCount: 0,
+              eggs: 0,
+              totalEggsCollected: 0,
+              chickensCount: 0,
+              updatedAt: serverTimestamp(),
+            });
+          }
+          lastLbCursor = lbSnap.docs[lbSnap.docs.length - 1];
+          if (lbSnap.size < 50) break;
+        }
+
+        // Reset season back to Season 1
+        await setDoc(doc(serverDb, 'app_config', 'season'), {
+          seasonNumber: 1,
+          title: 'Harvest Cup Season 1',
+          prizePoolCoins: 25000,
+          endsAtMs: nowMs + 4 * 86_400_000,
+          lastWinners: [],
+          updatedAtMs: nowMs,
+          updatedAt: serverTimestamp(),
+        });
+
+        // Update app_config/system_reset epoch so online clients immediately sync fresh starter state
+        let prevCount = 0;
+        try {
+          const resetSnap = await getFreshDoc(doc(serverDb, 'app_config', 'system_reset'));
+          if (resetSnap.exists()) {
+            prevCount = Math.max(0, Math.floor(Number(resetSnap.data()?.resetCount ?? 0) || 0));
+          }
+        } catch {
+          prevCount = 0;
+        }
+        await setDoc(doc(serverDb, 'app_config', 'system_reset'), {
+          resetEpochMs: nowMs,
+          resetCount: prevCount + 1,
+          resetBy: resolvedPlayerId,
+          updatedAtMs: nowMs,
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      // Clear server in-memory runtime caches (preserve bot config & session secret)
+      pendingReferralMap.clear();
+      reminderStore.clear();
+      channelCheckLogs.length = 0;
+      processedServerTxHashes.clear();
+      referralNotifyDedup.clear();
+      withdrawNotifyDedup.clear();
+      rateLimitBuckets.clear();
+      botSubscriberMap.clear();
+
+      for (const fileToClear of [
+        PENDING_REFERRALS_FILE,
+        REMINDERS_FILE,
+        CHANNEL_CHECK_LOGS_FILE,
+        BOT_SUBSCRIBERS_FILE,
+      ]) {
+        try {
+          if (fs.existsSync(fileToClear)) {
+            fs.writeFileSync(fileToClear, '[]', 'utf8');
+          }
+        } catch {
+          // Non-fatal
+        }
+      }
+
+      const summary = `${playersResetCount} players reset · ${tasksDeletedCount} tasks, ${promosDeletedCount} promos, ${bansDeletedCount} bans, ${referralsDeletedCount} referrals cleared · ${withdrawalsRejectedCount} pending withdrawals closed`;
+      recordServerLog('info', 'admin_data_reset', `System data reset executed by ${resolvedPlayerId}`, summary);
+
+      res.json({
+        ok: true,
+        resetEpochMs: nowMs,
+        playersResetCount,
+        tasksDeletedCount,
+        promosDeletedCount,
+        bansDeletedCount,
+        referralsDeletedCount,
+        withdrawalsRejectedCount,
+        summary,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Data reset failed';
+      recordServerLog('error', 'admin_data_reset', `System data reset failed (${resolvedPlayerId})`, msg);
+      res.status(500).json({ ok: false, error: msg });
+    }
   });
 
   const reminderInterval = setInterval(() => {

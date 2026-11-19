@@ -249,8 +249,8 @@ service cloud.firestore {
         && (!('paidCoins' in data) || (data.paidCoins is number && data.paidCoins >= 0 && data.paidCoins <= 100000000))
         && (!('creatorUid' in data) || (
           data.rewardCoins >= 50
-          && 'totalSlots' in data && data.totalSlots >= 30
-          && 'paidCoins' in data && data.paidCoins >= 5000
+          && 'totalSlots' in data && data.totalSlots >= 1
+          && 'paidCoins' in data && data.paidCoins >= 100
         ))
         && data.isActive is bool
         && data.createdAtMs is number && data.createdAtMs >= 0
@@ -391,6 +391,26 @@ service cloud.firestore {
         && data.messageTemplate is string && data.messageTemplate.size() >= 1 && data.messageTemplate.size() <= 1500
         && data.buttonText is string && data.buttonText.size() <= 48
         && data.buttonUrlTemplate is string && data.buttonUrlTemplate.size() <= 256
+        && data.updatedAtMs is number && data.updatedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTaskPricingConfig(data) {
+      return data.keys().hasAll(['minBudgetCoins', 'channelCheckFeeCoins', 'platformFeeRate', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['minBudgetCoins', 'channelCheckFeeCoins', 'platformFeeRate', 'updatedAtMs', 'updatedAt'])
+        && data.minBudgetCoins is number && data.minBudgetCoins >= 1000 && data.minBudgetCoins <= 1000000
+        && data.channelCheckFeeCoins is number && data.channelCheckFeeCoins >= 0 && data.channelCheckFeeCoins <= 500000
+        && data.platformFeeRate is number && data.platformFeeRate >= 0 && data.platformFeeRate <= 0.5
+        && data.updatedAtMs is number && data.updatedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSystemResetConfig(data) {
+      return data.keys().hasAll(['resetEpochMs', 'resetCount', 'resetBy', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['resetEpochMs', 'resetCount', 'resetBy', 'updatedAtMs', 'updatedAt'])
+        && data.resetEpochMs is number && data.resetEpochMs >= 0
+        && data.resetCount is number && data.resetCount >= 0
+        && data.resetBy is string && data.resetBy.size() <= 64
         && data.updatedAtMs is number && data.updatedAtMs >= 0
         && data.updatedAt is timestamp;
     }
@@ -711,6 +731,12 @@ service cloud.firestore {
           && incoming().updatedAt == request.time)
         || (configId == 'payout_template'
           && isValidPayoutTemplateConfig(incoming())
+          && incoming().updatedAt == request.time)
+        || (configId == 'task_pricing'
+          && isValidTaskPricingConfig(incoming())
+          && incoming().updatedAt == request.time)
+        || (configId == 'system_reset'
+          && isValidSystemResetConfig(incoming())
           && incoming().updatedAt == request.time)
       );
       allow delete: if false;

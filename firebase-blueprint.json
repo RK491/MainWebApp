@@ -347,6 +347,32 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["chatId", "username", "firstName", "source", "isBotBlocked", "joinedAtMs", "lastSeenAtMs", "updatedAt"]
+    },
+    "TaskPricingConfig": {
+      "title": "TaskPricingConfig",
+      "description": "Admin-editable pricing rules for paid user tasks (min coins, channel check fee, platform fee rate).",
+      "type": "object",
+      "properties": {
+        "minBudgetCoins": { "type": "number" },
+        "channelCheckFeeCoins": { "type": "number" },
+        "platformFeeRate": { "type": "number" },
+        "updatedAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["minBudgetCoins", "channelCheckFeeCoins", "platformFeeRate", "updatedAtMs", "updatedAt"]
+    },
+    "SystemResetConfig": {
+      "title": "SystemResetConfig",
+      "description": "Tracks Admin system data reset epochs so active clients clear stale caches and sync cleanly.",
+      "type": "object",
+      "properties": {
+        "resetEpochMs": { "type": "number" },
+        "resetCount": { "type": "number" },
+        "resetBy": { "type": "string", "maxLength": 64 },
+        "updatedAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["resetEpochMs", "resetCount", "resetBy", "updatedAtMs", "updatedAt"]
     }
   },
   "firestore": {
@@ -392,7 +418,7 @@
     },
     "/app_config/{configId}": {
       "schema": { "$ref": "#/entities/AdsConfig" },
-      "description": "Global app configuration for ads, seasonal leaderboard, required Telegram channels, admins, and payout DM template."
+      "description": "Global app configuration for ads, seasonal leaderboard, required Telegram channels, admins, payout DM template, paid task pricing, and system reset epoch."
     },
     "/banned_users/{playerId}": {
       "schema": { "$ref": "#/entities/BannedUser" },

@@ -46,6 +46,7 @@ import {
   DEFAULT_GET_CODE_CHANNEL_URL,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
+  DEFAULT_TASK_PRICING_CONFIG,
   DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
   eggsToUsd,
   executeDeposit,
@@ -73,6 +74,7 @@ import {
   reinvestEggs,
   renderPayoutChannelApproveMessage,
   renderWithdrawApproveMessage,
+  resolveTaskPricingConfig,
   upgradeBasket,
   watchAdStep,
 } from './game/economy';
@@ -111,6 +113,7 @@ import {
   saveAdConfigInFirestore,
   saveCachedPlayerProfile,
   saveChannelsConfigInFirestore,
+  saveTaskPricingConfigInFirestore,
   saveWithdrawApproveTemplateInFirestore,
   searchUsersInFirestore,
   subscribeToAdConfig,
@@ -125,6 +128,8 @@ import {
   subscribeToPromoCodes,
   subscribeToRecentPlayers,
   subscribeToSeasonConfig,
+  subscribeToSystemResetConfig,
+  subscribeToTaskPricingConfig,
   subscribeToWithdrawApproveTemplate,
   toggleCustomTaskInFirestore,
   togglePromoCodeInFirestore,
@@ -152,8 +157,10 @@ import type {
   SeasonConfig,
   SubView,
   SystemDiagnosticsSnapshot,
+  SystemResetConfig,
   TaskCategory,
   TaskDefinition,
+  TaskPricingConfig,
   TransactionEntry,
   UserFarmProfile,
   WithdrawApproveMessageTemplate,
@@ -390,6 +397,14 @@ export default function App() {
   const [allWithdrawRequests, setAllWithdrawRequests] = useState<WithdrawRequestRecord[]>([]);
   const [withdrawApproveTemplate, setWithdrawApproveTemplate] =
     useState<WithdrawApproveMessageTemplate>(DEFAULT_WITHDRAW_APPROVE_TEMPLATE);
+  const [taskPricingConfig, setTaskPricingConfig] =
+    useState<TaskPricingConfig>(DEFAULT_TASK_PRICING_CONFIG);
+  const [systemResetConfig, setSystemResetConfig] = useState<SystemResetConfig>({
+    resetEpochMs: 0,
+    resetCount: 0,
+    resetBy: '',
+    updatedAtMs: 0,
+  });
   const [promoCodes, setPromoCodes] = useState<DynamicPromoCode[]>([]);
   const [recentPlayers, setRecentPlayers] = useState<UserFarmProfile[]>([]);
   const [leaderboardEntries, setLeaderboardEntries] = useState<LeaderboardEntry[]>([]);
@@ -398,6 +413,8 @@ export default function App() {
   const [adminsConfig, setAdminsConfig] = useState<AdminsConfig>(DEFAULT_ADMINS_CONFIG);
   const [adminUnlocked, setAdminUnlocked] = useState(false);
   const [adminSessionToken, setAdminSessionToken] = useState<string>('');
+  const adminSessionTokenRef = useRef<string>('');
+  adminSessionTokenRef.current = adminSessionToken;
   const [playerSessionToken, setPlayerSessionToken] = useState<string>('');
   const playerSessionTokenRef = useRef<string>('');
   const [adminPasscodeSource, setAdminPasscodeSource] = useState<
@@ -480,7 +497,11 @@ export default function App() {
   });
   const [showReinvestModal, setShowReinvestModal] = useState(false);
   const channelLeaveAuditRef = useRef<number>(0);
-  const pendingReferralClaimCheckedRef = useRef<string | null>(null);
+  const claimPendingAttemptsRef = useRef<{ uid: string; count: number; resolved: boolean }>({
+    uid: '',
+    count: 0,
+    resolved: false,
+  });
   const startupAdTriggeredRef = useRef(false);
   const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => getStoredAudioSettings());
   const musicEnabled = audioSettings.musicEnabled;
@@ -911,6 +932,12 @@ export default function App() {
     const unsubPayoutTemplate = subscribeToWithdrawApproveTemplate((tpl) => {
       setWithdrawApproveTemplate(tpl);
     });
+    const unsubTaskPricing = subscribeToTaskPricingConfig((pricing) => {
+      setTaskPricingConfig(pricing);
+    });
+    const unsubSystemReset = subscribeToSystemResetConfig((resetCfg) => {
+      setSystemResetConfig(resetCfg);
+    });
     return () => {
       unsubTasks();
       unsubAds();
@@ -920,8 +947,77 @@ export default function App() {
       unsubLeaderboard();
       unsubSeason();
       unsubPayoutTemplate();
+      unsubTaskPricing();
+      unsubSystemReset();
     };
   }, []);
+
+  const applyLocalSystemResetForEpoch = useCallback((epochMs: number) => {
+    const targetUid = activePlayerIdRef.current;
+    if (!targetUid || !epochMs) return;
+    const seenEpochKey = `chickenland_reset_epoch_${targetUid}`;
+    try {
+      localStorage.setItem(seenEpochKey, String(epochMs));
+      localStorage.removeItem(`chickenland_profile_cache_v1_${targetUid}`);
+      localStorage.removeItem(`chickenland_channels_verified_v1_${targetUid}`);
+      localStorage.removeItem('chickenland_pending_ref_v1');
+      localStorage.removeItem(`chickenland_signup_bonus_seen_${targetUid}`);
+    } catch {
+      // ignore storage errors
+    }
+
+    const current = latestProfileRef.current;
+    const { profile: starter } = createDefaultProfile(
+      targetUid,
+      current.displayName,
+      current.handle,
+      Date.now(),
+      current.photoUrl,
+    );
+    const freshProfile: UserFarmProfile = {
+      ...starter,
+      language: current.language || starter.language,
+      resetEpochMs: epochMs,
+    };
+
+    latestProfileRef.current = freshProfile;
+    setProfile(freshProfile);
+    saveCachedPlayerProfile(freshProfile);
+    setTransactions([]);
+    setReferralTransactions([]);
+    setDeposits([]);
+    setWithdrawals([]);
+    setReferrals([]);
+    setChannelVerification(null);
+    setAllWithdrawRequests([]);
+    setBannedUsers([]);
+    setChannelCheckError(null);
+    setPendingRefCode(null);
+    pendingRefCodeRef.current = null;
+    referralAttemptedKeysRef.current.clear();
+    claimPendingAttemptsRef.current = { uid: '', count: 0, resolved: false };
+    prevWithdrawalStatusRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    const epochMs = systemResetConfig.resetEpochMs;
+    if (!epochMs || !isPlayerSynced) return;
+    const current = latestProfileRef.current;
+    if (!current?.uid || current.uid !== activePlayerId) return;
+    if ((current.resetEpochMs ?? 0) >= epochMs) return;
+
+    const seenEpochKey = `chickenland_reset_epoch_${current.uid}`;
+    let alreadyHandled = false;
+    try {
+      alreadyHandled = localStorage.getItem(seenEpochKey) === String(epochMs);
+    } catch {
+      alreadyHandled = false;
+    }
+    if (alreadyHandled) return;
+
+    applyLocalSystemResetForEpoch(epochMs);
+    showToast('System was reset cleanly — your starter farm is ready!');
+  }, [activePlayerId, applyLocalSystemResetForEpoch, isPlayerSynced, profile.resetEpochMs, showToast, systemResetConfig.resetEpochMs]);
 
   // Always require Admin Passcode again on every fresh webapp open/resume
   useEffect(() => {
@@ -1166,6 +1262,16 @@ export default function App() {
 
       const applyReferral = async () => {
         const isStillSamePlayer = () => activePlayerIdRef.current === targetUid;
+        await ensurePromiseRef.current?.catch(() => undefined);
+        if (!isStillSamePlayer()) {
+          referralAttemptedKeysRef.current.delete(attemptKey);
+          return;
+        }
+        const latestBefore = latestProfileRef.current;
+        if (latestBefore.uid === targetUid && latestBefore.referredBy) {
+          clearPendingRef();
+          return;
+        }
         try {
           const response = await fetch(resolveApiUrl('/api/referrals/apply'), {
             method: 'POST',
@@ -1174,9 +1280,9 @@ export default function App() {
             body: JSON.stringify({
               playerId: targetUid,
               refCode,
-              displayName: currentProfile.displayName,
-              handle: currentProfile.handle,
-              photoUrl: currentProfile.photoUrl,
+              displayName: latestBefore.displayName,
+              handle: latestBefore.handle,
+              photoUrl: latestBefore.photoUrl,
               initData: getTelegramInitData(),
               token: playerSessionTokenRef.current,
             }),
@@ -1323,65 +1429,122 @@ export default function App() {
     if (!currentProfile?.uid || currentProfile.uid !== activePlayerId) return;
     if (currentProfile.referredBy) return;
     if (!extractTelegramNumericUserId(currentProfile.uid)) return;
-    if (pendingReferralClaimCheckedRef.current === currentProfile.uid) return;
-    pendingReferralClaimCheckedRef.current = currentProfile.uid;
 
     const targetUid = currentProfile.uid;
-    void (async () => {
+    if (claimPendingAttemptsRef.current.uid !== targetUid) {
+      claimPendingAttemptsRef.current = { uid: targetUid, count: 0, resolved: false };
+    }
+    if (claimPendingAttemptsRef.current.resolved || claimPendingAttemptsRef.current.count >= 4) {
+      return;
+    }
+
+    let cancelled = false;
+    let retryTimer: number | null = null;
+    let inFlight = false;
+
+    const attemptClaimPending = async () => {
+      if (cancelled || inFlight) return;
+      if (claimPendingAttemptsRef.current.resolved || claimPendingAttemptsRef.current.count >= 4) return;
+      if (pendingRefCodeRef.current) return;
+      inFlight = true;
       try {
+        await ensurePromiseRef.current?.catch(() => undefined);
+        if (cancelled || activePlayerIdRef.current !== targetUid) return;
+        const latest = latestProfileRef.current;
+        if (latest.referredBy) {
+          claimPendingAttemptsRef.current.resolved = true;
+          return;
+        }
+        claimPendingAttemptsRef.current.count += 1;
+
         const res = await fetch(resolveApiUrl('/api/referrals/claim-pending'), {
           method: 'POST',
           cache: 'no-store',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             playerId: targetUid,
-            displayName: currentProfile.displayName,
-            handle: currentProfile.handle,
-            photoUrl: currentProfile.photoUrl,
+            displayName: latest.displayName,
+            handle: latest.handle,
+            photoUrl: latest.photoUrl,
             initData: getTelegramInitData(),
             token: playerSessionTokenRef.current,
           }),
         });
-        if (!res.ok) return;
-        const payload = (await res.json().catch(() => null)) as {
-          ok?: boolean;
-          applied?: boolean;
-          alreadyApplied?: boolean;
-          referrerUid?: string;
-          referrerName?: string;
-          referredBonusCoins?: number;
-          nextReferredCoins?: number;
-        } | null;
-        if (!payload?.ok || activePlayerIdRef.current !== targetUid) return;
-        if (payload.applied || payload.alreadyApplied) {
-          const bonus = Number(payload.referredBonusCoins ?? 100);
-          const serverNextCoins = Number(payload.nextReferredCoins);
-          setProfile((prev) => {
-            if (prev.uid !== targetUid || prev.referredBy) return prev;
-            const next: UserFarmProfile = {
-              ...prev,
-              referredBy: payload.referrerUid || prev.referredBy,
-              referralActivated: true,
-              coins: Number.isFinite(serverNextCoins)
-                ? serverNextCoins
-                : payload.applied
-                  ? prev.coins + bonus
-                  : prev.coins,
-            };
-            latestProfileRef.current = next;
-            saveCachedPlayerProfile(next);
-            return next;
-          });
-          if (payload.applied) {
-            showToast(
-              `+${bonus} welcome coins! Joined via ${payload.referrerName || 'a friend'}'s referral!`,
-            );
+        if (res.ok) {
+          const payload = (await res.json().catch(() => null)) as {
+            ok?: boolean;
+            applied?: boolean;
+            alreadyApplied?: boolean;
+            reason?: string;
+            referrerUid?: string;
+            referrerName?: string;
+            referredBonusCoins?: number;
+            nextReferredCoins?: number;
+          } | null;
+          if (!cancelled && payload?.ok && activePlayerIdRef.current === targetUid) {
+            if (payload.applied || payload.alreadyApplied) {
+              claimPendingAttemptsRef.current.resolved = true;
+              const bonus = Number(payload.referredBonusCoins ?? 100);
+              const serverNextCoins = Number(payload.nextReferredCoins);
+              setProfile((prev) => {
+                if (prev.uid !== targetUid || prev.referredBy) return prev;
+                const next: UserFarmProfile = {
+                  ...prev,
+                  referredBy: payload.referrerUid || prev.referredBy,
+                  referralActivated: true,
+                  coins: Number.isFinite(serverNextCoins)
+                    ? serverNextCoins
+                    : payload.applied
+                      ? prev.coins + bonus
+                      : prev.coins,
+                };
+                latestProfileRef.current = next;
+                saveCachedPlayerProfile(next);
+                return next;
+              });
+              if (payload.applied) {
+                showToast(
+                  `+${bonus} welcome coins! Joined via ${payload.referrerName || 'a friend'}'s referral!`,
+                );
+              }
+              return;
+            }
+            if (payload.reason === 'already_linked') {
+              claimPendingAttemptsRef.current.resolved = true;
+              return;
+            }
           }
         }
       } catch {
         // Non-fatal
+      } finally {
+        inFlight = false;
       }
-    })();
+
+      if (!cancelled && !claimPendingAttemptsRef.current.resolved && claimPendingAttemptsRef.current.count < 4) {
+        if (retryTimer !== null) window.clearTimeout(retryTimer);
+        retryTimer = window.setTimeout(() => {
+          void attemptClaimPending();
+        }, 2500);
+      }
+    };
+
+    const handleResumeCheck = () => {
+      if (document.visibilityState !== 'hidden') {
+        void attemptClaimPending();
+      }
+    };
+
+    window.addEventListener('focus', handleResumeCheck);
+    document.addEventListener('visibilitychange', handleResumeCheck);
+    void attemptClaimPending();
+
+    return () => {
+      cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      window.removeEventListener('focus', handleResumeCheck);
+      document.removeEventListener('visibilitychange', handleResumeCheck);
+    };
   }, [activePlayerId, isBanned, isPlayerSynced, pendingRefCode, profile.referredBy, showToast]);
 
   const persistMutation = useCallback(
@@ -1507,12 +1670,14 @@ export default function App() {
         ) as (ChannelVerificationResult & { error?: string }) | null;
 
         let data: ChannelVerificationResult | null = null;
+        const localBot = getLocalAdminBotConfig();
+        const isMissingApi = !isJson || res.status === 404 || res.status === 405;
+        const isServerBotUnconfiguredWithLocalBot =
+          Boolean(localBot) && Boolean(res.ok && rawPayload?.verificationMode === 'bot_unconfigured');
 
-        if (!isJson || res.status === 404 || res.status === 405) {
-          // Static preview host without Express /api server:
-          // Use Admin's local browser Bot Token directly via Telegram Bot API if configured,
-          // otherwise present an informational static_preview state instead of an HTTP 404 failure.
-          const localBot = getLocalAdminBotConfig();
+        if (isMissingApi || isServerBotUnconfiguredWithLocalBot) {
+          // Static preview host OR Express server lacking TELEGRAM_BOT_TOKEN while Admin browser Bot Token exists:
+          // Use Admin's local browser Bot Token directly via Telegram Bot API if configured.
           const tgNumericId = extractTelegramNumericUserId(latestProfileRef.current.uid);
           const nowMs = Date.now();
 
@@ -1539,11 +1704,28 @@ export default function App() {
                       statusStr === 'administrator' ||
                       statusStr === 'member' ||
                       (statusStr === 'restricted' && tgJson.result?.is_member === true));
+                  let friendlyErr: string | undefined;
+                  if (!tgJson.ok) {
+                    const descLow = String(tgJson.description || '').toLowerCase();
+                    if (
+                      descLow.includes('member list is inaccessible') ||
+                      descLow.includes('not enough rights') ||
+                      descLow.includes('chat_admin_required') ||
+                      descLow.includes('bot is not a member') ||
+                      descLow.includes('need administrator rights')
+                    ) {
+                      friendlyErr = `Make @${localBot.botUsername || 'your bot'} an Admin in ${ch.handle} to verify joins.`;
+                    } else if (descLow.includes('chat not found')) {
+                      friendlyErr = `Channel ${ch.handle} not found or bot is not Admin there.`;
+                    } else {
+                      friendlyErr = tgJson.description || 'Channel check failed';
+                    }
+                  }
                   return {
                     ...ch,
                     joined,
                     status: tgJson.ok ? statusStr || (joined ? 'member' : 'left') : 'api_error',
-                    error: tgJson.ok ? undefined : tgJson.description || 'Channel check failed',
+                    error: friendlyErr,
                   };
                 } catch {
                   return {
@@ -1707,7 +1889,7 @@ export default function App() {
     async (
       actionUrl: string,
       options?: { requireChannelCheck?: boolean },
-    ): Promise<{ joined: boolean; handle?: string }> => {
+    ): Promise<{ joined: boolean; handle?: string; status?: string; reason?: string }> => {
       if (options?.requireChannelCheck === false) {
         return { joined: true };
       }
@@ -1723,9 +1905,10 @@ export default function App() {
       }
       const numericUserId = extractTelegramNumericUserId(latestProfileRef.current.uid);
       if (!numericUserId) {
+        const reason = `Open in Telegram and join ${normalized.handle} first, then tap Retry.`;
         triggerHapticFeedback('warning');
-        showToast(`Open in Telegram and join ${normalized.handle} first, then tap Retry.`);
-        return { joined: false, handle: normalized.handle };
+        showToast(reason);
+        return { joined: false, handle: normalized.handle, status: 'no_telegram_user', reason };
       }
       try {
         const res = await fetch(resolveApiUrl('/api/telegram/check-task-channel'), {
@@ -1740,8 +1923,26 @@ export default function App() {
           }),
         });
         const contentType = (res.headers.get('content-type') || '').toLowerCase();
-        if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
-          const localBot = getLocalAdminBotConfig();
+        const isJson = contentType.includes('application/json');
+        const data = (
+          isJson ? await res.json().catch(() => null) : null
+        ) as {
+          ok?: boolean;
+          enforced?: boolean;
+          joined?: boolean;
+          handle?: string;
+          status?: string;
+          reason?: string;
+        } | null;
+
+        const localBot = getLocalAdminBotConfig();
+        const shouldUseLocalBotFallback =
+          !isJson ||
+          res.status === 404 ||
+          res.status === 405 ||
+          Boolean(res.ok && data?.status === 'bot_unconfigured' && localBot);
+
+        if (shouldUseLocalBotFallback) {
           if (localBot && normalized.handle) {
             const targetChatId = /^-?\d+$/.test(normalized.handle)
               ? normalized.handle
@@ -1757,48 +1958,90 @@ export default function App() {
               result?: { status?: string; is_member?: boolean };
             };
             if (tgJson.ok && tgJson.result) {
-              const joined = isTelegramMemberStatusJoined(
-                String(tgJson.result.status || 'left'),
-                tgJson.result.is_member,
-              );
+              const memberStatus = String(tgJson.result.status || 'left');
+              const joined = isTelegramMemberStatusJoined(memberStatus, tgJson.result.is_member);
               if (joined) {
-                return { joined: true, handle: normalized.handle };
+                return { joined: true, handle: normalized.handle, status: memberStatus };
               }
+              const notJoinedReason = `Not joined ${normalized.handle} yet — tap Join, then Retry.`;
+              triggerHapticFeedback('warning');
+              showToast(notJoinedReason);
+              return {
+                joined: false,
+                handle: normalized.handle,
+                status: memberStatus,
+                reason: notJoinedReason,
+              };
             }
+            const descLow = String(tgJson.description || '').toLowerCase();
+            let reason = tgJson.description || 'Channel check failed.';
+            if (
+              descLow.includes('member list is inaccessible') ||
+              descLow.includes('not enough rights') ||
+              descLow.includes('chat_admin_required') ||
+              descLow.includes('bot is not a member') ||
+              descLow.includes('need administrator rights')
+            ) {
+              reason = `Make @${localBot.botUsername || 'the bot'} an Admin in ${normalized.handle} to verify joins.`;
+            } else if (descLow.includes('chat not found')) {
+              reason = `Channel ${normalized.handle} not found or bot is not Admin there.`;
+            } else if (descLow.includes('user not found') || descLow.includes('participant_id_invalid')) {
+              reason = `Not joined ${normalized.handle} yet — tap Join, then Retry.`;
+            }
+            const apiErrStatus =
+              descLow.includes('user not found') || descLow.includes('participant_id_invalid')
+                ? 'left'
+                : 'api_error';
+            triggerHapticFeedback('warning');
+            showToast(reason);
+            return {
+              joined: false,
+              handle: normalized.handle,
+              status: apiErrStatus,
+              reason,
+            };
           }
+          const unconfiguredReason =
+            data?.reason || 'Bot verification pending Bot Token setup in Admin Panel.';
           triggerHapticFeedback('warning');
-          showToast(`Join ${normalized.handle} first, then tap Retry!`);
-          return { joined: false, handle: normalized.handle };
+          showToast(unconfiguredReason);
+          return {
+            joined: false,
+            handle: normalized.handle,
+            status: 'bot_unconfigured',
+            reason: unconfiguredReason,
+          };
         }
-        const data = (await res.json().catch(() => null)) as {
-          ok?: boolean;
-          enforced?: boolean;
-          joined?: boolean;
-          handle?: string;
-          reason?: string;
-        } | null;
+
         if (!res.ok || !data?.ok) {
+          const reason =
+            data?.reason || `Could not confirm ${normalized.handle} join — tap Retry.`;
           triggerHapticFeedback('warning');
-          showToast(`Could not confirm ${normalized.handle} join — tap Retry.`);
-          return { joined: false, handle: normalized.handle };
+          showToast(reason);
+          return { joined: false, handle: normalized.handle, status: 'api_error', reason };
         }
         if (data.enforced === false && data.joined) {
-          return { joined: true, handle: data.handle || normalized.handle };
+          return { joined: true, handle: data.handle || normalized.handle, status: data.status };
         }
         if (data.joined) {
-          return { joined: true, handle: data.handle || normalized.handle };
+          return { joined: true, handle: data.handle || normalized.handle, status: data.status };
         }
+        const handleLabel = data.handle || normalized.handle;
+        const reason =
+          data.reason || `Not joined ${handleLabel} yet — tap Join, then Retry.`;
         triggerHapticFeedback('warning');
-        showToast(
-          data.reason
-            ? `${data.reason} — join ${data.handle || normalized.handle} & Retry!`
-            : `Join ${data.handle || normalized.handle} first, then tap Retry!`,
-        );
-        return { joined: false, handle: data.handle || normalized.handle };
+        showToast(reason);
+        return {
+          joined: false,
+          handle: handleLabel,
+          status: data.status,
+          reason,
+        };
       } catch {
+        const netReason = `Unable to verify ${normalized.handle} right now — tap Retry!`;
         triggerHapticFeedback('warning');
-        showToast(`Unable to verify ${normalized.handle} right now — tap Retry!`);
-        return { joined: false, handle: normalized.handle };
+        showToast(netReason);
+        return { joined: false, handle: normalized.handle, status: 'network_error', reason: netReason };
       }
     },
     [showToast],
@@ -2518,17 +2761,23 @@ export default function App() {
     await ensurePromiseRef.current;
     const current = latestProfileRef.current;
     const now = Date.now();
-    const order = createPaidTaskOrder(current, input, now);
+    const resolvedPricing = resolveTaskPricingConfig(taskPricingConfig);
+    const order = createPaidTaskOrder(current, input, now, resolvedPricing);
     if ('error' in order) {
       showToast(order.error);
       return false;
     }
+
+    const minTotalCostCoins =
+      resolvedPricing.minBudgetCoins +
+      (input.requireChannelCheck ? resolvedPricing.channelCheckFeeCoins : 0);
 
     try {
       const committed = await createPaidCustomTaskInFirestore({
         profile: order.profile,
         transaction: order.transaction,
         paidCoins: order.cost.totalCostCoins,
+        minTotalCostCoins,
         taskInput: {
           title: input.title,
           subtitle: input.subtitle,
@@ -2703,6 +2952,81 @@ export default function App() {
     } catch (err) {
       showToast(formatSyncErrorMessage(err, 'Failed to save channel settings to database.'));
       return false;
+    }
+  };
+
+  const handleSaveTaskPricingConfig = async (
+    cfg: Omit<TaskPricingConfig, 'updatedAtMs'>,
+  ): Promise<boolean> => {
+    try {
+      const saved = await saveTaskPricingConfigInFirestore(cfg);
+      setTaskPricingConfig(saved);
+      playClaimSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      showToast('Paid task pricing updated live!');
+      return true;
+    } catch (err) {
+      showToast(formatSyncErrorMessage(err, 'Failed to save task pricing settings.'));
+      return false;
+    }
+  };
+
+  const handleExecuteDataReset = async (): Promise<{
+    ok: boolean;
+    error?: string;
+    summary?: string;
+  }> => {
+    try {
+      const res = await fetch(resolveApiUrl('/api/admin/data-reset'), {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: adminSessionTokenRef.current,
+          initData: getTelegramInitData(),
+          confirm: 'RESET',
+        }),
+      });
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
+        return {
+          ok: false,
+          error: 'Data Reset requires the live Node server API (/api/admin/data-reset).',
+        };
+      }
+      const payload = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        resetEpochMs?: number;
+        summary?: string;
+        error?: string;
+      };
+      if (!res.ok || !payload.ok) {
+        const errMsg = payload.error || `Data Reset failed (HTTP ${res.status}).`;
+        showToast(errMsg);
+        return { ok: false, error: errMsg };
+      }
+
+      const epochMs = Number(payload.resetEpochMs) || Date.now();
+      setSystemResetConfig((prev) => ({
+        resetEpochMs: epochMs,
+        resetCount: (prev.resetCount || 0) + 1,
+        resetBy: latestProfileRef.current.uid,
+        updatedAtMs: epochMs,
+      }));
+      applyLocalSystemResetForEpoch(epochMs);
+      setCustomTasks([]);
+      setPromoCodes([]);
+      setRecentPlayers([]);
+      setLeaderboardEntries([]);
+      setSeasonConfig(createDefaultSeasonConfig());
+      playClaimSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      showToast('System Data Reset complete — fresh system ready!');
+      return { ok: true, summary: payload.summary };
+    } catch {
+      const errMsg = 'Network error running Data Reset.';
+      showToast(errMsg);
+      return { ok: false, error: errMsg };
     }
   };
 
@@ -4719,6 +5043,10 @@ export default function App() {
           onSaveBotToken={handleSaveBotToken}
           onClearBotToken={handleClearBotToken}
           onAdjustWithdrawAds={handleAdjustWithdrawAds}
+          taskPricingConfig={taskPricingConfig}
+          onSaveTaskPricingConfig={handleSaveTaskPricingConfig}
+          systemResetConfig={systemResetConfig}
+          onExecuteDataReset={handleExecuteDataReset}
         />
       );
     }
@@ -4819,6 +5147,8 @@ export default function App() {
             getTelegramChannelUrl(payoutChannel) ||
             DEFAULT_GET_CODE_CHANNEL_URL
           }
+          botUsername={telegramBotConfig?.botUsername ?? botConfigStatus?.botUsername ?? null}
+          taskPricingConfig={taskPricingConfig}
           watchingAd={watchingAdLoading}
           activeAdNetwork={activeAdNetwork}
           activeAdAction={activeAdAction}

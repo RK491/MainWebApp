@@ -71,7 +71,9 @@ import type {
   ReferralRecord,
   RequiredTelegramChannel,
   SystemDiagnosticsSnapshot,
+  SystemResetConfig,
   TaskDefinition,
+  TaskPricingConfig,
   UserFarmProfile,
   WithdrawApproveMessageTemplate,
   WithdrawRequestRecord,
@@ -84,6 +86,7 @@ import {
   computeAdminWithdrawAdsAdjustment,
   computeAdminWithdrawAdsTarget,
   DEFAULT_GET_CODE_CHANNEL_URL,
+  DEFAULT_TASK_PRICING_CONFIG,
   DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
   extractTelegramNumericUserId,
   filterPlayersBySearchQuery,
@@ -103,6 +106,7 @@ import {
   parseAdConfigTemplate,
   PRIMARY_ADMIN_TELEGRAM_ID,
   renderWithdrawApproveMessage,
+  resolveTaskPricingConfig,
 } from '../game/economy';
 import { getConfiguredApiBaseUrl, setConfiguredApiBaseUrl } from '../utils/telegram';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
@@ -282,6 +286,12 @@ interface AdminPanelViewProps {
     deltaAds?: number;
     targetAds?: number;
   }) => Promise<UserFarmProfile>;
+  taskPricingConfig?: TaskPricingConfig;
+  onSaveTaskPricingConfig?: (
+    config: Omit<TaskPricingConfig, 'updatedAtMs'>,
+  ) => Promise<boolean | void>;
+  systemResetConfig?: SystemResetConfig;
+  onExecuteDataReset?: () => Promise<{ ok: boolean; error?: string; summary?: string }>;
 }
 
 const AD_PROVIDER_CARDS: Array<{
@@ -413,6 +423,10 @@ export function AdminPanelView({
   onSaveBotToken,
   onClearBotToken,
   onAdjustWithdrawAds,
+  taskPricingConfig = DEFAULT_TASK_PRICING_CONFIG,
+  onSaveTaskPricingConfig,
+  systemResetConfig,
+  onExecuteDataReset,
 }: AdminPanelViewProps) {
   const extraAdminIds = useMemo(
     () => getEffectiveAdminIds(adminsConfig),
@@ -436,6 +450,7 @@ export function AdminPanelView({
     | 'ad_ids'
     | 'broadcast'
     | 'diagnostics'
+    | 'reset'
   >('withdrawals');
   const [diagnosticsAutoRefresh, setDiagnosticsAutoRefresh] = useState(false);
   const [diagnosticsLogFilter, setDiagnosticsLogFilter] = useState<'all' | 'issues' | 'bot'>('all');
@@ -458,6 +473,34 @@ export function AdminPanelView({
     setWdBtnTextDraft(withdrawApproveTemplate.buttonText);
     setWdBtnUrlDraft(withdrawApproveTemplate.buttonUrlTemplate);
   }, [withdrawApproveTemplate]);
+
+  // Paid User Task Pricing (+ Add Task) state
+  const resolvedTaskPricing = useMemo(
+    () => resolveTaskPricingConfig(taskPricingConfig),
+    [taskPricingConfig],
+  );
+  const [minTaskPriceDraft, setMinTaskPriceDraft] = useState(
+    String(resolvedTaskPricing.minBudgetCoins),
+  );
+  const [channelCheckFeeDraft, setChannelCheckFeeDraft] = useState(
+    String(resolvedTaskPricing.channelCheckFeeCoins),
+  );
+  const [taskFeePercentDraft, setTaskFeePercentDraft] = useState(
+    String(Math.round(resolvedTaskPricing.platformFeeRate * 100)),
+  );
+  const [savingTaskPricing, setSavingTaskPricing] = useState(false);
+  const [taskPricingFeedback, setTaskPricingFeedback] = useState<string | null>(null);
+
+  useEffect(() => {
+    setMinTaskPriceDraft(String(resolvedTaskPricing.minBudgetCoins));
+    setChannelCheckFeeDraft(String(resolvedTaskPricing.channelCheckFeeCoins));
+    setTaskFeePercentDraft(String(Math.round(resolvedTaskPricing.platformFeeRate * 100)));
+  }, [resolvedTaskPricing]);
+
+  // Data Reset state
+  const [resetConfirmInput, setResetConfirmInput] = useState('');
+  const [resettingData, setResettingData] = useState(false);
+  const [resetFeedback, setResetFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
   // User Management & Inspector state
   const [userSearch, setUserSearch] = useState('');
@@ -2100,6 +2143,7 @@ export function AdminPanelView({
             { id: 'ad_ids', label: 'Block IDs', icon: KeyRound, count: savedAdIdsCount },
             { id: 'broadcast', label: 'Broadcast', icon: Send, count: 0 },
             { id: 'diagnostics', label: 'System Diagnostics', icon: Activity, count: 0 },
+            { id: 'reset', label: 'Data Reset', icon: RotateCcw, count: 0 },
           ] as const
         ).map((item) => {
           const Icon = item.icon;
@@ -5138,6 +5182,178 @@ export function AdminPanelView({
          ======================================================================== */}
       {tab === 'tasks' && (
         <div key="admin-tab-tasks" className="animate-clay-enter space-y-4">
+          {onSaveTaskPricingConfig && (
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (savingTaskPricing) return;
+                onTabTap?.();
+                setSavingTaskPricing(true);
+                setTaskPricingFeedback(null);
+                try {
+                  const nextCfg = resolveTaskPricingConfig({
+                    minBudgetCoins: Number(minTaskPriceDraft),
+                    channelCheckFeeCoins: Number(channelCheckFeeDraft),
+                    platformFeeRate: Math.max(0, Math.min(50, Number(taskFeePercentDraft) || 0)) / 100,
+                  });
+                  const ok = await onSaveTaskPricingConfig({
+                    minBudgetCoins: nextCfg.minBudgetCoins,
+                    channelCheckFeeCoins: nextCfg.channelCheckFeeCoins,
+                    platformFeeRate: nextCfg.platformFeeRate,
+                  });
+                  if (ok !== false) {
+                    setMinTaskPriceDraft(String(nextCfg.minBudgetCoins));
+                    setChannelCheckFeeDraft(String(nextCfg.channelCheckFeeCoins));
+                    setTaskFeePercentDraft(String(Math.round(nextCfg.platformFeeRate * 100)));
+                    setTaskPricingFeedback(
+                      `Saved! Min ${nextCfg.minBudgetCoins.toLocaleString()} coins (w/ Check: ${(nextCfg.minBudgetCoins + nextCfg.channelCheckFeeCoins).toLocaleString()}).`,
+                    );
+                  } else {
+                    setTaskPricingFeedback('Could not save pricing config.');
+                  }
+                } catch (err) {
+                  setTaskPricingFeedback(
+                    err instanceof Error ? err.message : 'Failed to save pricing config.',
+                  );
+                } finally {
+                  setSavingTaskPricing(false);
+                }
+              }}
+              className="clay-card p-4 space-y-3"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100">
+                    Paid User Task Pricing (+ Add Task)
+                  </h2>
+                  <p className="text-xs text-stone-500 dark:text-stone-400">
+                    Configure minimum Add Task coins price, Channel Check fee &amp; posting fee %
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onTabTap?.();
+                    setMinTaskPriceDraft(String(DEFAULT_TASK_PRICING_CONFIG.minBudgetCoins));
+                    setChannelCheckFeeDraft(String(DEFAULT_TASK_PRICING_CONFIG.channelCheckFeeCoins));
+                    setTaskFeePercentDraft(
+                      String(Math.round(DEFAULT_TASK_PRICING_CONFIG.platformFeeRate * 100)),
+                    );
+                    setTaskPricingFeedback(null);
+                  }}
+                  className="clay-btn clay-btn-neutral px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold shrink-0"
+                >
+                  Defaults (10k / 15k)
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                <div className="space-y-1">
+                  <label
+                    htmlFor="admin-min-add-task-price"
+                    className="text-xs font-bold text-stone-700 dark:text-stone-300"
+                  >
+                    Min. Add Task Price (No Check)
+                  </label>
+                  <input
+                    id="admin-min-add-task-price"
+                    type="number"
+                    min={1000}
+                    max={1000000}
+                    step={100}
+                    required
+                    value={minTaskPriceDraft}
+                    onChange={(e) => setMinTaskPriceDraft(e.target.value)}
+                    className="clay-inset w-full min-h-[42px] px-3 text-sm font-mono-num font-bold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label
+                    htmlFor="admin-channel-check-fee"
+                    className="text-xs font-bold text-stone-700 dark:text-stone-300"
+                  >
+                    Enable Check Extra Fee
+                  </label>
+                  <input
+                    id="admin-channel-check-fee"
+                    type="number"
+                    min={0}
+                    max={500000}
+                    step={100}
+                    required
+                    value={channelCheckFeeDraft}
+                    onChange={(e) => setChannelCheckFeeDraft(e.target.value)}
+                    className="clay-inset w-full min-h-[42px] px-3 text-sm font-mono-num font-bold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label
+                    htmlFor="admin-task-fee-pct"
+                    className="text-xs font-bold text-stone-700 dark:text-stone-300"
+                  >
+                    Posting Fee %
+                  </label>
+                  <input
+                    id="admin-task-fee-pct"
+                    type="number"
+                    min={0}
+                    max={50}
+                    step={1}
+                    required
+                    value={taskFeePercentDraft}
+                    onChange={(e) => setTaskFeePercentDraft(e.target.value)}
+                    className="clay-inset w-full min-h-[42px] px-3 text-sm font-mono-num font-bold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
+              </div>
+
+              {(() => {
+                const draftMin = Math.max(1000, Math.round(Number(minTaskPriceDraft) || 0));
+                const draftCheck = Math.max(0, Math.round(Number(channelCheckFeeDraft) || 0));
+                const draftPct = Math.max(0, Math.min(50, Math.round(Number(taskFeePercentDraft) || 0)));
+                const postingFee = Math.round(draftMin * (draftPct / 100));
+                const pool = Math.max(0, draftMin - postingFee);
+                return (
+                  <div className="clay-inset !rounded-xl px-3 py-2 text-[11px] font-bold text-stone-600 dark:text-stone-300 flex flex-wrap items-center justify-between gap-2">
+                    <span>
+                      No Check Min: <span className="font-mono-num text-stone-900 dark:text-stone-100">{draftMin.toLocaleString()}</span> (Fee{' '}
+                      <span className="font-mono-num text-rose-600 dark:text-rose-400">-{postingFee.toLocaleString()}</span>, Pool{' '}
+                      <span className="font-mono-num text-emerald-700 dark:text-emerald-300">{pool.toLocaleString()}</span>)
+                    </span>
+                    <span>
+                      With Check Min: <span className="font-mono-num text-sky-700 dark:text-sky-300">{(draftMin + draftCheck).toLocaleString()}</span> (Fee{' '}
+                      <span className="font-mono-num text-rose-600 dark:text-rose-400">-{(postingFee + draftCheck).toLocaleString()}</span>)
+                    </span>
+                  </div>
+                );
+              })()}
+
+              {taskPricingFeedback && (
+                <div className="rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 px-3 py-2 text-xs font-bold text-emerald-800 dark:text-emerald-300">
+                  {taskPricingFeedback}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={savingTaskPricing}
+                className="clay-btn clay-btn-amber w-full min-h-[42px] rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
+              >
+                {savingTaskPricing ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Saving Task Pricing...</span>
+                  </>
+                ) : (
+                  <>
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Save Min. Add Task Price</span>
+                  </>
+                )}
+              </button>
+            </form>
+          )}
+
           <form
             onSubmit={(e) => void handleCreateTaskSubmit(e)}
             className="clay-card p-4 space-y-3.5"
@@ -6869,6 +7085,160 @@ export function AdminPanelView({
           </div>
         );
       })()}
+
+      {/* ========================================================================
+          DATA RESET TAB
+         ======================================================================== */}
+      {tab === 'reset' && (
+        <div key="admin-tab-reset" className="animate-clay-enter space-y-4">
+          <div className="clay-card p-4 space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+                  <RotateCcw className="w-4 h-4 text-rose-500" />
+                  <span>System Data Reset (Fresh Launch Mode)</span>
+                </h2>
+                <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
+                  Starts the entire ecosystem fresh from zero without breaking bot settings, channels, ads, or admins.
+                </p>
+              </div>
+              {systemResetConfig && systemResetConfig.resetCount > 0 && (
+                <span className="rounded-lg bg-amber-100 dark:bg-amber-950/60 border border-amber-300/70 dark:border-amber-800/60 px-2.5 py-1 text-[10px] font-extrabold font-mono-num text-amber-800 dark:text-amber-300 shrink-0">
+                  Resets: {systemResetConfig.resetCount}
+                </span>
+              )}
+            </div>
+
+            {systemResetConfig && systemResetConfig.resetEpochMs > 0 && (
+              <div className="clay-inset !rounded-xl px-3 py-2 text-[11px] font-semibold text-stone-600 dark:text-stone-300 flex items-center justify-between gap-2 flex-wrap">
+                <span>
+                  Last Reset: <span className="font-mono-num font-bold">{new Date(systemResetConfig.resetEpochMs).toLocaleString()}</span>
+                </span>
+                {systemResetConfig.resetBy && (
+                  <span className="font-mono-num text-stone-500 dark:text-stone-400">
+                    By: {systemResetConfig.resetBy}
+                  </span>
+                )}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="clay-inset !rounded-2xl p-3.5 space-y-1.5 border border-rose-200/80 dark:border-rose-900/50">
+                <div className="text-xs font-extrabold text-rose-700 dark:text-rose-300 flex items-center gap-1.5">
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Will Be Reset Fresh</span>
+                </div>
+                <ul className="text-[11px] text-stone-600 dark:text-stone-300 space-y-1 list-disc list-inside leading-snug">
+                  <li>All players reset to Level 1, 1,000 starter coins, 0 eggs &amp; 0 chickens</li>
+                  <li>All referral links, counts, commissions &amp; pending bot starts cleared</li>
+                  <li>Leaderboard stats &amp; Season Cup reset to Season 1</li>
+                  <li>Custom/user tasks, promo codes &amp; ban list cleared</li>
+                  <li>Pending withdrawals &amp; server runtime caches closed</li>
+                </ul>
+              </div>
+
+              <div className="clay-inset !rounded-2xl p-3.5 space-y-1.5 border border-emerald-200/80 dark:border-emerald-900/50">
+                <div className="text-xs font-extrabold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>Preserved Safely (Not Touched)</span>
+                </div>
+                <ul className="text-[11px] text-stone-600 dark:text-stone-300 space-y-1 list-disc list-inside leading-snug">
+                  <li>Telegram Bot Token, @username &amp; session encryption key</li>
+                  <li>Required Join Channels &amp; Payout Approval message template</li>
+                  <li>Admin list &amp; Admin Panel passcode vault</li>
+                  <li>Ad provider Block IDs &amp; Paid User Task Pricing config</li>
+                </ul>
+              </div>
+            </div>
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!onExecuteDataReset || resettingData) return;
+                if (resetConfirmInput.trim().toUpperCase() !== 'RESET') return;
+                onTabTap?.();
+                setResettingData(true);
+                setResetFeedback(null);
+                try {
+                  const res = await onExecuteDataReset();
+                  if (res.ok) {
+                    setResetConfirmInput('');
+                    setResetFeedback({
+                      ok: true,
+                      text: res.summary || 'System data reset completed cleanly. All users now start fresh!',
+                    });
+                  } else {
+                    setResetFeedback({
+                      ok: false,
+                      text: res.error || 'System data reset failed.',
+                    });
+                  }
+                } catch (err) {
+                  setResetFeedback({
+                    ok: false,
+                    text: err instanceof Error ? err.message : 'System data reset failed.',
+                  });
+                } finally {
+                  setResettingData(false);
+                }
+              }}
+              className="space-y-3 pt-1"
+            >
+              <div className="space-y-1">
+                <label
+                  htmlFor="admin-data-reset-confirm"
+                  className="text-xs font-bold text-stone-700 dark:text-stone-300"
+                >
+                  Type <span className="font-mono-num font-extrabold text-rose-600 dark:text-rose-400">RESET</span> to confirm full runtime wipe
+                </label>
+                <input
+                  id="admin-data-reset-confirm"
+                  type="text"
+                  value={resetConfirmInput}
+                  onChange={(e) => setResetConfirmInput(e.target.value)}
+                  placeholder="Type RESET here"
+                  autoComplete="off"
+                  className="clay-inset w-full min-h-[44px] px-3 text-sm font-mono-num font-extrabold uppercase text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-rose-400"
+                />
+              </div>
+
+              {resetFeedback && (
+                <div
+                  className={`rounded-xl border px-3 py-2.5 text-xs font-bold ${
+                    resetFeedback.ok
+                      ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800/60 text-emerald-800 dark:text-emerald-300'
+                      : 'bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-800/60 text-rose-700 dark:text-rose-300'
+                  }`}
+                >
+                  {resetFeedback.text}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={
+                  !onExecuteDataReset ||
+                  resettingData ||
+                  resetConfirmInput.trim().toUpperCase() !== 'RESET'
+                }
+                className="clay-btn clay-btn-rose w-full min-h-[46px] rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-2 disabled:opacity-45"
+              >
+                {resettingData ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Resetting System Data...</span>
+                  </>
+                ) : (
+                  <>
+                    <RotateCcw className="w-4 h-4" />
+                    <span>Execute System Data Reset</span>
+                  </>
+                )}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

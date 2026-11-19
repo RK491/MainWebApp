@@ -41,6 +41,7 @@ import {
   DEFAULT_AD_CONFIG,
   DEFAULT_ADMINS_CONFIG,
   DEFAULT_CHANNELS_CONFIG,
+  DEFAULT_TASK_PRICING_CONFIG,
   DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
   eggsToUsd,
   encodeAchievementsWithAds,
@@ -56,6 +57,7 @@ import {
   normalizeTelegramChannelEntry,
   REFERRED_WELCOME_BONUS_COINS,
   REFERRER_SIGNUP_BONUS_COINS,
+  resolveTaskPricingConfig,
   USER_TASK_MAX_REWARD_COINS,
   USER_TASK_MAX_SLOTS,
   USER_TASK_MIN_REWARD_COINS,
@@ -77,7 +79,9 @@ import type {
   RequiredTelegramChannel,
   SeasonConfig,
   SeasonWinnerRecord,
+  SystemResetConfig,
   TaskDefinition,
+  TaskPricingConfig,
   TransactionEntry,
   UserFarmProfile,
   WithdrawApproveMessageTemplate,
@@ -282,6 +286,7 @@ function toFirestoreProfilePayload(profile: UserFarmProfile, isCreate: boolean) 
         autoHarvestUntilMs: profile.autoHarvestUntilMs,
         telegramRemindersEnabled: profile.telegramRemindersEnabled,
         lastReinvestDate: profile.lastReinvestDate,
+        resetEpochMs: profile.resetEpochMs,
       },
     ),
     claimedReferralMilestones: (profile.claimedReferralMilestones ?? []).slice(0, 20),
@@ -355,6 +360,7 @@ function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFa
     autoHarvestUntilMs,
     telegramRemindersEnabled,
     lastReinvestDate,
+    resetEpochMs,
   } = decodeAchievementsAndAds(
     d.claimedAchievementIds,
     d.totalAdsWatched,
@@ -363,6 +369,7 @@ function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFa
       withdrawAdsWatched: typeof d.withdrawAdsWatched === 'number' ? d.withdrawAdsWatched : undefined,
       coopFeverAdsWatched: typeof d.coopFeverAdsWatched === 'number' ? d.coopFeverAdsWatched : undefined,
       lastReinvestDate: typeof d.lastReinvestDate === 'string' ? d.lastReinvestDate : undefined,
+      resetEpochMs: typeof d.resetEpochMs === 'number' ? d.resetEpochMs : undefined,
     },
   );
   return {
@@ -414,6 +421,7 @@ function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFa
     claimedReferralMilestones: Array.isArray(d.claimedReferralMilestones)
       ? (d.claimedReferralMilestones as number[])
       : [],
+    resetEpochMs: resetEpochMs > 0 ? resetEpochMs : undefined,
   };
 }
 
@@ -998,11 +1006,22 @@ export async function commitPlayerMutation(params: {
         }
         applied = true;
 
-        const currentCoins = playerSnap.exists() ? Number(playerSnap.data().coins ?? 0) : params.profile.coins;
+        const playerRaw = playerSnap.exists() ? playerSnap.data() : undefined;
+        const currentCoins = playerRaw ? Number(playerRaw.coins ?? 0) : params.profile.coins;
+        const remoteReferredBy = playerRaw ? String(playerRaw.referredBy || '').trim() : '';
         const syncedProfile: UserFarmProfile = {
           ...params.profile,
           coins: currentCoins + dep.coinsAmount,
           firstDepositBonusUsed: true,
+          ...(remoteReferredBy && !params.profile.referredBy
+            ? {
+                referredBy: remoteReferredBy,
+                referralActivated: Boolean(playerRaw?.referralActivated ?? true),
+              }
+            : {}),
+          ...(playerRaw?.createdAtMs !== undefined
+            ? { createdAtMs: Number(playerRaw.createdAtMs) }
+            : {}),
         };
 
         transaction.update(playerRef, toFirestoreProfilePayload(syncedProfile, false));
@@ -1097,10 +1116,25 @@ export async function commitPlayerMutation(params: {
 
   if (playerDocExists && existingSnap?.exists()) {
     const existingRaw = existingSnap.data();
+    const remoteReferredBy = String(existingRaw.referredBy || '').trim();
+    const shouldPreserveConcurrentReferral = Boolean(remoteReferredBy && !params.profile.referredBy);
     const syncedProfile: UserFarmProfile = {
       ...params.profile,
       createdAtMs: Number(existingRaw.createdAtMs ?? params.profile.createdAtMs),
+      ...(shouldPreserveConcurrentReferral
+        ? {
+            referredBy: remoteReferredBy,
+            referralActivated: Boolean(existingRaw.referralActivated ?? true),
+            coins: safeBoundedCoins(
+              params.profile.coins + REFERRED_WELCOME_BONUS_COINS,
+              params.profile.coins,
+            ),
+          }
+        : {}),
     };
+    if (shouldPreserveConcurrentReferral) {
+      saveCachedPlayerProfile(syncedProfile);
+    }
     batch.update(playerRef, toFirestoreProfilePayload(syncedProfile, false));
   } else {
     batch.set(playerRef, toFirestoreProfilePayload(params.profile, true));
@@ -1712,6 +1746,7 @@ export async function createPaidCustomTaskInFirestore(params: {
   profile: UserFarmProfile;
   transaction: TransactionEntry;
   paidCoins: number;
+  minTotalCostCoins?: number;
   taskInput: {
     title: string;
     subtitle?: string;
@@ -1739,7 +1774,11 @@ export async function createPaidCustomTaskInFirestore(params: {
     USER_TASK_MIN_SLOTS,
     Math.min(USER_TASK_MAX_SLOTS, Math.round(params.taskInput.totalSlots)),
   );
-  const paidCoins = Math.max(USER_TASK_MIN_TOTAL_COST_COINS, Math.round(params.paidCoins));
+  const effectiveMinTotal = Math.max(
+    100,
+    Math.round(params.minTotalCostCoins ?? USER_TASK_MIN_TOTAL_COST_COINS),
+  );
+  const paidCoins = Math.max(100, Math.round(params.paidCoins));
   const requireChannelCheck = Boolean(params.taskInput.requireChannelCheck);
   const encodedSubtitle = encodeTaskSubtitleMeta({
     subtitle: displaySubtitle,
@@ -1763,9 +1802,12 @@ export async function createPaidCustomTaskInFirestore(params: {
         return { error: 'Player profile not synced yet.' } as const;
       }
       const liveCoins = Number(playerSnap.data().coins ?? 0);
-      if (liveCoins < USER_TASK_MIN_TOTAL_COST_COINS || liveCoins < paidCoins) {
+      if (
+        liveCoins < paidCoins ||
+        (liveCoins < effectiveMinTotal && paidCoins + cleanReward < effectiveMinTotal)
+      ) {
         return {
-          error: `Need at least ${Math.max(USER_TASK_MIN_TOTAL_COST_COINS, paidCoins).toLocaleString()} coins to publish this task (you have ${liveCoins.toLocaleString()}).`,
+          error: `Need at least ${Math.max(effectiveMinTotal, paidCoins).toLocaleString()} coins to publish this task (you have ${liveCoins.toLocaleString()}).`,
         } as const;
       }
 
@@ -3685,4 +3727,70 @@ export async function saveWithdrawApproveTemplateInFirestore(
     handleFirestoreError(error, OperationType.WRITE, 'app_config/payout_template');
   }
 }
+
+export function subscribeToTaskPricingConfig(
+  onUpdate: (pricing: TaskPricingConfig) => void,
+): () => void {
+  return onSnapshot(
+    doc(db, 'app_config', 'task_pricing'),
+    (snap) => {
+      if (!snap.exists()) {
+        onUpdate(DEFAULT_TASK_PRICING_CONFIG);
+        return;
+      }
+      const d = snap.data();
+      onUpdate(
+        resolveTaskPricingConfig({
+          minBudgetCoins: Number(d.minBudgetCoins),
+          channelCheckFeeCoins: Number(d.channelCheckFeeCoins),
+          platformFeeRate: Number(d.platformFeeRate),
+          updatedAtMs: Number(d.updatedAtMs ?? 0),
+        }),
+      );
+    },
+    (err) => logSubscriptionError('app_config/task_pricing', err),
+  );
+}
+
+export async function saveTaskPricingConfigInFirestore(
+  input: Omit<TaskPricingConfig, 'updatedAtMs'>,
+): Promise<TaskPricingConfig> {
+  const nowMs = Date.now();
+  const payload = resolveTaskPricingConfig({
+    ...input,
+    updatedAtMs: nowMs,
+  });
+  try {
+    await setDoc(doc(db, 'app_config', 'task_pricing'), {
+      ...payload,
+      updatedAt: serverTimestamp(),
+    });
+    return payload;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'app_config/task_pricing');
+  }
+}
+
+export function subscribeToSystemResetConfig(
+  onUpdate: (resetConfig: SystemResetConfig) => void,
+): () => void {
+  return onSnapshot(
+    doc(db, 'app_config', 'system_reset'),
+    (snap) => {
+      if (!snap.exists()) {
+        onUpdate({ resetEpochMs: 0, resetCount: 0, resetBy: '', updatedAtMs: 0 });
+        return;
+      }
+      const d = snap.data();
+      onUpdate({
+        resetEpochMs: Math.max(0, Number(d.resetEpochMs ?? 0) || 0),
+        resetCount: Math.max(0, Math.floor(Number(d.resetCount ?? 0) || 0)),
+        resetBy: String(d.resetBy ?? '').slice(0, 64),
+        updatedAtMs: Math.max(0, Number(d.updatedAtMs ?? 0) || 0),
+      });
+    },
+    (err) => logSubscriptionError('app_config/system_reset', err),
+  );
+}
+
 

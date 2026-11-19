@@ -48,12 +48,11 @@ import {
   getTaskRemainingSlots,
   getWithdrawAdGateStatus,
   mergeTaskDefinitions,
+  resolveTaskPricingConfig,
   sortTasks,
-  USER_TASK_CHANNEL_CHECK_FEE_COINS,
   USER_TASK_MAX_REWARD_COINS,
   USER_TASK_MIN_REWARD_COINS,
   USER_TASK_MIN_TOPUP_COINS,
-  USER_TASK_MIN_TOTAL_COST_COINS,
 } from '../game/economy';
 import type {
   AdConfig,
@@ -62,6 +61,7 @@ import type {
   RequiredTelegramChannel,
   TaskCategory,
   TaskDefinition,
+  TaskPricingConfig,
   TaskSortOption,
   UserFarmProfile,
 } from '../types/farm';
@@ -81,6 +81,8 @@ interface TasksViewProps {
   channelsGateEnabled?: boolean;
   payoutChannelUrl?: string;
   getCodeChannelUrl?: string;
+  botUsername?: string | null;
+  taskPricingConfig?: TaskPricingConfig;
   watchingAd?: boolean;
   activeAdNetwork?: AdNetworkId | null;
   activeAdAction?: 'watch_ad' | 'ad_network' | 'adsgram_task' | null;
@@ -92,7 +94,7 @@ interface TasksViewProps {
   onVerifyTaskChannel?: (
     actionUrl: string,
     options?: { requireChannelCheck?: boolean },
-  ) => Promise<{ joined: boolean; handle?: string }>;
+  ) => Promise<{ joined: boolean; handle?: string; status?: string; reason?: string }>;
   onTabTap?: () => void;
   onClaimPromo: (code: string) => void;
   onClaimDaily: () => void;
@@ -131,6 +133,8 @@ export function TasksView({
   channelsGateEnabled = true,
   payoutChannelUrl = DEFAULT_PAYOUT_CHANNEL_URL,
   getCodeChannelUrl,
+  botUsername,
+  taskPricingConfig,
   watchingAd = false,
   activeAdNetwork = null,
   activeAdAction = null,
@@ -155,6 +159,13 @@ export function TasksView({
   onRefundTask,
 }: TasksViewProps) {
   const shouldReduceMotion = useReducedMotion();
+  const resolvedPricing = useMemo(
+    () => resolveTaskPricingConfig(taskPricingConfig),
+    [taskPricingConfig],
+  );
+  const resolvedBotTag = botUsername
+    ? `@${botUsername.replace(/^@+/, '')}`
+    : 'our Telegram Bot';
   const resolvedGetCodeUrl =
     (getCodeChannelUrl || '').trim() ||
     (payoutChannelUrl || '').trim() ||
@@ -165,6 +176,7 @@ export function TasksView({
   const [openPreviewId, setOpenPreviewId] = useState<string | null>(null);
   const [taskStages, setTaskStages] = useState<Record<string, TaskCheckStage>>({});
   const [taskRetryHandles, setTaskRetryHandles] = useState<Record<string, string>>({});
+  const [taskRetryReasons, setTaskRetryReasons] = useState<Record<string, string>>({});
   const checkTimersRef = useRef<Record<string, number>>({});
 
   // Pull-to-refresh & 60s auto-refresh state
@@ -179,12 +191,23 @@ export function TasksView({
   const [addModalStep, setAddModalStep] = useState<'form' | 'preview'>('form');
   const [newTitle, setNewTitle] = useState('');
   const [newSubtitle, setNewSubtitle] = useState('');
-  const [newBudgetCoins, setNewBudgetCoins] = useState(String(USER_TASK_MIN_TOTAL_COST_COINS));
+  const [newBudgetCoins, setNewBudgetCoins] = useState(String(resolvedPricing.minBudgetCoins));
   const [newRewardCoins, setNewRewardCoins] = useState(String(USER_TASK_MIN_REWARD_COINS));
   const [newIcon, setNewIcon] = useState('send');
   const [newActionUrl, setNewActionUrl] = useState('');
   const [newRequireChannelCheck, setNewRequireChannelCheck] = useState(false);
   const [creatingTask, setCreatingTask] = useState(false);
+
+  useEffect(() => {
+    if (!showAddModal) {
+      setNewBudgetCoins(
+        String(
+          resolvedPricing.minBudgetCoins +
+            (newRequireChannelCheck ? resolvedPricing.channelCheckFeeCoins : 0),
+        ),
+      );
+    }
+  }, [resolvedPricing.minBudgetCoins, resolvedPricing.channelCheckFeeCoins, newRequireChannelCheck, showAddModal]);
 
   const triggerRefresh = useCallback(
     async (silent = false) => {
@@ -419,6 +442,19 @@ export function TasksView({
           if (taskCheck.handle) {
             setTaskRetryHandles((prev) => ({ ...prev, [task.id]: taskCheck.handle! }));
           }
+          if (
+            taskCheck.reason &&
+            taskCheck.status !== 'left' &&
+            taskCheck.status !== 'kicked'
+          ) {
+            setTaskRetryReasons((prev) => ({ ...prev, [task.id]: taskCheck.reason! }));
+          } else {
+            setTaskRetryReasons((prev) => {
+              const next = { ...prev };
+              delete next[task.id];
+              return next;
+            });
+          }
           return;
         }
       } catch {
@@ -434,6 +470,11 @@ export function TasksView({
       return next;
     });
     setTaskRetryHandles((prev) => {
+      const next = { ...prev };
+      delete next[task.id];
+      return next;
+    });
+    setTaskRetryReasons((prev) => {
       const next = { ...prev };
       delete next[task.id];
       return next;
@@ -795,7 +836,8 @@ export function TasksView({
               <div className="text-[11px] font-bold text-rose-600 dark:text-rose-400 flex items-center gap-1.5 px-0.5">
                 <AlertCircle className="w-3 h-3 shrink-0" />
                 <span>
-                  Not joined {taskRetryHandles[task.id] || 'this channel'} yet — tap Join, then Retry.
+                  {taskRetryReasons[task.id] ||
+                    `Not joined ${taskRetryHandles[task.id] || 'this channel'} yet — tap Join, then Retry.`}
                 </span>
               </div>
             )}
@@ -808,12 +850,13 @@ export function TasksView({
   const parsedBudgetCoins = Math.floor(Number(newBudgetCoins) || 0);
   const parsedRewardCoins = Math.floor(Number(newRewardCoins) || 0);
   const minBudgetWithChannelOpt =
-    USER_TASK_MIN_TOTAL_COST_COINS +
-    (newRequireChannelCheck ? USER_TASK_CHANNEL_CHECK_FEE_COINS : 0);
+    resolvedPricing.minBudgetCoins +
+    (newRequireChannelCheck ? resolvedPricing.channelCheckFeeCoins : 0);
   const budgetPreview = calculatePaidTaskFromBudget(
     parsedBudgetCoins,
     parsedRewardCoins,
     newRequireChannelCheck,
+    resolvedPricing,
   );
   const requiredCoins = Math.max(
     minBudgetWithChannelOpt,
@@ -856,7 +899,7 @@ export function TasksView({
         setNewTitle('');
         setNewSubtitle('');
         setNewActionUrl('');
-        setNewBudgetCoins(String(USER_TASK_MIN_TOTAL_COST_COINS));
+        setNewBudgetCoins(String(resolvedPricing.minBudgetCoins));
         setNewRewardCoins(String(USER_TASK_MIN_REWARD_COINS));
         setNewRequireChannelCheck(false);
         setAddModalStep('form');
@@ -1690,7 +1733,9 @@ export function TasksView({
                 </h2>
                 <p className="text-xs text-stone-500 dark:text-stone-400">
                   {addModalStep === 'form'
-                    ? `Min ${USER_TASK_MIN_TOTAL_COST_COINS.toLocaleString()} coins`
+                    ? `Min ${minBudgetWithChannelOpt.toLocaleString()} coins${
+                        newRequireChannelCheck ? ' (includes channel check)' : ''
+                      }`
                     : 'Review deducted fee, unlocked slots & Sponsors listing'}
                 </p>
               </div>
@@ -1816,7 +1861,7 @@ export function TasksView({
                   </div>
                 </div>
 
-                {/* Optional Telegram Channel Membership Verification (+1,000 coins) */}
+                {/* Optional Telegram Channel Membership Verification */}
                 <label
                   htmlFor="new-task-channel-check"
                   className={`clay-inset !rounded-2xl p-3 flex items-start gap-3 cursor-pointer border transition-colors ${
@@ -1831,7 +1876,16 @@ export function TasksView({
                     checked={newRequireChannelCheck}
                     onChange={(e) => {
                       onTabTap?.();
-                      setNewRequireChannelCheck(e.target.checked);
+                      const checked = e.target.checked;
+                      setNewRequireChannelCheck(checked);
+                      const minWithout = resolvedPricing.minBudgetCoins;
+                      const minWith = minWithout + resolvedPricing.channelCheckFeeCoins;
+                      const curBudget = Math.floor(Number(newBudgetCoins) || 0);
+                      if (checked && curBudget <= minWithout) {
+                        setNewBudgetCoins(String(minWith));
+                      } else if (!checked && curBudget === minWith) {
+                        setNewBudgetCoins(String(minWithout));
+                      }
                     }}
                     className="mt-0.5 w-4.5 h-4.5 accent-sky-600 rounded cursor-pointer shrink-0"
                   />
@@ -1842,12 +1896,13 @@ export function TasksView({
                         <span>Enable Channel Check</span>
                       </span>
                       <span className="rounded-md bg-amber-100 dark:bg-amber-950/70 border border-amber-300/70 dark:border-amber-800/60 px-1.5 py-0.5 text-[10px] font-extrabold font-mono-num text-amber-800 dark:text-amber-300 shrink-0">
-                        +{USER_TASK_CHANNEL_CHECK_FEE_COINS.toLocaleString()} coins
+                        +{resolvedPricing.channelCheckFeeCoins.toLocaleString()} coins
                       </span>
                     </div>
                     <p className="text-[11px] leading-snug text-stone-500 dark:text-stone-400">
-                      Tick to verify users actually joined your Telegram channel before claiming (extra{' '}
-                      {USER_TASK_CHANNEL_CHECK_FEE_COINS.toLocaleString()} coins). Leave unticked to allow Claim without verification.
+                      Tick to verify users joined your Telegram channel (requires{' '}
+                      {(resolvedPricing.minBudgetCoins + resolvedPricing.channelCheckFeeCoins).toLocaleString()}{' '}
+                      coins min). Make {resolvedBotTag} an Admin in your channel!
                     </p>
                   </div>
                 </label>
@@ -1922,6 +1977,19 @@ export function TasksView({
                   </div>
                 </div>
 
+                {budgetPreview.requireChannelCheck && (
+                  <div className="rounded-2xl bg-sky-50 dark:bg-sky-950/40 border border-sky-300/80 dark:border-sky-800/60 p-3 flex items-start gap-2.5 text-xs text-sky-900 dark:text-sky-200">
+                    <ShieldCheck className="w-4 h-4 text-sky-600 dark:text-sky-400 shrink-0 mt-0.5" />
+                    <div className="space-y-0.5 leading-snug">
+                      <div className="font-extrabold">Make {resolvedBotTag} an Admin in Your Channel</div>
+                      <p className="text-[11px] text-sky-800/90 dark:text-sky-300/90">
+                        Before publishing, add <span className="font-extrabold">{resolvedBotTag}</span> as an
+                        Administrator in your Telegram channel so real-time join verification works for every claimer.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
                 {/* Slots & Deducted Fee Summary */}
                 <div className="clay-card-warm !rounded-2xl p-3.5 space-y-2 text-xs">
                   <div className="flex items-center justify-between text-stone-600 dark:text-stone-300">
@@ -1931,7 +1999,7 @@ export function TasksView({
                     </span>
                   </div>
                   <div className="flex items-center justify-between text-stone-600 dark:text-stone-300">
-                    <span>Task Posting Fee Deducted</span>
+                    <span>Task Posting Fee ({Math.round(resolvedPricing.platformFeeRate * 100)}%)</span>
                     <span className="font-mono-num font-bold text-rose-600 dark:text-rose-400">
                       -{budgetPreview.platformFeeCoins.toLocaleString()} coins
                     </span>
@@ -1950,6 +2018,14 @@ export function TasksView({
                         : '0 coins (Off)'}
                     </span>
                   </div>
+                  {budgetPreview.requireChannelCheck && (
+                    <div className="flex items-center justify-between text-stone-700 dark:text-stone-200 font-bold">
+                      <span>Total Check + Posting Fee</span>
+                      <span className="font-mono-num font-extrabold text-rose-600 dark:text-rose-400">
+                        -{(budgetPreview.platformFeeCoins + budgetPreview.channelCheckFeeCoins).toLocaleString()} coins
+                      </span>
+                    </div>
+                  )}
                   <div className="flex items-center justify-between text-stone-700 dark:text-stone-200 font-bold">
                     <span>Slots Unlocked ({budgetPreview.rewardCoins.toLocaleString()}/user)</span>
                     <span className="font-mono-num font-extrabold text-emerald-700 dark:text-emerald-300">

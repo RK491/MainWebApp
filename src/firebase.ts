@@ -1,11 +1,13 @@
 import { initializeApp } from 'firebase/app';
 import {
   doc,
+  enableNetwork,
   getDocFromServer,
   getFirestore,
   initializeFirestore,
+  memoryLocalCache,
   persistentLocalCache,
-  persistentMultipleTabManager,
+  persistentSingleTabManager,
   type Firestore,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
@@ -13,19 +15,38 @@ import firebaseConfig from '../firebase-applet-config.json';
 const app = initializeApp(firebaseConfig);
 
 function createFirestoreInstance(): Firestore {
+  const isBrowser = typeof window !== 'undefined';
+  const transportSettings = isBrowser
+    ? {
+        experimentalForceLongPolling: true,
+        experimentalLongPollingOptions: { timeoutSeconds: 15 },
+      }
+    : {};
+
   try {
     return initializeFirestore(
       app,
       {
         localCache: persistentLocalCache({
-          tabManager: persistentMultipleTabManager(),
+          tabManager: persistentSingleTabManager({ forceOwnership: true }),
         }),
-        experimentalAutoDetectLongPolling: true,
+        ...transportSettings,
       },
       firebaseConfig.firestoreDatabaseId,
     );
   } catch {
-    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    try {
+      return initializeFirestore(
+        app,
+        {
+          localCache: memoryLocalCache(),
+          ...transportSettings,
+        },
+        firebaseConfig.firestoreDatabaseId,
+      );
+    } catch {
+      return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    }
   }
 }
 
@@ -61,14 +82,27 @@ export function handleFirestoreError(
 }
 
 export async function testFirestoreConnection(): Promise<boolean> {
-  try {
-    await getDocFromServer(doc(db, 'leaderboard', 'healthcheck'));
-    return true;
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
+  const probeRef = doc(db, 'leaderboard', 'healthcheck');
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await enableNetwork(db).catch(() => {});
+      await getDocFromServer(probeRef);
+      return true;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      const isOfflineErr =
+        msg.includes('the client is offline') ||
+        msg.includes('Could not reach Cloud Firestore backend');
+      if (!isOfflineErr) {
+        return true;
+      }
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        continue;
+      }
       console.error('Please check your Firebase configuration.');
       return false;
     }
-    return true;
   }
+  return false;
 }

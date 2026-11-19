@@ -96,6 +96,7 @@ export interface UserFarmProfile {
   goldenEggsFound?: number;
   claimedAchievementIds?: string[];
   claimedReferralMilestones?: number[];
+  resetEpochMs?: number;
 }
 
 export type WithdrawalStatus = 'pending' | 'approved' | 'rejected' | 'completed' | 'processing';
@@ -427,4 +428,19 @@ export interface SystemDiagnosticsSnapshot {
   rateLimitBucketsCount: number;
   serverLogs: SystemServerLogEntry[];
 }
+
+export interface TaskPricingConfig {
+  minBudgetCoins: number;
+  channelCheckFeeCoins: number;
+  platformFeeRate: number;
+  updatedAtMs: number;
+}
+
+export interface SystemResetConfig {
+  resetEpochMs: number;
+  resetCount: number;
+  resetBy: string;
+  updatedAtMs: number;
+}
+
 
