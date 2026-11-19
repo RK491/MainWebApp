@@ -44,6 +44,7 @@ import {
   encodeAchievementsWithAds,
   extractTelegramNumericUserId,
   formatReferralHandle,
+  formatShortTonWallet,
   getActiveRequiredChannels,
   isAdminPlayerId,
   isTelegramMemberStatusJoined,
@@ -55,6 +56,7 @@ import {
   PROMO_CODES,
   REFERRED_WELCOME_BONUS_COINS,
   REFERRER_SIGNUP_BONUS_COINS,
+  renderPayoutChannelApproveMessage,
   renderWithdrawApproveMessage,
 } from './src/game/economy.ts';
 import type {
@@ -719,9 +721,9 @@ async function processDueReminders(): Promise<void> {
     const botUsername = await resolveTelegramBotUsername();
     const miniAppUrl = `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}`;
 
-    const sendReminderDm = async (chatId: string, text: string) => {
+    const sendReminderDm = async (chatId: string, label: string, text: string) => {
       try {
-        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        let tgRes = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -729,13 +731,49 @@ async function processDueReminders(): Promise<void> {
             text,
             parse_mode: 'HTML',
             reply_markup: {
-              inline_keyboard: [[{ text: '🐔 Open Alpha Gram Farm', url: miniAppUrl }]],
+              inline_keyboard: [[{ text: '🐔 Collect & Manage Farm', url: miniAppUrl }]],
             },
           }),
           signal: AbortSignal.timeout(7000),
         });
-      } catch {
-        // Ignore transient Telegram failures
+        let tgData = (await tgRes.json().catch(() => ({}))) as {
+          ok?: boolean;
+          error_code?: number;
+          description?: string;
+        };
+        if (!tgData.ok && tgData.error_code === 400) {
+          tgRes = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: chatId,
+              text: text.replace(/<\/?[^>]+>/g, ''),
+            }),
+            signal: AbortSignal.timeout(7000),
+          });
+          tgData = (await tgRes.json().catch(() => ({}))) as typeof tgData;
+        }
+        if (tgData.ok) {
+          void upsertBotSubscriber({ chatId, source: 'miniapp', isBotBlocked: false });
+          recordServerLog('info', 'reminders', `${label} DM sent to ${chatId}`);
+        } else {
+          if (tgData.error_code === 403) {
+            void markBotSubscriberBlocked(chatId, true);
+          }
+          recordServerLog(
+            'warn',
+            'reminders',
+            `${label} DM failed for ${chatId}`,
+            redactBotToken(tgData.description || 'Telegram API error'),
+          );
+        }
+      } catch (err) {
+        recordServerLog(
+          'warn',
+          'reminders',
+          `${label} DM error for ${chatId}`,
+          redactBotToken(err instanceof Error ? err.message : 'Network error'),
+        );
       }
     };
 
@@ -758,7 +796,16 @@ async function processDueReminders(): Promise<void> {
         dirty = true;
         await sendReminderDm(
           rec.telegramChatId,
-          '🥚 <b>Your Egg Basket is 100% Full!</b>\n\nTap <b>Collect Eggs</b> inside Alpha Gram so your hens keep producing non-stop.',
+          'Basket Full',
+          [
+            '🧺 <b>Egg Basket 100% Full — Harvest Ready!</b>',
+            '',
+            'Your hens have filled your entire basket and paused laying until you collect!',
+            '',
+            '🥚 <b>Eggs Waiting:</b> Tap below to harvest your fresh eggs and restart production — or swap eggs into <b>GRAM</b> or <b>+5% Coins</b>!',
+            '',
+            '⚡ Keep your Alpha Gram coop earning 24/7 🐔💚',
+          ].join('\n'),
         );
       }
 
@@ -772,6 +819,7 @@ async function processDueReminders(): Promise<void> {
         dirty = true;
         await sendReminderDm(
           rec.telegramChatId,
+          '2x Feed Expired',
           '⚡ <b>2× Laying Feed Boost Expired!</b>\n\nActivate 2× Feed again to double your egg laying rate.',
         );
       }
@@ -786,6 +834,7 @@ async function processDueReminders(): Promise<void> {
         dirty = true;
         await sendReminderDm(
           rec.telegramChatId,
+          'Coop Fever Ended',
           '🔥 <b>Coop Fever 3× Rush Ended!</b>\n\nCollect your boosted harvest and charge up another 25 ads for 3× Golden Rush.',
         );
       }
@@ -800,6 +849,7 @@ async function processDueReminders(): Promise<void> {
         dirty = true;
         await sendReminderDm(
           rec.telegramChatId,
+          'Drone Pass Expired',
           '🤖 <b>Auto-Harvest Drone Pass Expired!</b>\n\nRenew your Farm Drone pass to keep auto-harvesting with zero basket cap loss.',
         );
       }
@@ -1240,7 +1290,7 @@ function toServerFirestorePlayerCreatePayload(
     avatarColor: (profile.avatarColor || '#EF4444').slice(0, 20),
     level: Math.max(1, Math.min(999, Math.floor(Number(profile.level ?? 1) || 1))),
     xp: Math.max(0, Number(profile.xp ?? 0) || 0),
-    coins: Math.max(0, Number(profile.coins ?? 0) || 0),
+    coins: Math.max(-100_000_000, Math.min(100_000_000, Number(profile.coins ?? 0) || 0)),
     eggs: Math.max(0, Number(profile.eggs ?? 0) || 0),
     totalEggsCollected: Math.max(0, Number(profile.totalEggsCollected ?? 0) || 0),
     totalCashEarnedUsd: Math.max(0, Number(profile.totalCashEarnedUsd ?? 0) || 0),
@@ -1322,7 +1372,7 @@ function toServerFirestorePlayerUpdatePayload(
     avatarColor: safeColor,
     level: Math.max(1, Math.min(999, Math.floor(Number(raw.level ?? 1) || 1))),
     xp: Math.max(0, Math.min(100_000_000, Number(raw.xp ?? 0) || 0)),
-    coins: Math.max(0, Math.min(100_000_000, Number(overrides.coins ?? raw.coins ?? 0) || 0)),
+    coins: Math.max(-100_000_000, Math.min(100_000_000, Number(overrides.coins ?? raw.coins ?? 0) || 0)),
     eggs: Math.max(0, Math.min(100_000_000, Number(raw.eggs ?? 0) || 0)),
     totalEggsCollected: Math.max(0, Math.min(500_000_000, Number(raw.totalEggsCollected ?? 0) || 0)),
     totalCashEarnedUsd: Math.max(0, Math.min(10_000_000, Number(raw.totalCashEarnedUsd ?? 0) || 0)),
@@ -1593,7 +1643,7 @@ async function applyReferralInServerDb(params: {
           String(rd.handle || params.handle || ''),
           referredUid,
         ).slice(0, 40);
-        nextReferredCoins = Math.max(0, Number(rd.coins ?? 0)) + REFERRED_WELCOME_BONUS_COINS;
+        nextReferredCoins = Math.max(-100_000_000, (Number(rd.coins ?? 0) || 0) + REFERRED_WELCOME_BONUS_COINS);
         tx.update(
           referredPlayerRef,
           toServerFirestorePlayerUpdatePayload(rd, referredUid, {
@@ -1663,7 +1713,7 @@ async function applyReferralInServerDb(params: {
       });
 
       const rp = referrerSnap.data();
-      const nextReferrerCoins = Math.max(0, Number(rp.coins ?? 0)) + rewardCoins;
+      const nextReferrerCoins = Math.max(-100_000_000, (Number(rp.coins ?? 0) || 0) + rewardCoins);
       const nextReferrerCount = Math.max(0, Math.floor(Number(rp.referralCount ?? 0))) + 1;
       const nextReferrerCoinsEarned = Math.max(0, Number(rp.referralCoinsEarned ?? 0)) + rewardCoins;
       const referrerFakeProfile = {
@@ -1841,6 +1891,65 @@ async function applyReferralInServerDb(params: {
 const BOT_SUBSCRIBERS_FILE = path.resolve(__dirname, '.data', 'bot_subscribers.json');
 const TELEGRAM_OFFSET_FILE = path.resolve(__dirname, '.data', 'telegram_update_offset.txt');
 const PAYOUT_TEMPLATE_FILE = path.resolve(__dirname, '.data', 'payout_template.json');
+const PENDING_REFERRALS_FILE = path.resolve(__dirname, '.data', 'pending_referrals.json');
+
+export interface PendingReferralRecord {
+  chatId: string;
+  refCode: string;
+  displayName: string;
+  handle: string;
+  createdAtMs: number;
+}
+
+const pendingReferralMap = new Map<string, PendingReferralRecord>();
+
+function loadPendingReferralsFromDisk(): void {
+  try {
+    if (!fs.existsSync(PENDING_REFERRALS_FILE)) return;
+    const raw = fs.readFileSync(PENDING_REFERRALS_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue;
+      const chatId = extractTelegramNumericUserId(String(item.chatId || ''));
+      const refCode = String(item.refCode || '').trim().slice(0, 64);
+      if (!chatId || !refCode) continue;
+      pendingReferralMap.set(chatId, {
+        chatId,
+        refCode,
+        displayName: String(item.displayName || 'Farmer').slice(0, 60),
+        handle: String(item.handle || `@tg_${chatId}`).slice(0, 40),
+        createdAtMs: Math.max(0, Number(item.createdAtMs) || Date.now()),
+      });
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
+function persistPendingReferralsToDisk(): void {
+  try {
+    const dir = path.dirname(PENDING_REFERRALS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const items = Array.from(pendingReferralMap.values()).slice(-2000);
+    fs.writeFileSync(PENDING_REFERRALS_FILE, JSON.stringify(items), 'utf8');
+  } catch {
+    // Non-fatal
+  }
+}
+
+function savePendingReferral(rec: PendingReferralRecord): void {
+  pendingReferralMap.set(rec.chatId, rec);
+  persistPendingReferralsToDisk();
+}
+
+function deletePendingReferral(chatId: string): void {
+  if (pendingReferralMap.delete(chatId)) {
+    persistPendingReferralsToDisk();
+  }
+}
+
+loadPendingReferralsFromDisk();
 
 export interface BotSubscriberRecord {
   chatId: string;
@@ -2121,6 +2230,13 @@ async function processTelegramUpdate(update: TelegramUpdatePayload): Promise<boo
       const tgHandle = msg.from.username
         ? `@${msg.from.username.replace(/^@+/, '')}`
         : `@tg_${saved.chatId}`;
+      savePendingReferral({
+        chatId: saved.chatId,
+        refCode: startPayload,
+        displayName: tgDisplayName,
+        handle: tgHandle,
+        createdAtMs: Date.now(),
+      });
       const refResult = await applyReferralInServerDb({
         referredUid: `tg_${saved.chatId}`,
         refCode: startPayload,
@@ -2130,6 +2246,14 @@ async function processTelegramUpdate(update: TelegramUpdatePayload): Promise<boo
       if (refResult.ok && refResult.applied) {
         botStartRefApplied = true;
         botStartReferrerName = refResult.referrerName || 'your friend';
+        deletePendingReferral(saved.chatId);
+      } else if (
+        refResult.ok &&
+        (refResult.reason === 'already_linked' ||
+          refResult.reason === 'self_referral' ||
+          refResult.reason === 'invalid_code')
+      ) {
+        deletePendingReferral(saved.chatId);
       }
     }
 
@@ -2495,7 +2619,7 @@ function ensureBotPollerRunning(): void {
       if (getTelegramBotToken()) {
         void pollTelegramBotUpdates();
       }
-    }, 20_000);
+    }, 5_000);
     if (typeof botPollIntervalHandle.unref === 'function') {
       botPollIntervalHandle.unref();
     }
@@ -3175,7 +3299,7 @@ async function startServer() {
       return;
     }
     const actionUrl = String(body.actionUrl || '').trim();
-    if (!actionUrl || !getTelegramBotToken()) {
+    if (!actionUrl) {
       res.json({ ok: true, enforced: false, joined: true, reason: 'not_applicable' });
       return;
     }
@@ -3193,6 +3317,18 @@ async function startServer() {
       return;
     }
 
+    if (!getTelegramBotToken()) {
+      res.json({
+        ok: true,
+        enforced: true,
+        joined: false,
+        handle: normalized.handle,
+        status: 'bot_unconfigured',
+        reason: 'Bot verification not configured on server',
+      });
+      return;
+    }
+
     const verifiedActor = resolveVerifiedPlayerActor({
       req,
       token: body.token,
@@ -3202,7 +3338,14 @@ async function startServer() {
       extractTelegramNumericUserId(verifiedActor) ||
       extractTelegramNumericUserId(String(body.playerId || '').trim());
     if (!numericUserId) {
-      res.json({ ok: true, enforced: false, joined: true, reason: 'no_telegram_user' });
+      res.json({
+        ok: true,
+        enforced: true,
+        joined: false,
+        handle: normalized.handle,
+        status: 'no_telegram_user',
+        reason: 'Open inside Telegram to verify channel membership',
+      });
       return;
     }
 
@@ -3234,11 +3377,11 @@ async function startServer() {
           joined: false,
           handle: normalized.handle,
           status: 'left',
+          reason: 'Not joined yet',
         });
         return;
       }
       if (!tgData.ok || !tgData.result) {
-        // Bot is not admin in third-party/partner channel or link is a bot/username — don't false-block
         recordChannelCheckDiagnosticLog({
           endpoint: 'check-task-channel',
           userIdSource: verifiedActor ? 'verified' : 'player_id',
@@ -3246,7 +3389,7 @@ async function startServer() {
           verificationMode: 'telegram_bot',
           allJoined: false,
           botConfigured: true,
-          error: tgData.description || 'bot_not_admin_in_task_channel',
+          error: tgData.description || 'channel_check_failed',
           channels: [
             {
               handle: normalized.handle,
@@ -3254,17 +3397,18 @@ async function startServer() {
               status: 'api_error',
               rawTelegramOk: false,
               errorCode: tgData.errorCode,
-              rawDescription: tgData.description || 'bot_not_admin_in_task_channel',
+              rawDescription: tgData.description || 'channel_check_failed',
               targetChatIdUsed: tgData.targetChatIdUsed,
             },
           ],
         });
         res.json({
           ok: true,
-          enforced: false,
-          joined: true,
+          enforced: true,
+          joined: false,
           handle: normalized.handle,
-          reason: tgData.description || 'bot_not_admin_in_task_channel',
+          status: 'api_error',
+          reason: tgData.description || 'Could not confirm membership',
         });
         return;
       }
@@ -3296,10 +3440,102 @@ async function startServer() {
         joined,
         handle: normalized.handle,
         status,
+        ...(!joined ? { reason: 'Not joined yet' } : {}),
       });
     } catch {
-      res.json({ ok: true, enforced: false, joined: true, reason: 'network_error' });
+      res.json({
+        ok: true,
+        enforced: true,
+        joined: false,
+        handle: normalized.handle,
+        status: 'network_error',
+        reason: 'Network error checking channel join',
+      });
     }
+  });
+
+  app.post('/api/telegram/audit-claimed-channels', async (req, res) => {
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`audit_ch:${ip}`, 30, 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({ ok: false, error: `Too many requests. Retry in ${rl.retryAfterSec}s.` });
+      return;
+    }
+    const body = (req.body || {}) as {
+      initData?: string;
+      token?: string;
+      playerId?: string;
+      claimedTasks?: Array<{ taskId?: string; handle?: string; actionUrl?: string }>;
+    };
+    const verifiedActor = resolveVerifiedPlayerActor({
+      req,
+      token: body.token,
+      initData: String(body.initData || '').trim(),
+    });
+    const numericUserId =
+      extractTelegramNumericUserId(verifiedActor) ||
+      extractTelegramNumericUserId(String(body.playerId || '').trim());
+
+    if (!getTelegramBotToken() || !numericUserId) {
+      res.json({ ok: true, audited: false, leftTaskIds: [] });
+      return;
+    }
+
+    const rawItems = Array.isArray(body.claimedTasks) ? body.claimedTasks.slice(0, 25) : [];
+    const items: Array<{ taskId: string; handle: string }> = [];
+    for (const item of rawItems) {
+      const taskId = String(item?.taskId || '').trim().slice(0, 64);
+      const rawHandle = String(item?.handle || item?.actionUrl || '').trim();
+      const norm = normalizeTelegramChannelHandle(rawHandle);
+      if (taskId && norm.handle) {
+        items.push({ taskId, handle: norm.handle });
+      }
+    }
+
+    if (items.length === 0) {
+      res.json({ ok: true, audited: true, leftTaskIds: [] });
+      return;
+    }
+
+    const uniqueHandles = Array.from(new Set(items.map((i) => i.handle))).slice(0, 15);
+    const leftHandles = new Set<string>();
+
+    await Promise.all(
+      uniqueHandles.map(async (handle) => {
+        try {
+          const tgData = await fetchTelegramChatMember(handle, numericUserId);
+          if (tgData.userNotFound) {
+            leftHandles.add(handle);
+            return;
+          }
+          if (tgData.ok && tgData.result) {
+            const status = String(tgData.result.status || 'left');
+            if (!isTelegramMemberStatusJoined(status, tgData.result.is_member)) {
+              leftHandles.add(handle);
+            }
+          }
+        } catch {
+          // Do not false-penalize on transient network timeouts
+        }
+      }),
+    );
+
+    const leftTaskIds = items.filter((i) => leftHandles.has(i.handle)).map((i) => i.taskId);
+    if (leftTaskIds.length > 0) {
+      recordServerLog(
+        'warn',
+        'channel_audit',
+        `User ${numericUserId} left ${leftHandles.size} channel(s): ${Array.from(leftHandles).join(', ')}`,
+        `Penalizing tasks: ${leftTaskIds.join(', ')}`,
+      );
+    }
+
+    res.json({
+      ok: true,
+      audited: true,
+      leftTaskIds,
+      leftHandles: Array.from(leftHandles),
+    });
   });
 
   app.post('/api/telegram/test-channels', async (req, res) => {
@@ -4333,6 +4569,15 @@ async function startServer() {
     reminderStore.set(playerId, next);
     persistRemindersToDisk();
     void upsertBotSubscriber({ chatId: telegramChatId, source: 'miniapp' });
+    if (
+      next.enabled &&
+      ((next.basketFullAtMs > 0 && Date.now() >= next.basketFullAtMs) ||
+        (next.feedBoostUntilMs > 0 && Date.now() >= next.feedBoostUntilMs) ||
+        (next.coopFeverUntilMs > 0 && Date.now() >= next.coopFeverUntilMs) ||
+        (next.autoHarvestUntilMs > 0 && Date.now() >= next.autoHarvestUntilMs))
+    ) {
+      void processDueReminders();
+    }
     res.json({ ok: true, registered: true, enabled: next.enabled });
   });
 
@@ -4370,6 +4615,18 @@ async function startServer() {
       photoUrl: body.photoUrl,
     });
 
+    const numId = extractTelegramNumericUserId(referredUid);
+    if (
+      numId &&
+      result.ok &&
+      (result.applied ||
+        result.reason === 'already_linked' ||
+        result.reason === 'self_referral' ||
+        result.reason === 'invalid_code')
+    ) {
+      deletePendingReferral(numId);
+    }
+
     const { statusCode, ...payload } = result;
     if (statusCode && statusCode >= 400) {
       res.status(statusCode).json({
@@ -4379,6 +4636,102 @@ async function startServer() {
       return;
     }
     res.json(payload);
+  });
+
+  app.post('/api/referrals/claim-pending', async (req, res) => {
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`ref_claim_pend:${ip}`, 30, 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({ ok: false, applied: false, error: 'Too many requests.' });
+      return;
+    }
+
+    const body = (req.body || {}) as {
+      playerId?: string;
+      displayName?: string;
+      handle?: string;
+      photoUrl?: string;
+      initData?: string;
+      token?: string;
+    };
+
+    const verifiedActor = resolveVerifiedPlayerActor({
+      req,
+      token: body.token,
+      initData: body.initData,
+    });
+    const rawPlayerId = String(body.playerId || '').trim();
+    const targetUid = verifiedActor || (isValidSafeId(rawPlayerId) ? rawPlayerId : '');
+    const numericId = extractTelegramNumericUserId(targetUid);
+    if (!numericId) {
+      res.json({ ok: true, applied: false, reason: 'no_telegram_user' });
+      return;
+    }
+    const resolvedUid = `tg_${numericId}`;
+
+    // If user tapped bottom-left "Open" immediately after /start, flush pending bot updates right now
+    if (!pendingReferralMap.has(numericId) && getTelegramBotToken()) {
+      await pollTelegramBotUpdates();
+    }
+
+    const pending = pendingReferralMap.get(numericId);
+    if (pending) {
+      const result = await applyReferralInServerDb({
+        referredUid: resolvedUid,
+        refCode: pending.refCode,
+        displayName: body.displayName || pending.displayName,
+        handle: body.handle || pending.handle,
+        photoUrl: body.photoUrl,
+      });
+      if (
+        result.ok &&
+        (result.applied ||
+          result.reason === 'already_linked' ||
+          result.reason === 'self_referral' ||
+          result.reason === 'invalid_code')
+      ) {
+        deletePendingReferral(numericId);
+      }
+      if (result.ok && result.applied) {
+        res.json({
+          ok: true,
+          applied: true,
+          alreadyApplied: false,
+          referrerUid: result.referrerUid,
+          referrerName: result.referrerName,
+          coinsRewarded: result.coinsRewarded,
+          referredBonusCoins: result.referredBonusCoins ?? REFERRED_WELCOME_BONUS_COINS,
+          nextReferredCoins: result.nextReferredCoins,
+        });
+        return;
+      }
+    }
+
+    // Check if /start already wrote referredBy into Firestore before Mini App loaded
+    if (serverDb) {
+      try {
+        const snap = await getFreshDoc(doc(serverDb, 'players', resolvedUid));
+        if (snap.exists()) {
+          const data = snap.data();
+          const referredBy = String(data?.referredBy || '').trim();
+          if (referredBy) {
+            deletePendingReferral(numericId);
+            res.json({
+              ok: true,
+              applied: false,
+              alreadyApplied: true,
+              referrerUid: referredBy,
+              nextReferredCoins: Number(data?.coins ?? 0),
+            });
+            return;
+          }
+        }
+      } catch {
+        // Non-fatal
+      }
+    }
+
+    res.json({ ok: true, applied: false, alreadyApplied: false });
   });
 
   app.post('/api/referrals/notify', async (req, res) => {
@@ -4871,14 +5224,15 @@ async function startServer() {
     if (withdrawNotifyDedup.size > 1000) withdrawNotifyDedup.clear();
 
     const displayName = escapeHtml(authDisplayName);
-    const handle = escapeHtml(authHandle);
     const eggsAmount = Math.max(0, Math.floor(authEggs));
     const gramAmount = escapeHtml(authGram);
     const usdValue = Math.max(0, authUsd).toFixed(4);
-    const walletAddress = escapeHtml(authWallet);
-    const memo = escapeHtml(authMemo);
+    const maskedWallet = formatShortTonWallet(authWallet);
+    const safeMaskedWallet = escapeHtml(maskedWallet || 'TON Wallet');
     const rawAdminNote = String(body.adminNote || '').slice(0, 120);
     const adminNote = escapeHtml(rawAdminNote);
+    const isPublicTxNote =
+      /^[a-fA-F0-9]{64}$/.test(rawAdminNote.trim()) || /^https:\/\/[^\s]+$/i.test(rawAdminNote.trim());
 
     if (!activeBotToken) {
       res.json({
@@ -4892,46 +5246,94 @@ async function startServer() {
       return;
     }
 
-    const statusLine =
-      status === 'approved'
-        ? '✅ <b>Status:</b> Approved &amp; Paid'
-        : status === 'rejected'
+    const activeTemplate = status === 'approved' ? await loadWithdrawApproveTemplate() : null;
+    const botUsername = await resolveTelegramBotUsername();
+    const miniAppUrl = `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}`;
+
+    let channelPayload: Record<string, unknown>;
+    let channelPlainFallback = '';
+    if (status === 'approved') {
+      const chRendered = renderPayoutChannelApproveMessage({
+        template: activeTemplate,
+        gramAmount: authGram,
+        eggsAmount,
+        walletAddress: authWallet,
+        usdValue: Math.max(0, authUsd),
+        displayName: authDisplayName,
+        txId: authTxId,
+        adminNote: rawAdminNote,
+        miniAppUrl,
+      });
+      channelPlainFallback = chRendered.plainText;
+      channelPayload = {
+        chat_id: TELEGRAM_PAYOUT_CHANNEL,
+        text: chRendered.htmlText,
+        parse_mode: 'HTML',
+        ...(chRendered.buttonText && /^https:\/\//i.test(chRendered.buttonUrl)
+          ? {
+              reply_markup: {
+                inline_keyboard: [[{ text: chRendered.buttonText, url: chRendered.buttonUrl }]],
+              },
+            }
+          : {}),
+      };
+    } else {
+      const statusLine =
+        status === 'rejected'
           ? '❌ <b>Status:</b> Rejected (Eggs Refunded)'
           : '⏳ <b>Status:</b> Pending Admin Approval';
-
-    const lines = [
-      status === 'approved'
-        ? '💸 <b>Alpha Gram Payout Approved</b>'
-        : status === 'rejected'
+      const chLines = [
+        status === 'rejected'
           ? '⚠️ <b>Alpha Gram Payout Rejected</b>'
           : '🐔 <b>Alpha Gram Payout Request</b>',
-      '',
-      `👤 <b>User:</b> ${displayName} (${handle})`,
-      `🥚 <b>Eggs:</b> ${eggsAmount.toLocaleString()}`,
-      `💎 <b>Amount:</b> ${gramAmount} GRAM ($${usdValue})`,
-      `🏦 <b>TON Wallet:</b> <code>${walletAddress}</code>`,
-      ...(memo ? [`📝 <b>Memo:</b> <code>${memo}</code>`] : []),
-      ...(adminNote ? [`💬 <b>Admin Note:</b> ${adminNote}`] : []),
-      statusLine,
-    ];
+        '',
+        `👤 <b>Farmer:</b> ${displayName}`,
+        `🥚 <b>Eggs:</b> ${eggsAmount.toLocaleString()}`,
+        `💎 <b>Amount:</b> ${gramAmount} GRAM ($${usdValue})`,
+        `🏦 <b>TON Wallet:</b> <code>${safeMaskedWallet}</code>`,
+        ...(isPublicTxNote && adminNote ? [`💬 <b>Ref:</b> ${adminNote}`] : []),
+        statusLine,
+      ];
+      channelPlainFallback = chLines.join('\n').replace(/<\/?[^>]+>/g, '');
+      channelPayload = {
+        chat_id: TELEGRAM_PAYOUT_CHANNEL,
+        text: chLines.join('\n'),
+        parse_mode: 'HTML',
+      };
+    }
 
     let channelSent = false;
     let channelReason: string | undefined;
     try {
-      const tgRes = await fetch(
+      let tgRes = await fetch(
         `https://api.telegram.org/bot${activeBotToken}/sendMessage`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: TELEGRAM_PAYOUT_CHANNEL,
-            text: lines.join('\n'),
-            parse_mode: 'HTML',
-          }),
+          body: JSON.stringify(channelPayload),
           signal: AbortSignal.timeout(7000),
         },
       );
-      const tgData = (await tgRes.json()) as { ok?: boolean; description?: string };
+      let tgData = (await tgRes.json()) as {
+        ok?: boolean;
+        error_code?: number;
+        description?: string;
+      };
+      if (!tgData.ok && tgData.error_code === 400) {
+        tgRes = await fetch(
+          `https://api.telegram.org/bot${activeBotToken}/sendMessage`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: TELEGRAM_PAYOUT_CHANNEL,
+              text: channelPlainFallback || String(channelPayload.text || '').replace(/<\/?[^>]+>/g, ''),
+            }),
+            signal: AbortSignal.timeout(7000),
+          },
+        );
+        tgData = (await tgRes.json()) as typeof tgData;
+      }
       channelSent = Boolean(tgData.ok);
       channelReason = tgData.ok ? undefined : redactBotToken(tgData.description || 'Telegram API error');
     } catch (err) {
@@ -4946,7 +5348,6 @@ async function startServer() {
         let dmPayload: Record<string, unknown>;
         let plainFallbackText = '';
         if (status === 'approved') {
-          const activeTemplate = await loadWithdrawApproveTemplate();
           const rendered = renderWithdrawApproveMessage({
             template: activeTemplate,
             gramAmount: authGram,
@@ -4973,8 +5374,6 @@ async function startServer() {
               : {}),
           };
         } else {
-          const botUsername = await resolveTelegramBotUsername();
-          const miniAppUrl = `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}`;
           const rejLines = [
             '❌ <b>Withdrawal Rejected</b>',
             '',

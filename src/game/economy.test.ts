@@ -9,6 +9,7 @@ import {
   ADMIN_PASSCODE_VAULT_UID,
   ADSGRAM_BOT_JOIN_TASK,
   applyAutoHarvestIfDue,
+  applyLeftChannelPenalties,
   AUTO_HARVEST_DRONE_TIERS,
   buildDeterministicDepositIds,
   buildEarningsChartSeries,
@@ -72,7 +73,9 @@ import {
   getCoopFeverProgress,
   isAutoHarvestDroneActive,
   isCoopFeverActive,
+  MIN_REINVEST_EGGS,
   purchaseAutoHarvestDrone,
+  renderPayoutChannelApproveMessage,
   renderWithdrawApproveMessage,
   USER_TASK_CHANNEL_CHECK_FEE_COINS,
   USER_TASK_MIN_REWARD_COINS,
@@ -305,13 +308,15 @@ test('GRAM-only deposit enforces 1k-15k limits, requires txHash, converts GRAM t
   assert.equal(second.transaction.id, first.transaction.id);
 });
 
-test('reinvestEggs converts eggs to coins with 20% bonus', () => {
+test('reinvestEggs converts eggs to coins with 5% bonus and enforces minimum 500 eggs', () => {
   const { profile } = createDefaultProfile('player_test1', 'RK', '@rk', NOW);
+  const belowMin = reinvestEggs({ ...profile, eggs: 600 }, 499, NOW);
+  assert.ok('error' in belowMin);
   const res = reinvestEggs({ ...profile, eggs: 500 }, 500, NOW);
   assert.ok(!('error' in res));
   assert.equal(res.profile.eggs, 0);
-  assert.equal(res.coinsReceived, 42);
-  assert.equal(res.profile.coins, 1042);
+  assert.equal(res.coinsReceived, 37);
+  assert.equal(res.profile.coins, 1037);
 });
 
 test('executeWithdrawal enforces 30-ad watch gate from 3 Tasks Coin Ad buttons, validates address and balance, and records withdrawal', () => {
@@ -3282,4 +3287,62 @@ test('paid task optional Channel Check adds +1,000 coins surcharge and round-tri
   const decodedOff = decodeTaskSubtitleMeta(encodedOff);
   assert.equal(Boolean(decodedOff.requireChannelCheck), false);
 });
+
+test('daily_reinvest requires actual reinvest today and reinvesting does not advance 30-ad withdraw gate', () => {
+  const { profile } = createDefaultProfile('tg_999111222', 'RK', '@rk', NOW);
+  const beforeReinvest = completeTask({ ...profile, eggs: 600 }, 'daily_reinvest', NOW);
+  assert.ok('error' in beforeReinvest);
+
+  const inv = reinvestEggs({ ...profile, eggs: 600, withdrawAdsWatched: 4 }, MIN_REINVEST_EGGS, NOW);
+  assert.ok(!('error' in inv));
+  assert.equal(inv.profile.withdrawAdsWatched, 4);
+  assert.equal(inv.profile.eggs, 100);
+
+  const afterReinvest = completeTask(inv.profile, 'daily_reinvest', NOW + 1000);
+  assert.ok(!('error' in afterReinvest));
+  assert.equal(afterReinvest.rewardCoins, 100);
+  assert.ok(afterReinvest.profile.completedTaskIds.includes('daily_reinvest'));
+});
+
+test('applyLeftChannelPenalties deducts 5x coins into negative debt and future earnings pay it down', () => {
+  const { profile } = createDefaultProfile('tg_999111333', 'RK', '@rk', NOW);
+  const withCompleted = {
+    ...profile,
+    coins: 30,
+    completedTaskIds: ['milestone_join_news'], // 100 coins -> 5x penalty = 500 coins
+  };
+
+  const penalty = applyLeftChannelPenalties(withCompleted, ['milestone_join_news'], NOW + 2000);
+  assert.ok(penalty);
+  assert.equal(penalty.totalPenaltyCoins, 500);
+  assert.equal(penalty.profile.coins, -470);
+  assert.equal(penalty.profile.completedTaskIds.includes('milestone_join_news'), false);
+
+  // Subsequent earned coins repay negative debt cleanly without clamping to 0
+  const repaid = completeTask(penalty.profile, 'milestone_join_news', NOW + 4000);
+  assert.ok(!('error' in repaid));
+  assert.equal(repaid.profile.coins, -370);
+});
+
+test('renderPayoutChannelApproveMessage matches approval style with farmer name & amount without leaking full wallet or handle', () => {
+  const fullWallet = 'UQAOZ7I-xhBLou2dkPqKUdQKA_ZbwKBjP_p85i73Fp2P1RXr';
+  const chMsg = renderPayoutChannelApproveMessage({
+    template: DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
+    gramAmount: '12.50',
+    eggsAmount: 1500,
+    walletAddress: fullWallet,
+    usdValue: 0.15,
+    displayName: 'Rahul',
+    txId: 'wd_9911223344',
+    adminNote: 'Manual payout',
+    miniAppUrl: 'https://t.me/Alpha_gram_bot/Alpha',
+  });
+
+  assert.match(chMsg.htmlText, /Withdrawal Paid/i);
+  assert.match(chMsg.htmlText, /Rahul/);
+  assert.match(chMsg.htmlText, /12\.50 GRAM/);
+  assert.ok(!chMsg.htmlText.includes(fullWallet), 'must not expose full wallet in public channel');
+  assert.ok(!chMsg.buttonUrl.includes(fullWallet), 'must not put full wallet in channel button URL');
+});
+
 

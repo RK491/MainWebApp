@@ -64,6 +64,7 @@ interface WalletViewProps {
   onTabTap?: () => void;
   onOpenDeposit: () => void;
   onOpenWithdraw: () => void;
+  onOpenReinvest?: () => void;
   onReinvest: (eggsAmount: number) => void;
 }
 
@@ -83,6 +84,7 @@ export function WalletView({
   onTabTap,
   onOpenDeposit,
   onOpenWithdraw,
+  onOpenReinvest,
   onReinvest,
 }: WalletViewProps) {
   const [filter, setFilter] = useState<'all' | 'deposit' | 'withdraw' | 'farm'>('all');
@@ -198,8 +200,13 @@ export function WalletView({
       <button
         type="button"
         onClick={() => {
-          setReinvestInput(String(Math.max(MIN_REINVEST_EGGS, Math.min(profile.eggs, 500))));
-          setShowReinvestModal(true);
+          onTabTap?.();
+          if (onOpenReinvest) {
+            onOpenReinvest();
+          } else {
+            setReinvestInput(String(Math.max(MIN_REINVEST_EGGS, Math.min(profile.eggs, 500))));
+            setShowReinvestModal(true);
+          }
         }}
         className="clay-btn clay-card-mint w-full p-4 flex items-center justify-between gap-3 text-left"
       >
@@ -210,12 +217,12 @@ export function WalletView({
           <div className="min-w-0">
             <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100">Reinvest eggs</div>
             <div className="text-xs text-stone-600 dark:text-stone-300 truncate">
-              Turn your eggs into coins and get +20% extra
+              Turn your eggs into coins and get +5% extra (min. {MIN_REINVEST_EGGS})
             </div>
           </div>
         </div>
         <span className="clay-btn-emerald px-3 py-1 rounded-xl text-xs font-extrabold shrink-0">
-          +20%
+          +5%
         </span>
       </button>
 
@@ -531,7 +538,7 @@ export function WalletView({
           <div className="animate-clay-modal clay-card w-full max-w-sm p-5 space-y-4">
             <div className="flex items-center justify-between">
               <h3 id="reinvest-modal-title" className="text-lg font-extrabold text-stone-900 dark:text-stone-100">
-                Reinvest Eggs (+20%)
+                Reinvest Eggs (+5%)
               </h3>
               <button
                 type="button"
@@ -579,7 +586,7 @@ export function WalletView({
                 <span className="font-mono-num font-bold">+{preview.baseCoins.toLocaleString()}</span>
               </div>
               <div className="flex justify-between text-xs text-emerald-800 dark:text-emerald-300">
-                <span>+20% Reinvest bonus</span>
+                <span>+5% Reinvest bonus</span>
                 <span className="font-mono-num font-bold">+{preview.bonusCoins.toLocaleString()}</span>
               </div>
               <div className="flex justify-between text-sm font-extrabold text-emerald-950 dark:text-emerald-100 pt-1 border-t border-emerald-200 dark:border-emerald-800/60">

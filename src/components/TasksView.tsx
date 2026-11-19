@@ -101,6 +101,7 @@ interface TasksViewProps {
   onTriggerAdNetwork: (network: AdNetworkId) => void;
   onTriggerAdsgramTask?: () => void;
   onOpenDeposit?: () => void;
+  onOpenReinvest?: () => void;
   onRefreshTasks?: (silent?: boolean) => Promise<boolean>;
   onCreateTask: (input: {
     title: string;
@@ -147,6 +148,7 @@ export function TasksView({
   onTriggerAdNetwork,
   onTriggerAdsgramTask,
   onOpenDeposit,
+  onOpenReinvest,
   onRefreshTasks,
   onCreateTask,
   onTopUpTask,
@@ -362,6 +364,15 @@ export function TasksView({
 
   const startCheckingFlow = (task: TaskDefinition) => {
     if (profile.completedTaskIds.includes(task.id)) return;
+    if (task.id === 'daily_reinvest') {
+      onTabTap?.();
+      if (profile.lastReinvestDate === todayStr) {
+        onCompleteTask(task.id);
+      } else {
+        onOpenReinvest?.();
+      }
+      return;
+    }
     const remainingSlots = getTaskRemainingSlots(task, false);
     if (remainingSlots !== null && remainingSlots <= 0) return;
 
@@ -513,6 +524,35 @@ export function TasksView({
       );
     }
 
+    if (task.id === 'daily_reinvest') {
+      const reinvestedToday = profile.lastReinvestDate === todayStr;
+      if (reinvestedToday) {
+        return (
+          <button
+            type="button"
+            onClick={() => onCompleteTask(task.id)}
+            className="clay-btn clay-btn-emerald min-h-[42px] min-w-[84px] px-4 rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1 shrink-0 animate-pulse"
+          >
+            <Check className="w-3.5 h-3.5" />
+            <span>Claim</span>
+          </button>
+        );
+      }
+      return (
+        <button
+          type="button"
+          onClick={() => {
+            onTabTap?.();
+            onOpenReinvest?.();
+          }}
+          className="clay-btn clay-btn-amber min-h-[42px] min-w-[84px] px-3.5 rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1 shrink-0"
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+          <span>Reinvest</span>
+        </button>
+      );
+    }
+
     return (
       <button
         type="button"
@@ -645,7 +685,11 @@ export function TasksView({
               </div>
               {task.subtitle && (
                 <div className="text-[11px] text-stone-500 dark:text-stone-400 truncate mt-0.5">
-                  {task.subtitle}
+                  {task.id === 'daily_reinvest' && !done
+                    ? profile.lastReinvestDate === todayStr
+                      ? 'Reinvest confirmed today — tap Claim for +100 coins!'
+                      : 'Reinvest min. 500 eggs (+5% extra) to unlock this reward'
+                    : task.subtitle}
                 </div>
               )}
               <div className="flex flex-wrap items-center gap-1.5 mt-1.5">

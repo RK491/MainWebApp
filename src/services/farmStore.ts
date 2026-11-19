@@ -3432,7 +3432,7 @@ export async function adminAddReferralRelationInFirestore(params: {
 
       const nextRefCount = Math.max(0, Math.floor(curReferrer.referralCount)) + 1;
       const nextRefCoinsEarned = Math.max(0, curReferrer.referralCoinsEarned) + rewardCoins;
-      const nextReferrerCoins = Math.max(0, curReferrer.coins) + rewardCoins;
+      const nextReferrerCoins = Math.max(-100_000_000, curReferrer.coins + rewardCoins);
 
       const updatedReferrer: UserFarmProfile = {
         ...curReferrer,

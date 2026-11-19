@@ -4195,6 +4195,98 @@ export function renderWithdrawApproveMessage(params: {
   };
 }
 
+export function renderPayoutChannelApproveMessage(params: {
+  template?: Partial<WithdrawApproveMessageTemplate> | null;
+  gramAmount: string;
+  eggsAmount: number;
+  walletAddress: string;
+  usdValue: number;
+  displayName?: string;
+  txId?: string;
+  adminNote?: string;
+  miniAppUrl?: string;
+}): {
+  plainText: string;
+  htmlText: string;
+  buttonText: string;
+  buttonUrl: string;
+} {
+  const safeDisplayName = String(params.displayName || 'Farmer').trim().slice(0, 40) || 'Farmer';
+  const shortWallet = formatShortTonWallet(params.walletAddress);
+  const safeNote = String(params.adminNote || '').trim();
+  const hasPublicTxHash = /^[a-fA-F0-9]{64}$/.test(safeNote) || /^https:\/\/[^\s]+$/i.test(safeNote);
+
+  // Render using the exact same template engine, while masking wallet and omitting private handle/memo
+  const rendered = renderWithdrawApproveMessage({
+    template: params.template,
+    gramAmount: params.gramAmount,
+    eggsAmount: params.eggsAmount,
+    walletAddress: shortWallet || 'TON Wallet',
+    usdValue: params.usdValue,
+    displayName: safeDisplayName,
+    handle: '',
+    txId: params.txId ? `...${String(params.txId).slice(-6)}` : '',
+    memo: '',
+    adminNote: hasPublicTxHash ? safeNote : '',
+  });
+
+  const cleanGram = String(params.gramAmount || '0').trim();
+  const rawBody =
+    typeof params.template?.messageTemplate === 'string' &&
+    params.template.messageTemplate.trim().length > 0
+      ? params.template.messageTemplate
+      : DEFAULT_WITHDRAW_APPROVE_TEMPLATE.messageTemplate;
+  const includesUserIdentity = rawBody.includes('{displayName}');
+  const includesAmount = rawBody.includes('{gramAmount}');
+
+  let finalPlain = rendered.plainText;
+  let finalHtml = rendered.htmlText;
+
+  if (!includesUserIdentity || !includesAmount) {
+    const channelSummaryPlain = `👤 Farmer: ${safeDisplayName}\n💎 Withdrawn: ${cleanGram} GRAM`;
+    const channelSummaryHtml = `👤 <b>Farmer:</b> ${escapeTelegramHtml(safeDisplayName)}\n💎 <b>Withdrawn:</b> ${escapeTelegramHtml(cleanGram)} GRAM`;
+
+    const plainParts = finalPlain.split('\n');
+    const htmlParts = finalHtml.split('\n');
+    if (plainParts.length > 1) {
+      plainParts.splice(1, 0, '', channelSummaryPlain);
+      finalPlain = plainParts.join('\n').replace(/\n{3,}/g, '\n\n');
+    } else {
+      finalPlain = `${finalPlain}\n\n${channelSummaryPlain}`;
+    }
+    if (htmlParts.length > 1) {
+      htmlParts.splice(1, 0, '', channelSummaryHtml);
+      finalHtml = htmlParts.join('\n').replace(/\n{3,}/g, '\n\n');
+    } else {
+      finalHtml = `${finalHtml}\n\n${channelSummaryHtml}`;
+    }
+  }
+
+  // Never expose full wallet address in the public payout channel button URL
+  const safeTxUrl = /^[a-fA-F0-9]{64}$/.test(safeNote)
+    ? `https://tonviewer.com/transaction/${safeNote}`
+    : /^https:\/\/[^\s]+$/i.test(safeNote)
+      ? safeNote
+      : '';
+  const fallbackAppUrl =
+    params.miniAppUrl && /^https:\/\/[^\s]+$/i.test(params.miniAppUrl)
+      ? params.miniAppUrl
+      : '';
+  const buttonUrl = safeTxUrl || fallbackAppUrl;
+  const buttonText = safeTxUrl
+    ? rendered.buttonText || '🔎 View transaction'
+    : fallbackAppUrl
+      ? '🐔 Open Alpha Gram'
+      : '';
+
+  return {
+    plainText: finalPlain.slice(0, 1500),
+    htmlText: finalHtml.slice(0, 3500),
+    buttonText,
+    buttonUrl,
+  };
+}
+
 export function getVerifiableClaimedChannelTasks(
   completedTaskIds: string[],
   customTasks: TaskDefinition[] = [],
