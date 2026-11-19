@@ -5608,23 +5608,52 @@ async function startServer() {
 
     try {
       if (serverDb) {
+        const runConcurrent = async <T>(
+          items: readonly T[],
+          concurrency: number,
+          worker: (item: T) => Promise<void>,
+        ): Promise<void> => {
+          for (let i = 0; i < items.length; i += concurrency) {
+            await Promise.allSettled(items.slice(i, i + concurrency).map((item) => worker(item)));
+          }
+        };
+
         const deleteCollectionPaged = async (colName: string, pageSize: number): Promise<number> => {
           let removed = 0;
+          let lastCursor: QueryDocumentSnapshot<DocumentData> | null = null;
           for (let page = 0; page < 50; page++) {
-            const snap = await getDocs(query(collection(serverDb!, colName), limit(pageSize)));
+            const colQ: Query<DocumentData> = lastCursor
+              ? query(
+                  collection(serverDb!, colName),
+                  orderBy('__name__'),
+                  startAfter(lastCursor),
+                  limit(pageSize),
+                )
+              : query(collection(serverDb!, colName), orderBy('__name__'), limit(pageSize));
+            const snap: QuerySnapshot<DocumentData> = await getDocs(colQ);
             if (snap.empty) break;
-            for (const d of snap.docs) {
-              await deleteDoc(d.ref);
-              removed += 1;
-            }
+            await runConcurrent(snap.docs, 20, async (d) => {
+              try {
+                await deleteDoc(d.ref);
+                removed += 1;
+              } catch {
+                // Best-effort skip on individual doc error
+              }
+            });
+            lastCursor = snap.docs[snap.docs.length - 1];
             if (snap.size < pageSize) break;
           }
           return removed;
         };
 
-        tasksDeletedCount = await deleteCollectionPaged('tasks', 100);
-        promosDeletedCount = await deleteCollectionPaged('promo_codes', 50);
-        bansDeletedCount = await deleteCollectionPaged('banned_users', 100);
+        const [delTasks, delPromos, delBans] = await Promise.all([
+          deleteCollectionPaged('tasks', 100),
+          deleteCollectionPaged('promo_codes', 50),
+          deleteCollectionPaged('banned_users', 100),
+        ]);
+        tasksDeletedCount = delTasks;
+        promosDeletedCount = delPromos;
+        bansDeletedCount = delBans;
 
         // Reject any pending withdraw_requests (rules forbid deletion on withdraw_requests)
         let lastWdCursor: QueryDocumentSnapshot<DocumentData> | null = null;
@@ -5639,8 +5668,11 @@ async function startServer() {
             : query(collection(serverDb, 'withdraw_requests'), orderBy('__name__'), limit(100));
           const wdSnap: QuerySnapshot<DocumentData> = await getDocs(wdQ);
           if (wdSnap.empty) break;
-          for (const d of wdSnap.docs) {
-            if (String(d.data()?.status || '') === 'pending') {
+          const pendingDocs = wdSnap.docs.filter(
+            (d) => String(d.data()?.status || '') === 'pending',
+          );
+          await runConcurrent(pendingDocs, 20, async (d) => {
+            try {
               await updateDoc(d.ref, {
                 status: 'rejected',
                 adminNote: 'System reset by Admin',
@@ -5648,13 +5680,15 @@ async function startServer() {
                 updatedAt: serverTimestamp(),
               });
               withdrawalsRejectedCount += 1;
+            } catch {
+              // Best-effort
             }
-          }
+          });
           lastWdCursor = wdSnap.docs[wdSnap.docs.length - 1];
           if (wdSnap.size < 100) break;
         }
 
-        // Reset every player document & clean subcollections (preserve __admin_vault__)
+        // Reset every player document & clean subcollections concurrently (preserve __admin_vault__)
         let lastPlayerCursor: QueryDocumentSnapshot<DocumentData> | null = null;
         for (let page = 0; page < 100; page++) {
           const pQ: Query<DocumentData> = lastPlayerCursor
@@ -5668,70 +5702,112 @@ async function startServer() {
           const pSnap: QuerySnapshot<DocumentData> = await getDocs(pQ);
           if (pSnap.empty) break;
 
-          for (const d of pSnap.docs) {
-            if (d.id === ADMIN_PASSCODE_VAULT_UID) continue;
-
-            // Delete referrals subcollection
-            for (let rPage = 0; rPage < 40; rPage++) {
-              const refSnap = await getDocs(
-                query(collection(serverDb, 'players', d.id, 'referrals'), limit(50)),
-              );
-              if (refSnap.empty) break;
-              for (const rDoc of refSnap.docs) {
-                await deleteDoc(rDoc.ref);
-                referralsDeletedCount += 1;
+          const playerDocs = pSnap.docs.filter((d) => d.id !== ADMIN_PASSCODE_VAULT_UID);
+          await runConcurrent(playerDocs, 10, async (d) => {
+            const cleanReferrals = async () => {
+              let lastRefCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+              for (let rPage = 0; rPage < 40; rPage++) {
+                const rQ: Query<DocumentData> = lastRefCursor
+                  ? query(
+                      collection(serverDb!, 'players', d.id, 'referrals'),
+                      orderBy('__name__'),
+                      startAfter(lastRefCursor),
+                      limit(50),
+                    )
+                  : query(
+                      collection(serverDb!, 'players', d.id, 'referrals'),
+                      orderBy('__name__'),
+                      limit(50),
+                    );
+                const refSnap: QuerySnapshot<DocumentData> = await getDocs(rQ);
+                if (refSnap.empty) break;
+                await runConcurrent(refSnap.docs, 15, async (rDoc) => {
+                  try {
+                    await deleteDoc(rDoc.ref);
+                    referralsDeletedCount += 1;
+                  } catch {
+                    // Best-effort
+                  }
+                });
+                lastRefCursor = refSnap.docs[refSnap.docs.length - 1];
+                if (refSnap.size < 50) break;
               }
-              if (refSnap.size < 50) break;
-            }
+            };
 
-            // Reject pending withdrawals inside player subcollection
-            let lastUserWdCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-            for (let wPage = 0; wPage < 20; wPage++) {
-              const uWdQ: Query<DocumentData> = lastUserWdCursor
-                ? query(
-                    collection(serverDb, 'players', d.id, 'withdrawals'),
-                    orderBy('__name__'),
-                    startAfter(lastUserWdCursor),
-                    limit(40),
-                  )
-                : query(collection(serverDb, 'players', d.id, 'withdrawals'), orderBy('__name__'), limit(40));
-              const uWdSnap: QuerySnapshot<DocumentData> = await getDocs(uWdQ);
-              if (uWdSnap.empty) break;
-              for (const wDoc of uWdSnap.docs) {
-                const st = String(wDoc.data()?.status || '');
-                if (st === 'pending' || st === 'processing') {
-                  await updateDoc(wDoc.ref, {
-                    status: 'rejected',
-                    adminNote: 'System reset by Admin',
-                    reviewedAtMs: nowMs,
-                  });
-                }
+            const rejectPendingWithdrawals = async () => {
+              let lastUserWdCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+              for (let wPage = 0; wPage < 20; wPage++) {
+                const uWdQ: Query<DocumentData> = lastUserWdCursor
+                  ? query(
+                      collection(serverDb!, 'players', d.id, 'withdrawals'),
+                      orderBy('__name__'),
+                      startAfter(lastUserWdCursor),
+                      limit(40),
+                    )
+                  : query(
+                      collection(serverDb!, 'players', d.id, 'withdrawals'),
+                      orderBy('__name__'),
+                      limit(40),
+                    );
+                const uWdSnap: QuerySnapshot<DocumentData> = await getDocs(uWdQ);
+                if (uWdSnap.empty) break;
+                const pendingWds = uWdSnap.docs.filter((wDoc) => {
+                  const st = String(wDoc.data()?.status || '');
+                  return st === 'pending' || st === 'processing';
+                });
+                await runConcurrent(pendingWds, 10, async (wDoc) => {
+                  try {
+                    await updateDoc(wDoc.ref, {
+                      status: 'rejected',
+                      adminNote: 'System reset by Admin',
+                      reviewedAtMs: nowMs,
+                    });
+                  } catch {
+                    // Best-effort
+                  }
+                });
+                lastUserWdCursor = uWdSnap.docs[uWdSnap.docs.length - 1];
+                if (uWdSnap.size < 40) break;
               }
-              lastUserWdCursor = uWdSnap.docs[uWdSnap.docs.length - 1];
-              if (uWdSnap.size < 40) break;
-            }
+            };
 
-            // Reject pending transactions inside player subcollection
-            let lastUserTxCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-            for (let tPage = 0; tPage < 20; tPage++) {
-              const uTxQ: Query<DocumentData> = lastUserTxCursor
-                ? query(
-                    collection(serverDb, 'players', d.id, 'transactions'),
-                    orderBy('__name__'),
-                    startAfter(lastUserTxCursor),
-                    limit(60),
-                  )
-                : query(collection(serverDb, 'players', d.id, 'transactions'), orderBy('__name__'), limit(60));
-              const uTxSnap: QuerySnapshot<DocumentData> = await getDocs(uTxQ);
-              if (uTxSnap.empty) break;
-              for (const tDoc of uTxSnap.docs) {
-                if (String(tDoc.data()?.status || '') === 'pending') {
-                  await updateDoc(tDoc.ref, { status: 'rejected' });
-                }
+            const rejectPendingTransactions = async () => {
+              let lastUserTxCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+              for (let tPage = 0; tPage < 20; tPage++) {
+                const uTxQ: Query<DocumentData> = lastUserTxCursor
+                  ? query(
+                      collection(serverDb!, 'players', d.id, 'transactions'),
+                      orderBy('__name__'),
+                      startAfter(lastUserTxCursor),
+                      limit(60),
+                    )
+                  : query(
+                      collection(serverDb!, 'players', d.id, 'transactions'),
+                      orderBy('__name__'),
+                      limit(60),
+                    );
+                const uTxSnap: QuerySnapshot<DocumentData> = await getDocs(uTxQ);
+                if (uTxSnap.empty) break;
+                const pendingTxs = uTxSnap.docs.filter(
+                  (tDoc) => String(tDoc.data()?.status || '') === 'pending',
+                );
+                await runConcurrent(pendingTxs, 15, async (tDoc) => {
+                  try {
+                    await updateDoc(tDoc.ref, { status: 'rejected' });
+                  } catch {
+                    // Best-effort
+                  }
+                });
+                lastUserTxCursor = uTxSnap.docs[uTxSnap.docs.length - 1];
+                if (uTxSnap.size < 60) break;
               }
-              lastUserTxCursor = uTxSnap.docs[uTxSnap.docs.length - 1];
-              if (uTxSnap.size < 60) break;
-            }
+            };
+
+            await Promise.all([
+              cleanReferrals(),
+              rejectPendingWithdrawals(),
+              rejectPendingTransactions(),
+            ]);
 
             const pd = d.data();
             const safeName = String(pd.displayName || '').trim().slice(0, 60) || 'Farmer';
@@ -5741,47 +5817,51 @@ async function startServer() {
             const rawLang = String(pd.language || 'en').trim().slice(0, 16);
             const safeLang = rawLang.length >= 2 ? rawLang : 'en';
 
-            await updateDoc(d.ref, {
-              displayName: safeName,
-              handle: safeHandle,
-              photoUrl: String(pd.photoUrl || '').slice(0, 512),
-              avatarColor: safeColor,
-              language: safeLang,
-              level: 1,
-              xp: 0,
-              coins: SIGNUP_BONUS_COINS,
-              eggs: 0,
-              totalEggsCollected: 0,
-              totalCashEarnedUsd: 0,
-              totalWithdrawnUsd: 0,
-              basketCapacity: 300,
-              basketTierHours: 8,
-              leghornCount: 0,
-              rhodeCount: 0,
-              orpingtonCount: 0,
-              australorpCount: 0,
-              boughtThisWeek: 0,
-              dailyStreak: 0,
-              lastDailyClaimDate: '',
-              completedTaskIds: [],
-              claimedPromoCodes: [],
-              watchedAdsCount: 0,
-              totalAdsWatched: 0,
-              referredBy: '',
-              referralActivated: false,
-              referralCount: 0,
-              referralCoinsEarned: 0,
-              firstDepositBonusUsed: false,
-              lastCollectedAt: nowMs,
-              feedBoostUntilMs: 0,
-              lastGoldenEggAtMs: 0,
-              goldenEggsFound: 0,
-              claimedAchievementIds: resetTokens,
-              claimedReferralMilestones: [],
-              updatedAt: serverTimestamp(),
-            });
-            playersResetCount += 1;
-          }
+            try {
+              await updateDoc(d.ref, {
+                displayName: safeName,
+                handle: safeHandle,
+                photoUrl: String(pd.photoUrl || '').slice(0, 512),
+                avatarColor: safeColor,
+                language: safeLang,
+                level: 1,
+                xp: 0,
+                coins: SIGNUP_BONUS_COINS,
+                eggs: 0,
+                totalEggsCollected: 0,
+                totalCashEarnedUsd: 0,
+                totalWithdrawnUsd: 0,
+                basketCapacity: 300,
+                basketTierHours: 8,
+                leghornCount: 0,
+                rhodeCount: 0,
+                orpingtonCount: 0,
+                australorpCount: 0,
+                boughtThisWeek: 0,
+                dailyStreak: 0,
+                lastDailyClaimDate: '',
+                completedTaskIds: [],
+                claimedPromoCodes: [],
+                watchedAdsCount: 0,
+                totalAdsWatched: 0,
+                referredBy: '',
+                referralActivated: false,
+                referralCount: 0,
+                referralCoinsEarned: 0,
+                firstDepositBonusUsed: false,
+                lastCollectedAt: nowMs,
+                feedBoostUntilMs: 0,
+                lastGoldenEggAtMs: 0,
+                goldenEggsFound: 0,
+                claimedAchievementIds: resetTokens,
+                claimedReferralMilestones: [],
+                updatedAt: serverTimestamp(),
+              });
+              playersResetCount += 1;
+            } catch {
+              // Best-effort on individual malformed legacy doc
+            }
+          });
           lastPlayerCursor = pSnap.docs[pSnap.docs.length - 1];
           if (pSnap.size < 50) break;
         }
@@ -5799,33 +5879,26 @@ async function startServer() {
             : query(collection(serverDb, 'leaderboard'), orderBy('__name__'), limit(50));
           const lbSnap: QuerySnapshot<DocumentData> = await getDocs(lbQ);
           if (lbSnap.empty) break;
-          for (const d of lbSnap.docs) {
-            if (d.id === ADMIN_PASSCODE_VAULT_UID) continue;
-            await updateDoc(d.ref, {
-              buyerPoints: 0,
-              inviterCount: 0,
-              eggs: 0,
-              totalEggsCollected: 0,
-              chickensCount: 0,
-              updatedAt: serverTimestamp(),
-            });
-          }
+          const lbDocs = lbSnap.docs.filter((d) => d.id !== ADMIN_PASSCODE_VAULT_UID);
+          await runConcurrent(lbDocs, 20, async (d) => {
+            try {
+              await updateDoc(d.ref, {
+                buyerPoints: 0,
+                inviterCount: 0,
+                eggs: 0,
+                totalEggsCollected: 0,
+                chickensCount: 0,
+                updatedAt: serverTimestamp(),
+              });
+            } catch {
+              // Best-effort
+            }
+          });
           lastLbCursor = lbSnap.docs[lbSnap.docs.length - 1];
           if (lbSnap.size < 50) break;
         }
 
-        // Reset season back to Season 1
-        await setDoc(doc(serverDb, 'app_config', 'season'), {
-          seasonNumber: 1,
-          title: 'Harvest Cup Season 1',
-          prizePoolCoins: 25000,
-          endsAtMs: nowMs + 4 * 86_400_000,
-          lastWinners: [],
-          updatedAtMs: nowMs,
-          updatedAt: serverTimestamp(),
-        });
-
-        // Update app_config/system_reset epoch so online clients immediately sync fresh starter state
+        // Reset season back to Season 1 & bump app_config/system_reset epoch
         let prevCount = 0;
         try {
           const resetSnap = await getFreshDoc(doc(serverDb, 'app_config', 'system_reset'));
@@ -5835,13 +5908,24 @@ async function startServer() {
         } catch {
           prevCount = 0;
         }
-        await setDoc(doc(serverDb, 'app_config', 'system_reset'), {
-          resetEpochMs: nowMs,
-          resetCount: prevCount + 1,
-          resetBy: resolvedPlayerId,
-          updatedAtMs: nowMs,
-          updatedAt: serverTimestamp(),
-        });
+        await Promise.all([
+          setDoc(doc(serverDb, 'app_config', 'season'), {
+            seasonNumber: 1,
+            title: 'Harvest Cup Season 1',
+            prizePoolCoins: 25000,
+            endsAtMs: nowMs + 4 * 86_400_000,
+            lastWinners: [],
+            updatedAtMs: nowMs,
+            updatedAt: serverTimestamp(),
+          }),
+          setDoc(doc(serverDb, 'app_config', 'system_reset'), {
+            resetEpochMs: nowMs,
+            resetCount: prevCount + 1,
+            resetBy: resolvedPlayerId,
+            updatedAtMs: nowMs,
+            updatedAt: serverTimestamp(),
+          }),
+        ]);
       }
 
       // Clear server in-memory runtime caches (preserve bot config & session secret)

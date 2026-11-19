@@ -33,6 +33,7 @@ import {
   PauseCircle,
   PlayCircle,
   Plus,
+  Power,
   Radio,
   RefreshCw,
   RotateCcw,
@@ -55,9 +56,11 @@ import {
   UserX,
   Video,
   Wallet,
+  Wrench,
   X,
   XCircle,
 } from 'lucide-react';
+import { motion } from 'motion/react';
 import type {
   AdConfig,
   AdProviderType,
@@ -67,6 +70,7 @@ import type {
   ChannelsConfig,
   ChickenBreedId,
   DynamicPromoCode,
+  MaintenanceConfig,
   PromoRewardType,
   ReferralRecord,
   RequiredTelegramChannel,
@@ -86,6 +90,7 @@ import {
   computeAdminWithdrawAdsAdjustment,
   computeAdminWithdrawAdsTarget,
   DEFAULT_GET_CODE_CHANNEL_URL,
+  DEFAULT_MAINTENANCE_CONFIG,
   DEFAULT_TASK_PRICING_CONFIG,
   DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
   extractTelegramNumericUserId,
@@ -292,6 +297,10 @@ interface AdminPanelViewProps {
   ) => Promise<boolean | void>;
   systemResetConfig?: SystemResetConfig;
   onExecuteDataReset?: () => Promise<{ ok: boolean; error?: string; summary?: string }>;
+  maintenanceConfig?: MaintenanceConfig;
+  onSaveMaintenanceConfig?: (
+    config: Omit<MaintenanceConfig, 'updatedAtMs'>,
+  ) => Promise<MaintenanceConfig | boolean | null | void>;
 }
 
 const AD_PROVIDER_CARDS: Array<{
@@ -427,6 +436,8 @@ export function AdminPanelView({
   onSaveTaskPricingConfig,
   systemResetConfig,
   onExecuteDataReset,
+  maintenanceConfig = DEFAULT_MAINTENANCE_CONFIG,
+  onSaveMaintenanceConfig,
 }: AdminPanelViewProps) {
   const extraAdminIds = useMemo(
     () => getEffectiveAdminIds(adminsConfig),
@@ -439,7 +450,7 @@ export function AdminPanelView({
   const [passcodeError, setPasscodeError] = useState<string | null>(null);
   const [verifyingPasscode, setVerifyingPasscode] = useState(false);
 
-  const [tab, setTab] = useState<
+  type AdminSectionTab =
     | 'withdrawals'
     | 'users'
     | 'admins'
@@ -449,9 +460,58 @@ export function AdminPanelView({
     | 'ads'
     | 'ad_ids'
     | 'broadcast'
+    | 'maintenance'
     | 'diagnostics'
-    | 'reset'
-  >('withdrawals');
+    | 'reset';
+  type AdminPrimaryGroup = 'payouts' | 'users' | 'growth' | 'bot' | 'system';
+
+  const [tab, setTab] = useState<AdminSectionTab>('withdrawals');
+  const [groupLastTab, setGroupLastTab] = useState<Record<AdminPrimaryGroup, AdminSectionTab>>({
+    payouts: 'withdrawals',
+    users: 'users',
+    growth: 'tasks',
+    bot: 'channels',
+    system: 'maintenance',
+  });
+
+  const getPrimaryGroupForTab = (t: AdminSectionTab): AdminPrimaryGroup => {
+    switch (t) {
+      case 'withdrawals':
+        return 'payouts';
+      case 'users':
+      case 'admins':
+        return 'users';
+      case 'tasks':
+      case 'promos':
+      case 'ads':
+      case 'ad_ids':
+        return 'growth';
+      case 'channels':
+      case 'broadcast':
+        return 'bot';
+      case 'maintenance':
+      case 'diagnostics':
+      case 'reset':
+        return 'system';
+    }
+  };
+
+  const navigateAdminTab = (nextTab: AdminSectionTab) => {
+    onTabTap?.();
+    setTab(nextTab);
+    const group = getPrimaryGroupForTab(nextTab);
+    setGroupLastTab((prev) => ({ ...prev, [group]: nextTab }));
+  };
+
+  const navigatePrimaryGroup = (group: AdminPrimaryGroup) => {
+    const target = groupLastTab[group];
+    navigateAdminTab(target);
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  const activePrimaryGroup = getPrimaryGroupForTab(tab);
   const [diagnosticsAutoRefresh, setDiagnosticsAutoRefresh] = useState(false);
   const [diagnosticsLogFilter, setDiagnosticsLogFilter] = useState<'all' | 'issues' | 'bot'>('all');
   const [wdFilter, setWdFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
@@ -501,6 +561,72 @@ export function AdminPanelView({
   const [resetConfirmInput, setResetConfirmInput] = useState('');
   const [resettingData, setResettingData] = useState(false);
   const [resetFeedback, setResetFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Maintenance Mode state
+  const [maintEnabledDraft, setMaintEnabledDraft] = useState<boolean>(
+    Boolean(maintenanceConfig.enabled),
+  );
+  const [maintTitleDraft, setMaintTitleDraft] = useState<string>(
+    maintenanceConfig.title || DEFAULT_MAINTENANCE_CONFIG.title,
+  );
+  const [maintMessageDraft, setMaintMessageDraft] = useState<string>(
+    maintenanceConfig.message || DEFAULT_MAINTENANCE_CONFIG.message,
+  );
+  const [maintEtaDraft, setMaintEtaDraft] = useState<string>(
+    maintenanceConfig.estimatedReturn ?? DEFAULT_MAINTENANCE_CONFIG.estimatedReturn,
+  );
+  const [savingMaintenance, setSavingMaintenance] = useState(false);
+  const [maintenanceFeedback, setMaintenanceFeedback] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
+
+  useEffect(() => {
+    setMaintEnabledDraft(Boolean(maintenanceConfig.enabled));
+    setMaintTitleDraft(maintenanceConfig.title || DEFAULT_MAINTENANCE_CONFIG.title);
+    setMaintMessageDraft(maintenanceConfig.message || DEFAULT_MAINTENANCE_CONFIG.message);
+    setMaintEtaDraft(
+      maintenanceConfig.estimatedReturn ?? DEFAULT_MAINTENANCE_CONFIG.estimatedReturn,
+    );
+  }, [maintenanceConfig]);
+
+  const handleSaveMaintenanceSubmit = async (nextEnabledOverride?: boolean) => {
+    if (!onSaveMaintenanceConfig || savingMaintenance) return;
+    const enabledValue =
+      typeof nextEnabledOverride === 'boolean' ? nextEnabledOverride : maintEnabledDraft;
+    setSavingMaintenance(true);
+    setMaintenanceFeedback(null);
+    try {
+      const res = await onSaveMaintenanceConfig({
+        enabled: enabledValue,
+        title: maintTitleDraft.trim() || DEFAULT_MAINTENANCE_CONFIG.title,
+        message: maintMessageDraft.trim() || DEFAULT_MAINTENANCE_CONFIG.message,
+        estimatedReturn: maintEtaDraft.trim(),
+        updatedBy: playerId,
+      });
+      if (res) {
+        setMaintEnabledDraft(enabledValue);
+        setMaintenanceFeedback({
+          ok: true,
+          text: enabledValue
+            ? 'Maintenance Mode is now ON. Non-admin users will see the maintenance page immediately.'
+            : 'Maintenance Mode is now OFF. All users can access the app normally.',
+        });
+      } else {
+        setMaintenanceFeedback({
+          ok: false,
+          text: 'Could not save Maintenance Mode settings. Check permissions and retry.',
+        });
+      }
+    } catch (err) {
+      setMaintenanceFeedback({
+        ok: false,
+        text: err instanceof Error ? err.message : 'Failed to save Maintenance Mode.',
+      });
+    } finally {
+      setSavingMaintenance(false);
+    }
+  };
 
   // User Management & Inspector state
   const [userSearch, setUserSearch] = useState('');
@@ -1996,7 +2122,7 @@ export function AdminPanelView({
   };
 
   return (
-    <div className="animate-clay-enter space-y-4 pb-8">
+    <div className="animate-clay-enter space-y-4 pb-24">
       {/* Executive Header */}
       <div className="clay-card-dark text-white px-4 py-3.5 flex items-center justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">
@@ -2012,7 +2138,7 @@ export function AdminPanelView({
             <ArrowLeft className="w-4 h-4" />
           </button>
           <div className="min-w-0">
-              <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2">
               <h1 className="text-lg font-extrabold tracking-tight truncate">Admin Console</h1>
               <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-500/20 border border-emerald-400/30 px-2 py-0.5 text-[10px] font-extrabold text-emerald-200 shrink-0">
                 <ShieldCheck className="w-3 h-3" />
@@ -2022,7 +2148,7 @@ export function AdminPanelView({
               </span>
             </div>
             <p className="text-[11px] text-stone-300 truncate">
-              Users, Coins, Refers, Admins, Payouts, Channels, Gift Codes &amp; Ads
+              Payouts, Users, Growth, Bot &amp; System Controls
             </p>
           </div>
         </div>
@@ -2042,14 +2168,45 @@ export function AdminPanelView({
         )}
       </div>
 
+      {/* Live Maintenance Mode Status Alert Banner */}
+      {maintenanceConfig.enabled && (
+        <div className="clay-card-warm !rounded-2xl border border-amber-300/90 dark:border-amber-700/70 px-3.5 py-2.5 flex items-center justify-between gap-2.5">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
+            <div className="min-w-0">
+              <div className="text-xs font-extrabold text-amber-950 dark:text-amber-200 truncate">
+                Maintenance Mode Active
+              </div>
+              <div className="text-[11px] text-amber-800 dark:text-amber-300 truncate">
+                Non-admin users are currently seeing the maintenance screen.
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => navigateAdminTab('maintenance')}
+              className="clay-btn clay-btn-neutral px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold"
+            >
+              Manage
+            </button>
+            <button
+              type="button"
+              disabled={savingMaintenance}
+              onClick={() => void handleSaveMaintenanceSubmit(false)}
+              className="clay-btn clay-btn-emerald px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold disabled:opacity-50"
+            >
+              Turn Off
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 4-Column Executive KPI Strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
         <button
           type="button"
-          onClick={() => {
-            onTabTap?.();
-            setTab('withdrawals');
-          }}
+          onClick={() => navigateAdminTab('withdrawals')}
           className="clay-card clay-hover-lift !rounded-2xl p-3.5 text-left cursor-pointer"
         >
           <div className="flex items-center justify-between text-[11px] font-bold text-stone-500 dark:text-stone-400">
@@ -2066,10 +2223,7 @@ export function AdminPanelView({
 
         <button
           type="button"
-          onClick={() => {
-            onTabTap?.();
-            setTab('users');
-          }}
+          onClick={() => navigateAdminTab('users')}
           className="clay-card clay-hover-lift !rounded-2xl p-3.5 text-left cursor-pointer"
         >
           <div className="flex items-center justify-between text-[11px] font-bold text-stone-500 dark:text-stone-400">
@@ -2086,10 +2240,7 @@ export function AdminPanelView({
 
         <button
           type="button"
-          onClick={() => {
-            onTabTap?.();
-            setTab('admins');
-          }}
+          onClick={() => navigateAdminTab('admins')}
           className="clay-card clay-hover-lift !rounded-2xl p-3.5 text-left cursor-pointer"
         >
           <div className="flex items-center justify-between text-[11px] font-bold text-stone-500 dark:text-stone-400">
@@ -2106,10 +2257,7 @@ export function AdminPanelView({
 
         <button
           type="button"
-          onClick={() => {
-            onTabTap?.();
-            setTab('tasks');
-          }}
+          onClick={() => navigateAdminTab('tasks')}
           className="clay-card clay-hover-lift !rounded-2xl p-3.5 text-left cursor-pointer"
         >
           <div className="flex items-center justify-between text-[11px] font-bold text-stone-500 dark:text-stone-400">
@@ -2125,80 +2273,82 @@ export function AdminPanelView({
         </button>
       </div>
 
-      {/* Organized Multi-Group Admin Navigation */}
-      <nav
-        aria-label="Admin console sections"
-        className="clay-card !rounded-3xl p-3 space-y-2.5"
-      >
-        {(
-          [
+      {/* Contextual Sub-Tab Bar inside each Bottom Tab Group */}
+      {(() => {
+        const subTabsByGroup: Record<
+          AdminPrimaryGroup,
+          Array<{ id: AdminSectionTab; label: string; icon: typeof Wallet; count?: number; danger?: boolean; liveDot?: boolean }>
+        > = {
+          payouts: [],
+          users: [
+            { id: 'users', label: 'Players & Bans', icon: Users, count: bannedUsers.length },
+            { id: 'admins', label: 'Admins', icon: ShieldCheck, count: 1 + adminsConfig.admins.length },
+          ],
+          growth: [
+            { id: 'tasks', label: 'Tasks', icon: ListPlus, count: activeTaskCount },
+            { id: 'promos', label: 'Gift Codes', icon: Gift, count: activePromoCount },
+            { id: 'ads', label: 'Ads', icon: Megaphone },
+            { id: 'ad_ids', label: 'Block IDs', icon: KeyRound, count: savedAdIdsCount },
+          ],
+          bot: [
+            { id: 'channels', label: 'Channels & Token', icon: Radio, count: activeChannelsCount },
+            { id: 'broadcast', label: 'Broadcast', icon: Send },
+          ],
+          system: [
             {
-              group: 'Operations',
-              colsClass: 'grid-cols-2 sm:grid-cols-4',
-              items: [
-                { id: 'withdrawals', label: 'Payouts', icon: Wallet, count: pendingRequests.length },
-                { id: 'users', label: 'Users', icon: Users, count: bannedUsers.length },
-                { id: 'channels', label: 'Channels', icon: Radio, count: activeChannelsCount },
-                { id: 'admins', label: 'Admins', icon: ShieldCheck, count: 1 + adminsConfig.admins.length },
-              ],
+              id: 'maintenance',
+              label: 'Maintenance',
+              icon: Wrench,
+              liveDot: maintenanceConfig.enabled,
             },
-            {
-              group: 'Economy & Growth',
-              colsClass: 'grid-cols-2 sm:grid-cols-4',
-              items: [
-                { id: 'tasks', label: 'Tasks', icon: ListPlus, count: activeTaskCount },
-                { id: 'promos', label: 'Gift Codes', icon: Gift, count: activePromoCount },
-                { id: 'ads', label: 'Ads', icon: Megaphone, count: 0 },
-                { id: 'ad_ids', label: 'Block IDs', icon: KeyRound, count: savedAdIdsCount },
-              ],
-            },
-            {
-              group: 'System & Maintenance',
-              colsClass: 'grid-cols-3',
-              items: [
-                { id: 'broadcast', label: 'Broadcast', icon: Send, count: 0 },
-                { id: 'diagnostics', label: 'Health', icon: Activity, count: 0 },
-                { id: 'reset', label: 'Data Reset', icon: RotateCcw, count: 0 },
-              ],
-            },
-          ] as const
-        ).map((section) => (
-          <div key={section.group} className="space-y-1">
-            <div className="px-1 text-[10px] font-extrabold uppercase tracking-wider text-stone-400 dark:text-stone-500">
-              {section.group}
-            </div>
+            { id: 'diagnostics', label: 'Health', icon: Activity },
+            { id: 'reset', label: 'Data Reset', icon: RotateCcw, danger: true },
+          ],
+        };
+
+        const activeSubTabs = subTabsByGroup[activePrimaryGroup];
+        if (activeSubTabs.length === 0) return null;
+
+        const colsClass =
+          activeSubTabs.length === 2
+            ? 'grid-cols-2'
+            : activeSubTabs.length === 3
+              ? 'grid-cols-3'
+              : 'grid-cols-2 sm:grid-cols-4';
+
+        return (
+          <div className="clay-card !rounded-2xl p-1.5">
             <div
               role="tablist"
-              aria-label={section.group}
-              className={`clay-inset !rounded-2xl grid ${section.colsClass} gap-1 p-1`}
+              aria-label="Admin section subsections"
+              className={`clay-inset !rounded-xl grid ${colsClass} gap-1 p-1`}
             >
-              {section.items.map((item) => {
+              {activeSubTabs.map((item) => {
                 const Icon = item.icon;
                 const isActive = tab === item.id;
-                const isResetTab = item.id === 'reset';
                 return (
                   <button
                     key={item.id}
                     type="button"
                     role="tab"
                     aria-selected={isActive}
-                    onClick={() => {
-                      onTabTap?.();
-                      setTab(item.id);
-                    }}
+                    onClick={() => navigateAdminTab(item.id)}
                     className={`clay-btn min-h-[40px] px-2 rounded-xl text-[11px] sm:text-xs font-extrabold flex items-center justify-center gap-1.5 whitespace-nowrap transition-all ${
                       isActive
-                        ? isResetTab
+                        ? item.danger
                           ? 'clay-btn-rose'
                           : 'clay-btn-amber'
-                        : isResetTab
+                        : item.danger
                           ? 'text-rose-600 dark:text-rose-400 hover:bg-rose-500/10'
                           : 'text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-100'
                     }`}
                   >
                     <Icon className="w-3.5 h-3.5 shrink-0" />
                     <span className="truncate">{item.label}</span>
-                    {item.count > 0 && (
+                    {item.liveDot && (
+                      <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
+                    )}
+                    {typeof item.count === 'number' && item.count > 0 && (
                       <span
                         className={`px-1.5 py-0.5 rounded-md text-[10px] font-mono-num font-extrabold leading-none ${
                           isActive
@@ -2218,8 +2368,8 @@ export function AdminPanelView({
               })}
             </div>
           </div>
-        ))}
-      </nav>
+        );
+      })()}
 
       {/* ========================================================================
           USER SEARCH, COINS, REFERS & MODERATION TAB
@@ -7122,6 +7272,179 @@ export function AdminPanelView({
       })()}
 
       {/* ========================================================================
+          MAINTENANCE MODE TAB
+         ======================================================================== */}
+      {tab === 'maintenance' && (
+        <div key="admin-tab-maintenance" className="animate-clay-enter space-y-4">
+          <div className="clay-card p-4 space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+                  <Wrench className="w-4 h-4 text-amber-500" />
+                  <span>Maintenance Mode Control</span>
+                </h2>
+                <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
+                  When enabled, all regular users immediately see the Maintenance Page upon opening the bot. Admins keep full access.
+                </p>
+              </div>
+              <span
+                className={`px-2.5 py-1 rounded-xl text-[10px] font-extrabold uppercase tracking-wide shrink-0 ${
+                  maintenanceConfig.enabled
+                    ? 'bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800'
+                    : 'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800'
+                }`}
+              >
+                {maintenanceConfig.enabled ? 'ON · Offline' : 'OFF · Live'}
+              </span>
+            </div>
+
+            {/* Instant On/Off Toggle Card */}
+            <div className="clay-inset !rounded-2xl p-3.5 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-xs font-extrabold text-stone-900 dark:text-stone-100">
+                  Maintenance Status Switch
+                </div>
+                <div className="text-[11px] text-stone-500 dark:text-stone-400">
+                  {maintEnabledDraft
+                    ? 'Enabled — regular users are blocked with the maintenance notice'
+                    : 'Disabled — all players can use the farm normally'}
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={savingMaintenance}
+                onClick={() => {
+                  const next = !maintEnabledDraft;
+                  setMaintEnabledDraft(next);
+                  void handleSaveMaintenanceSubmit(next);
+                }}
+                className={`clay-btn min-h-[42px] px-4 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 shrink-0 ${
+                  maintEnabledDraft ? 'clay-btn-amber' : 'clay-btn-emerald'
+                } disabled:opacity-50`}
+              >
+                {savingMaintenance ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Power className="w-3.5 h-3.5" />
+                )}
+                <span>{maintEnabledDraft ? 'Turn OFF' : 'Turn ON'}</span>
+              </button>
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleSaveMaintenanceSubmit();
+              }}
+              className="space-y-3"
+            >
+              <div className="space-y-1">
+                <label
+                  htmlFor="admin-maint-title"
+                  className="text-xs font-bold text-stone-700 dark:text-stone-300"
+                >
+                  Maintenance Page Title (English)
+                </label>
+                <input
+                  id="admin-maint-title"
+                  type="text"
+                  maxLength={80}
+                  value={maintTitleDraft}
+                  onChange={(e) => setMaintTitleDraft(e.target.value)}
+                  placeholder={DEFAULT_MAINTENANCE_CONFIG.title}
+                  className="clay-inset w-full min-h-[42px] px-3 text-xs font-bold text-stone-900 dark:text-stone-100"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label
+                  htmlFor="admin-maint-message"
+                  className="text-xs font-bold text-stone-700 dark:text-stone-300"
+                >
+                  Maintenance Notice Message (English)
+                </label>
+                <textarea
+                  id="admin-maint-message"
+                  rows={3}
+                  maxLength={400}
+                  value={maintMessageDraft}
+                  onChange={(e) => setMaintMessageDraft(e.target.value)}
+                  placeholder={DEFAULT_MAINTENANCE_CONFIG.message}
+                  className="clay-inset w-full p-3 text-xs font-semibold text-stone-900 dark:text-stone-100 resize-none"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label
+                  htmlFor="admin-maint-eta"
+                  className="text-xs font-bold text-stone-700 dark:text-stone-300"
+                >
+                  Estimated Return (Optional)
+                </label>
+                <input
+                  id="admin-maint-eta"
+                  type="text"
+                  maxLength={80}
+                  value={maintEtaDraft}
+                  onChange={(e) => setMaintEtaDraft(e.target.value)}
+                  placeholder={DEFAULT_MAINTENANCE_CONFIG.estimatedReturn}
+                  className="clay-inset w-full min-h-[42px] px-3 text-xs font-bold text-stone-900 dark:text-stone-100"
+                />
+              </div>
+
+              {/* Live Preview Box */}
+              <div className="clay-card-warm !rounded-2xl p-3.5 space-y-1.5 border border-amber-200/80 dark:border-amber-800/50">
+                <div className="text-[10px] font-extrabold uppercase tracking-wider text-amber-800 dark:text-amber-300">
+                  User Screen Preview
+                </div>
+                <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
+                  {maintTitleDraft.trim() || DEFAULT_MAINTENANCE_CONFIG.title}
+                </div>
+                <p className="text-xs text-stone-700 dark:text-stone-300 leading-relaxed">
+                  {maintMessageDraft.trim() || DEFAULT_MAINTENANCE_CONFIG.message}
+                </p>
+                {maintEtaDraft.trim() && (
+                  <div className="text-[11px] font-bold text-stone-600 dark:text-stone-400">
+                    Estimated Return: {maintEtaDraft.trim()}
+                  </div>
+                )}
+              </div>
+
+              {maintenanceFeedback && (
+                <div
+                  className={`rounded-xl border px-3 py-2.5 text-xs font-bold ${
+                    maintenanceFeedback.ok
+                      ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800/60 text-emerald-800 dark:text-emerald-300'
+                      : 'bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-800/60 text-rose-700 dark:text-rose-300'
+                  }`}
+                >
+                  {maintenanceFeedback.text}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={!onSaveMaintenanceConfig || savingMaintenance}
+                className="clay-btn clay-btn-amber w-full min-h-[46px] rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {savingMaintenance ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Saving Maintenance Settings...</span>
+                  </>
+                ) : (
+                  <>
+                    <Wrench className="w-4 h-4" />
+                    <span>Save &amp; Sync Maintenance Settings</span>
+                  </>
+                )}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================
           DATA RESET TAB
          ======================================================================== */}
       {tab === 'reset' && (
@@ -7274,6 +7597,91 @@ export function AdminPanelView({
           </div>
         </div>
       )}
+
+      {/* Fixed Bottom Navigation Bar matching User Panel BottomNav */}
+      <nav
+        aria-label="Admin primary navigation"
+        className="fixed bottom-0 left-0 right-0 z-40 clay-bottom-nav transition-colors"
+      >
+        <div className="max-w-xl mx-auto grid grid-cols-5 h-16 px-1.5 gap-1 items-center">
+          {(
+            [
+              {
+                id: 'payouts' as const,
+                label: 'Payouts',
+                icon: Wallet,
+                badge: pendingRequests.length > 0,
+              },
+              {
+                id: 'users' as const,
+                label: 'Users',
+                icon: Users,
+                badge: false,
+              },
+              {
+                id: 'growth' as const,
+                label: 'Growth',
+                icon: Gift,
+                badge: false,
+              },
+              {
+                id: 'bot' as const,
+                label: 'Bot',
+                icon: Send,
+                badge: false,
+              },
+              {
+                id: 'system' as const,
+                label: 'System',
+                icon: Wrench,
+                badge: maintenanceConfig.enabled,
+              },
+            ] as const
+          ).map((item) => {
+            const Icon = item.icon;
+            const active = activePrimaryGroup === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => navigatePrimaryGroup(item.id)}
+                aria-current={active ? 'page' : undefined}
+                className={`relative flex flex-col items-center justify-center min-h-[48px] rounded-2xl px-1 cursor-pointer transition-colors ${
+                  active
+                    ? 'text-amber-950'
+                    : 'text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-100 hover:bg-white/50 dark:hover:bg-stone-800/50'
+                }`}
+              >
+                {active && (
+                  <motion.div
+                    layoutId="alpha-admin-bottom-nav-active"
+                    transition={{ type: 'spring', stiffness: 420, damping: 30 }}
+                    className="clay-btn-amber absolute inset-0 rounded-2xl -z-10"
+                  />
+                )}
+                <motion.div
+                  animate={{ scale: active ? 1.08 : 1, y: active ? -1 : 0 }}
+                  transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                  className="relative"
+                >
+                  <Icon className={`w-5 h-5 ${active ? 'stroke-[2.5]' : 'stroke-[2]'}`} />
+                  {item.badge && (
+                    <span
+                      className={`animate-clay-badge absolute -top-1 -right-1.5 w-2.5 h-2.5 rounded-full border-2 border-white dark:border-stone-900 shadow-xs ${
+                        item.id === 'system' ? 'bg-amber-500' : 'bg-rose-500'
+                      }`}
+                      aria-label={item.id === 'system' ? 'Maintenance active' : 'Pending items'}
+                    />
+                  )}
+                </motion.div>
+                <span className="text-[11px] font-extrabold mt-0.5 whitespace-nowrap">
+                  {item.label}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </nav>
     </div>
   );
 }

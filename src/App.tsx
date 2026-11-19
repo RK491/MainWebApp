@@ -46,6 +46,7 @@ import {
   DEFAULT_GET_CODE_CHANNEL_URL,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
+  DEFAULT_MAINTENANCE_CONFIG,
   DEFAULT_TASK_PRICING_CONFIG,
   DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
   eggsToUsd,
@@ -114,6 +115,7 @@ import {
   saveAdConfigInFirestore,
   saveCachedPlayerProfile,
   saveChannelsConfigInFirestore,
+  saveMaintenanceConfigInFirestore,
   saveTaskPricingConfigInFirestore,
   saveWithdrawApproveTemplateInFirestore,
   searchUsersInFirestore,
@@ -124,6 +126,7 @@ import {
   subscribeToChannelsConfig,
   subscribeToCustomTasks,
   subscribeToLeaderboard,
+  subscribeToMaintenanceConfig,
   subscribeToPlayer,
   subscribeToPlayerBanStatus,
   subscribeToPromoCodes,
@@ -152,6 +155,7 @@ import type {
   DynamicPromoCode,
   LanguageCode,
   LeaderboardEntry,
+  MaintenanceConfig,
   NavTab,
   PromoRewardType,
   ReferralRecord,
@@ -233,6 +237,7 @@ import { FarmMeadow } from './components/FarmMeadow';
 import { FriendsView } from './components/FriendsView';
 import { CoinIcon, EggIcon } from './components/GameIcons';
 import { LeaderboardView } from './components/LeaderboardView';
+import { MaintenanceScreen } from './components/MaintenanceScreen';
 import { PacksView } from './components/PacksView';
 import { ProfileView, SettingsModal, YourFarmView } from './components/ProfileAndFarmViews';
 import { OfflineIndicator } from './components/PWAControls';
@@ -408,6 +413,10 @@ export default function App() {
     resetBy: '',
     updatedAtMs: 0,
   });
+  const [maintenanceConfig, setMaintenanceConfig] = useState<MaintenanceConfig>(
+    DEFAULT_MAINTENANCE_CONFIG,
+  );
+  const [maintenanceLoaded, setMaintenanceLoaded] = useState(false);
   const [promoCodes, setPromoCodes] = useState<DynamicPromoCode[]>([]);
   const [recentPlayers, setRecentPlayers] = useState<UserFarmProfile[]>([]);
   const [leaderboardEntries, setLeaderboardEntries] = useState<LeaderboardEntry[]>([]);
@@ -941,6 +950,13 @@ export default function App() {
     const unsubSystemReset = subscribeToSystemResetConfig((resetCfg) => {
       setSystemResetConfig(resetCfg);
     });
+    const unsubMaintenance = subscribeToMaintenanceConfig((maintCfg) => {
+      setMaintenanceConfig(maintCfg);
+      setMaintenanceLoaded(true);
+    });
+    const maintenanceLoadSafetyTimer = window.setTimeout(() => {
+      setMaintenanceLoaded(true);
+    }, 1500);
     return () => {
       unsubTasks();
       unsubAds();
@@ -952,6 +968,8 @@ export default function App() {
       unsubPayoutTemplate();
       unsubTaskPricing();
       unsubSystemReset();
+      unsubMaintenance();
+      window.clearTimeout(maintenanceLoadSafetyTimer);
     };
   }, []);
 
@@ -3147,6 +3165,30 @@ export default function App() {
     }
   };
 
+  const handleSaveMaintenanceConfig = async (
+    cfg: Omit<MaintenanceConfig, 'updatedAtMs'>,
+  ): Promise<MaintenanceConfig | null> => {
+    try {
+      const saved = await saveMaintenanceConfigInFirestore({
+        ...cfg,
+        updatedBy: cfg.updatedBy || latestProfileRef.current.uid,
+      });
+      setMaintenanceConfig(saved);
+      setMaintenanceLoaded(true);
+      playClaimSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      showToast(
+        saved.enabled
+          ? 'Maintenance Mode enabled — app paused for non-admin users.'
+          : 'Maintenance Mode disabled — app is live for all users!',
+      );
+      return saved;
+    } catch (err) {
+      showToast(formatSyncErrorMessage(err, 'Failed to save Maintenance Mode settings.'));
+      return null;
+    }
+  };
+
   const handleExecuteDataReset = async (): Promise<{
     ok: boolean;
     error?: string;
@@ -3186,14 +3228,24 @@ export default function App() {
       }
     };
 
+    const tgInitData = getTelegramInitData();
+    const sessionToken = adminSessionTokenRef.current;
+    if (!sessionToken && !tgInitData && isAuthorizedAdmin && adminUnlocked) {
+      return await runFirestoreResetFallback();
+    }
+
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (sessionToken) {
+        headers.Authorization = `Bearer ${sessionToken}`;
+      }
       const res = await fetch(resolveApiUrl('/api/admin/data-reset'), {
         method: 'POST',
         cache: 'no-store',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
-          token: adminSessionTokenRef.current,
-          initData: getTelegramInitData(),
+          token: sessionToken,
+          initData: tgInitData,
           confirm: 'RESET',
         }),
       });
@@ -3214,6 +3266,9 @@ export default function App() {
       };
       if (!res.ok || !payload.ok) {
         if (res.status === 401 || res.status === 403) {
+          if (isAuthorizedAdmin && adminUnlocked && !sessionToken) {
+            return await runFirestoreResetFallback();
+          }
           const errMsg = payload.error || `Data Reset denied (HTTP ${res.status}).`;
           showToast(errMsg);
           return { ok: false, error: errMsg };
@@ -4642,7 +4697,23 @@ export default function App() {
     })();
   };
 
+  const isMaintenanceBlocked =
+    maintenanceConfig.enabled &&
+    subView !== 'admin' &&
+    !(isAuthorizedAdmin && adminUnlocked);
+
   useEffect(() => {
+    if (!isMaintenanceBlocked) return;
+    setShowSplash(false);
+    setShowWelcomeModal(false);
+    setShowSignUpBonusModal(false);
+    setShowChannelGateModal(false);
+    setAdModalState({ open: false, kind: 'watch_ad', notice: null, network: null });
+    setShowSettings(false);
+  }, [isMaintenanceBlocked]);
+
+  useEffect(() => {
+    if (!maintenanceLoaded || maintenanceConfig.enabled) return;
     if (isBanned || skipWelcome || showSplash) return;
     if (subView === 'admin') return;
     if (startupAdTriggeredRef.current) return;
@@ -4670,7 +4741,16 @@ export default function App() {
         setWatchingAdLoading(false);
       }
     })();
-  }, [adConfig, isBanned, persistMutation, showSplash, skipWelcome, subView]);
+  }, [
+    adConfig,
+    isBanned,
+    maintenanceConfig.enabled,
+    maintenanceLoaded,
+    persistMutation,
+    showSplash,
+    skipWelcome,
+    subView,
+  ]);
 
   const handleCompleteTask = (taskId: string) => {
     const now = Date.now();
@@ -5245,6 +5325,8 @@ export default function App() {
           onSaveTaskPricingConfig={handleSaveTaskPricingConfig}
           systemResetConfig={systemResetConfig}
           onExecuteDataReset={handleExecuteDataReset}
+          maintenanceConfig={maintenanceConfig}
+          onSaveMaintenanceConfig={handleSaveMaintenanceConfig}
         />
       );
     }
@@ -5637,6 +5719,31 @@ export default function App() {
     );
   }
 
+  if (isMaintenanceBlocked) {
+    return (
+      <MaintenanceScreen
+        config={maintenanceConfig}
+        playerId={detectedIdentity.playerId || profile.uid || activePlayerId}
+        isAuthorizedAdmin={isAuthorizedAdmin}
+        onOpenAdminPanel={
+          isAuthorizedAdmin
+            ? () => {
+                playTabTapSound(soundsEnabled);
+                triggerHapticFeedback('selection');
+                setSubView('admin');
+                window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+              }
+            : undefined
+        }
+        onRefresh={() => {
+          if (typeof window !== 'undefined') {
+            window.location.reload();
+          }
+        }}
+      />
+    );
+  }
+
   return (
     <div
       className={`${
@@ -5670,6 +5777,23 @@ export default function App() {
         onOpenSettings={() => setShowSettings(true)}
         onOpenDeposit={() => openSubView('deposit')}
       />
+
+      {maintenanceConfig.enabled && isAuthorizedAdmin && adminUnlocked && subView !== 'admin' && (
+        <div className="max-w-6xl mx-auto px-3 sm:px-5 pt-2">
+          <div className="clay-card-warm !rounded-2xl border border-amber-300/80 dark:border-amber-700/60 px-3.5 py-2 flex items-center justify-between gap-2 text-xs">
+            <span className="font-extrabold text-amber-900 dark:text-amber-200 truncate">
+              Maintenance Mode is ON (Admin Preview Mode)
+            </span>
+            <button
+              type="button"
+              onClick={() => openSubView('admin')}
+              className="clay-btn clay-btn-amber px-2.5 py-1 rounded-xl text-[11px] font-extrabold shrink-0"
+            >
+              Admin Panel
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Unified non-overlapping Clay Feedback Toast */}
       <AnimatePresence>

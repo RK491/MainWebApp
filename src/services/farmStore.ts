@@ -3821,28 +3821,53 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
   let bansDeletedCount = 0;
   let withdrawalsRejectedCount = 0;
 
+  const runConcurrent = async <T>(
+    items: readonly T[],
+    concurrency: number,
+    worker: (item: T) => Promise<void>,
+  ): Promise<void> => {
+    for (let i = 0; i < items.length; i += concurrency) {
+      await Promise.allSettled(items.slice(i, i + concurrency).map((item) => worker(item)));
+    }
+  };
+
   const deleteCollectionPaged = async (colName: string, pageSize: number): Promise<number> => {
     let removed = 0;
+    let lastCursor: QueryDocumentSnapshot<DocumentData> | null = null;
     for (let page = 0; page < 50; page++) {
-      const snap = await getDocsFromServer(query(collection(db, colName), limit(pageSize)));
+      const colQ: Query<DocumentData> = lastCursor
+        ? query(
+            collection(db, colName),
+            orderBy('__name__'),
+            startAfter(lastCursor),
+            limit(pageSize),
+          )
+        : query(collection(db, colName), orderBy('__name__'), limit(pageSize));
+      const snap: QuerySnapshot<DocumentData> = await getDocsFromServer(colQ);
       if (snap.empty) break;
-      for (const d of snap.docs) {
+      await runConcurrent(snap.docs, 20, async (d) => {
         try {
           await deleteDoc(d.ref);
           removed += 1;
         } catch {
           // Skip docs that fail rule validation
         }
-      }
+      });
+      lastCursor = snap.docs[snap.docs.length - 1];
       if (snap.size < pageSize) break;
     }
     return removed;
   };
 
   try {
-    tasksDeletedCount = await deleteCollectionPaged('tasks', 100);
-    promosDeletedCount = await deleteCollectionPaged('promo_codes', 50);
-    bansDeletedCount = await deleteCollectionPaged('banned_users', 100);
+    const [delTasks, delPromos, delBans] = await Promise.all([
+      deleteCollectionPaged('tasks', 100),
+      deleteCollectionPaged('promo_codes', 50),
+      deleteCollectionPaged('banned_users', 100),
+    ]);
+    tasksDeletedCount = delTasks;
+    promosDeletedCount = delPromos;
+    bansDeletedCount = delBans;
 
     // Reject pending withdraw_requests (rules disallow delete on withdraw_requests)
     let lastWdCursor: QueryDocumentSnapshot<DocumentData> | null = null;
@@ -3857,21 +3882,20 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
         : query(collection(db, 'withdraw_requests'), orderBy('__name__'), limit(100));
       const wdSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(wdQ);
       if (wdSnap.empty) break;
-      for (const d of wdSnap.docs) {
-        if (String(d.data()?.status || '') === 'pending') {
-          try {
-            await updateDoc(d.ref, {
-              status: 'rejected',
-              adminNote: 'System reset by Admin',
-              reviewedAtMs: nowMs,
-              updatedAt: serverTimestamp(),
-            });
-            withdrawalsRejectedCount += 1;
-          } catch {
-            // Best-effort
-          }
+      const pendingWds = wdSnap.docs.filter((d) => String(d.data()?.status || '') === 'pending');
+      await runConcurrent(pendingWds, 20, async (d) => {
+        try {
+          await updateDoc(d.ref, {
+            status: 'rejected',
+            adminNote: 'System reset by Admin',
+            reviewedAtMs: nowMs,
+            updatedAt: serverTimestamp(),
+          });
+          withdrawalsRejectedCount += 1;
+        } catch {
+          // Best-effort
         }
-      }
+      });
       lastWdCursor = wdSnap.docs[wdSnap.docs.length - 1];
       if (wdSnap.size < 100) break;
     }
@@ -3890,40 +3914,52 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
       const pSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(pQ);
       if (pSnap.empty) break;
 
-      for (const d of pSnap.docs) {
-        if (d.id === ADMIN_PASSCODE_VAULT_UID) continue;
-
-        for (let rPage = 0; rPage < 40; rPage++) {
-          const refSnap = await getDocsFromServer(
-            query(collection(db, 'players', d.id, 'referrals'), limit(50)),
-          );
-          if (refSnap.empty) break;
-          for (const rDoc of refSnap.docs) {
-            try {
-              await deleteDoc(rDoc.ref);
-              referralsDeletedCount += 1;
-            } catch {
-              // Best-effort
-            }
+      const playerDocs = pSnap.docs.filter((d) => d.id !== ADMIN_PASSCODE_VAULT_UID);
+      await runConcurrent(playerDocs, 10, async (d) => {
+        const cleanReferrals = async () => {
+          let lastRefCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+          for (let rPage = 0; rPage < 40; rPage++) {
+            const rQ: Query<DocumentData> = lastRefCursor
+              ? query(
+                  collection(db, 'players', d.id, 'referrals'),
+                  orderBy('__name__'),
+                  startAfter(lastRefCursor),
+                  limit(50),
+                )
+              : query(collection(db, 'players', d.id, 'referrals'), orderBy('__name__'), limit(50));
+            const refSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(rQ);
+            if (refSnap.empty) break;
+            await runConcurrent(refSnap.docs, 15, async (rDoc) => {
+              try {
+                await deleteDoc(rDoc.ref);
+                referralsDeletedCount += 1;
+              } catch {
+                // Best-effort
+              }
+            });
+            lastRefCursor = refSnap.docs[refSnap.docs.length - 1];
+            if (refSnap.size < 50) break;
           }
-          if (refSnap.size < 50) break;
-        }
+        };
 
-        let lastUserWdCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-        for (let wPage = 0; wPage < 20; wPage++) {
-          const uWdQ: Query<DocumentData> = lastUserWdCursor
-            ? query(
-                collection(db, 'players', d.id, 'withdrawals'),
-                orderBy('__name__'),
-                startAfter(lastUserWdCursor),
-                limit(40),
-              )
-            : query(collection(db, 'players', d.id, 'withdrawals'), orderBy('__name__'), limit(40));
-          const uWdSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(uWdQ);
-          if (uWdSnap.empty) break;
-          for (const wDoc of uWdSnap.docs) {
-            const st = String(wDoc.data()?.status || '');
-            if (st === 'pending' || st === 'processing') {
+        const rejectWithdrawals = async () => {
+          let lastUserWdCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+          for (let wPage = 0; wPage < 20; wPage++) {
+            const uWdQ: Query<DocumentData> = lastUserWdCursor
+              ? query(
+                  collection(db, 'players', d.id, 'withdrawals'),
+                  orderBy('__name__'),
+                  startAfter(lastUserWdCursor),
+                  limit(40),
+                )
+              : query(collection(db, 'players', d.id, 'withdrawals'), orderBy('__name__'), limit(40));
+            const uWdSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(uWdQ);
+            if (uWdSnap.empty) break;
+            const pending = uWdSnap.docs.filter((wDoc) => {
+              const st = String(wDoc.data()?.status || '');
+              return st === 'pending' || st === 'processing';
+            });
+            await runConcurrent(pending, 10, async (wDoc) => {
               try {
                 await updateDoc(wDoc.ref, {
                   status: 'rejected',
@@ -3933,36 +3969,41 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
               } catch {
                 // Best-effort
               }
-            }
+            });
+            lastUserWdCursor = uWdSnap.docs[uWdSnap.docs.length - 1];
+            if (uWdSnap.size < 40) break;
           }
-          lastUserWdCursor = uWdSnap.docs[uWdSnap.docs.length - 1];
-          if (uWdSnap.size < 40) break;
-        }
+        };
 
-        let lastUserTxCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-        for (let tPage = 0; tPage < 20; tPage++) {
-          const uTxQ: Query<DocumentData> = lastUserTxCursor
-            ? query(
-                collection(db, 'players', d.id, 'transactions'),
-                orderBy('__name__'),
-                startAfter(lastUserTxCursor),
-                limit(60),
-              )
-            : query(collection(db, 'players', d.id, 'transactions'), orderBy('__name__'), limit(60));
-          const uTxSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(uTxQ);
-          if (uTxSnap.empty) break;
-          for (const tDoc of uTxSnap.docs) {
-            if (String(tDoc.data()?.status || '') === 'pending') {
+        const rejectTransactions = async () => {
+          let lastUserTxCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+          for (let tPage = 0; tPage < 20; tPage++) {
+            const uTxQ: Query<DocumentData> = lastUserTxCursor
+              ? query(
+                  collection(db, 'players', d.id, 'transactions'),
+                  orderBy('__name__'),
+                  startAfter(lastUserTxCursor),
+                  limit(60),
+                )
+              : query(collection(db, 'players', d.id, 'transactions'), orderBy('__name__'), limit(60));
+            const uTxSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(uTxQ);
+            if (uTxSnap.empty) break;
+            const pending = uTxSnap.docs.filter(
+              (tDoc) => String(tDoc.data()?.status || '') === 'pending',
+            );
+            await runConcurrent(pending, 15, async (tDoc) => {
               try {
                 await updateDoc(tDoc.ref, { status: 'rejected' });
               } catch {
                 // Best-effort
               }
-            }
+            });
+            lastUserTxCursor = uTxSnap.docs[uTxSnap.docs.length - 1];
+            if (uTxSnap.size < 60) break;
           }
-          lastUserTxCursor = uTxSnap.docs[uTxSnap.docs.length - 1];
-          if (uTxSnap.size < 60) break;
-        }
+        };
+
+        await Promise.all([cleanReferrals(), rejectWithdrawals(), rejectTransactions()]);
 
         const pd = d.data();
         const safeName = String(pd.displayName || '').trim().slice(0, 60) || 'Farmer';
@@ -4016,7 +4057,7 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
         } catch {
           // Best-effort on individual malformed legacy doc
         }
-      }
+      });
       lastPlayerCursor = pSnap.docs[pSnap.docs.length - 1];
       if (pSnap.size < 50) break;
     }
@@ -4034,8 +4075,8 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
         : query(collection(db, 'leaderboard'), orderBy('__name__'), limit(50));
       const lbSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(lbQ);
       if (lbSnap.empty) break;
-      for (const d of lbSnap.docs) {
-        if (d.id === ADMIN_PASSCODE_VAULT_UID) continue;
+      const lbDocs = lbSnap.docs.filter((d) => d.id !== ADMIN_PASSCODE_VAULT_UID);
+      await runConcurrent(lbDocs, 20, async (d) => {
         try {
           await updateDoc(d.ref, {
             buyerPoints: 0,
@@ -4048,23 +4089,12 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
         } catch {
           // Best-effort
         }
-      }
+      });
       lastLbCursor = lbSnap.docs[lbSnap.docs.length - 1];
       if (lbSnap.size < 50) break;
     }
 
-    // Reset season back to Season 1
-    await setDoc(doc(db, 'app_config', 'season'), {
-      seasonNumber: 1,
-      title: 'Harvest Cup Season 1',
-      prizePoolCoins: 25000,
-      endsAtMs: nowMs + 4 * 86_400_000,
-      lastWinners: [],
-      updatedAtMs: nowMs,
-      updatedAt: serverTimestamp(),
-    });
-
-    // Update app_config/system_reset epoch so online clients immediately sync fresh starter state
+    // Reset season back to Season 1 & update app_config/system_reset epoch
     let prevCount = 0;
     try {
       const resetSnap = await getDocFromServer(doc(db, 'app_config', 'system_reset'));
@@ -4074,13 +4104,24 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
     } catch {
       prevCount = 0;
     }
-    await setDoc(doc(db, 'app_config', 'system_reset'), {
-      resetEpochMs: nowMs,
-      resetCount: prevCount + 1,
-      resetBy: String(adminUid || 'admin').slice(0, 64),
-      updatedAtMs: nowMs,
-      updatedAt: serverTimestamp(),
-    });
+    await Promise.all([
+      setDoc(doc(db, 'app_config', 'season'), {
+        seasonNumber: 1,
+        title: 'Harvest Cup Season 1',
+        prizePoolCoins: 25000,
+        endsAtMs: nowMs + 4 * 86_400_000,
+        lastWinners: [],
+        updatedAtMs: nowMs,
+        updatedAt: serverTimestamp(),
+      }),
+      setDoc(doc(db, 'app_config', 'system_reset'), {
+        resetEpochMs: nowMs,
+        resetCount: prevCount + 1,
+        resetBy: String(adminUid || 'admin').slice(0, 64),
+        updatedAtMs: nowMs,
+        updatedAt: serverTimestamp(),
+      }),
+    ]);
 
     const summary = `${playersResetCount} players reset · ${tasksDeletedCount} tasks, ${promosDeletedCount} promos, ${bansDeletedCount} bans, ${referralsDeletedCount} referrals cleared · ${withdrawalsRejectedCount} pending withdrawals closed`;
     return {
