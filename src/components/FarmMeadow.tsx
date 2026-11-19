@@ -149,12 +149,14 @@ export function FarmMeadow({
   const [flyingEggs, setFlyingEggs] = useState<FlyingEggParticle[]>([]);
   const [poppedHen, setPoppedHen] = useState<{ id: string; seq: number } | null>(null);
   const [activeMilestone, setActiveMilestone] = useState<ChickenMilestoneInfo | null>(null);
+  const [entranceEpoch, setEntranceEpoch] = useState(0);
 
   const [isInViewport, setIsInViewport] = useState(true);
   const [isDocVisible, setIsDocVisible] = useState(
     () => (typeof document === 'undefined' ? true : document.visibilityState === 'visible'),
   );
   const sectionRef = useRef<HTMLElement | null>(null);
+  const prevVisibleRef = useRef(isVisible);
   const prevUidRef = useRef<string>(profile.uid);
   const prevTotalChickensRef = useRef<number | null>(null);
   const pendingChickenBurstCountRef = useRef(0);
@@ -167,6 +169,13 @@ export function FarmMeadow({
   const collectPopTimerRef = useRef<number | null>(null);
   const harvestTimerRef = useRef<number | null>(null);
   const effectTimersRef = useRef<number[]>([]);
+
+  useEffect(() => {
+    if (isVisible && !prevVisibleRef.current) {
+      setEntranceEpoch((e) => e + 1);
+    }
+    prevVisibleRef.current = isVisible;
+  }, [isVisible]);
 
   useEffect(() => {
     const el = sectionRef.current;
@@ -275,6 +284,7 @@ export function FarmMeadow({
       prevTotalChickensRef.current = null;
       pendingChickenBurstCountRef.current = 0;
       setActiveMilestone(null);
+      setEntranceEpoch((e) => e + 1);
     }
 
     if (!isProfileSynced) return;
@@ -457,13 +467,19 @@ export function FarmMeadow({
   }, [baseHens, stepTick]);
 
   const fillPct = Math.min(100, Math.round((pendingEggs / Math.max(1, profile.basketCapacity)) * 100));
+  const boosterCardState = totalChickens <= 0 ? 'idle' : boosterActive ? 'active' : 'ready';
+  const feverCardState = feverActive ? 'active' : feverProgress.ready ? 'ready' : 'charging';
+  const cardTransition = { duration: 0.28, ease: [0.22, 1, 0.36, 1] as const };
 
   return (
-    <section
+    <motion.section
       ref={sectionRef}
       data-farm-paused={!isFarmActive ? 'true' : undefined}
       aria-label="Live Isometric Sustainable Poultry Estate"
-      className="animate-clay-enter relative w-full flex-1 lg:flex-none overflow-hidden rounded-none lg:rounded-[2rem] lg:clay-card bg-gradient-to-b from-amber-200 via-emerald-800 to-stone-950 min-h-[540px] h-full lg:h-auto lg:aspect-[9/14] lg:min-h-[600px] lg:max-h-[760px]"
+      initial={prefersReducedMotion ? false : { opacity: 0, y: 10, scale: 0.988 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+      className="relative w-full flex-1 lg:flex-none overflow-hidden rounded-none lg:rounded-[2rem] lg:clay-card bg-gradient-to-b from-amber-200 via-emerald-800 to-stone-950 min-h-[540px] h-full lg:h-auto lg:aspect-[9/14] lg:min-h-[600px] lg:max-h-[760px]"
     >
       {/* Locked-camera isometric farm stage: buildings/walls/roads completely static, internal natural elements alive */}
       <LivingFarmEffects
@@ -608,197 +624,280 @@ export function FarmMeadow({
       <div className="absolute inset-x-0 bottom-0 h-52 bg-gradient-to-t from-stone-950/80 via-stone-950/35 to-transparent pointer-events-none" />
 
       {/* Top Mining HUD: 2x Feed Booster + Golden Egg Alert + GRAM Payout Status */}
-      {!activeMilestone && (
-        <div className="absolute top-3 inset-x-3 z-20 flex flex-col gap-1.5 pointer-events-none">
-          <div className="flex items-center justify-between gap-2">
-            {totalChickens <= 0 ? (
-              <div className="pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/70 backdrop-blur-md border border-white/15 px-3 py-2 text-[11px] font-extrabold text-stone-100 inline-flex items-center gap-1.5 shadow-lg">
-                <EggIcon className="w-3.5 h-3.5 opacity-75 shrink-0" />
-                <span>Mining Idle · 0 Hens</span>
-              </div>
-            ) : boosterActive ? (
-              <div className="clay-btn-emerald pointer-events-auto min-h-[44px] px-3 py-2 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg">
-                <Zap className="w-3.5 h-3.5 fill-current shrink-0" />
-                <span className="font-mono-num">2× Feed · {formatCountdownMs(boostRemainingMs)}</span>
-              </div>
-            ) : onActivateBooster ? (
-              <button
-                type="button"
-                onClick={onActivateBooster}
-                aria-label={`Activate 2x Laying Feed booster for ${FEED_BOOSTER_COST_COINS} coins`}
-                className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/75 hover:bg-stone-900/85 backdrop-blur-md border border-amber-300/35 px-3 py-2 text-[11px] font-extrabold text-amber-100 inline-flex items-center gap-1.5 shadow-lg"
-              >
-                <Zap className="w-3.5 h-3.5 text-amber-400 fill-amber-400 shrink-0" />
-                <span>2× Boost ({FEED_BOOSTER_COST_COINS})</span>
-              </button>
-            ) : (
-              <span />
-            )}
+      <AnimatePresence>
+        {!activeMilestone && (
+          <motion.div
+            key={`hud-shell-${entranceEpoch}`}
+            initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6 }}
+            transition={cardTransition}
+            className="absolute top-3 inset-x-3 z-20 flex flex-col gap-1.5 pointer-events-none"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <AnimatePresence mode="popLayout" initial={false}>
+                {totalChickens <= 0 ? (
+                  <motion.div
+                    key={`booster-idle-${entranceEpoch}`}
+                    initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.95 }}
+                    transition={cardTransition}
+                    className="pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/70 backdrop-blur-md border border-white/15 px-3 py-2 text-[11px] font-extrabold text-stone-100 inline-flex items-center gap-1.5 shadow-lg"
+                  >
+                    <EggIcon className="w-3.5 h-3.5 opacity-75 shrink-0" />
+                    <span>Mining Idle · 0 Hens</span>
+                  </motion.div>
+                ) : boosterActive ? (
+                  <motion.div
+                    key={`booster-active-${boosterCardState}-${entranceEpoch}`}
+                    initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6, scale: 0.94 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.94 }}
+                    transition={cardTransition}
+                    className="clay-btn-emerald pointer-events-auto min-h-[44px] px-3 py-2 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg"
+                  >
+                    <Zap className="w-3.5 h-3.5 fill-current shrink-0" />
+                    <span className="font-mono-num">2× Feed · {formatCountdownMs(boostRemainingMs)}</span>
+                  </motion.div>
+                ) : onActivateBooster ? (
+                  <motion.button
+                    key={`booster-ready-${boosterCardState}-${entranceEpoch}`}
+                    type="button"
+                    onClick={onActivateBooster}
+                    aria-label={`Activate 2x Laying Feed booster for ${FEED_BOOSTER_COST_COINS} coins`}
+                    initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.95 }}
+                    whileHover={!prefersReducedMotion ? { y: -1.5, scale: 1.02 } : undefined}
+                    whileTap={!prefersReducedMotion ? { scale: 0.96 } : undefined}
+                    transition={cardTransition}
+                    className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/75 hover:bg-stone-900/85 backdrop-blur-md border border-amber-300/35 px-3 py-2 text-[11px] font-extrabold text-amber-100 inline-flex items-center gap-1.5 shadow-lg"
+                  >
+                    <Zap className="w-3.5 h-3.5 text-amber-400 fill-amber-400 shrink-0" />
+                    <span>2× Boost ({FEED_BOOSTER_COST_COINS})</span>
+                  </motion.button>
+                ) : null}
+              </AnimatePresence>
 
-            <div className="flex items-center gap-1.5">
-              {totalChickens > 0 && goldenReady && onGoldenEggDrop && (
-                <div className="animate-clay-badge clay-btn-amber pointer-events-none min-h-[44px] px-2.5 py-2 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1 shadow-lg">
-                  <Sparkles className="w-3.5 h-3.5 shrink-0" />
-                  <span className="hidden sm:inline">Tap Hen Gold!</span>
-                  <span className="sm:hidden">Gold!</span>
-                </div>
-              )}
-              {onOpenWithdraw && (
-                <button
-                  type="button"
-                  onClick={onOpenWithdraw}
-                  aria-label="Open GRAM Token withdrawal and payout status"
-                  className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/75 hover:bg-stone-900/85 backdrop-blur-md border border-emerald-400/35 px-3 py-2 text-[11px] font-extrabold text-white inline-flex items-center gap-1.5 shadow-lg"
-                >
-                  <span
-                    aria-hidden="true"
-                    className={`w-2 h-2 rounded-full shrink-0 ${
-                      adGate.unlocked ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
-                    }`}
-                  />
-                  <span>Withdraw</span>
-                  <span className="font-mono-num text-[10px] px-1.5 py-0.5 rounded-md bg-white/10 text-emerald-300">
-                    {adGate.unlocked ? 'Ready' : `${adGate.watched}/${adGate.required}`}
-                  </span>
-                  <ArrowUpRight className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
-                </button>
-              )}
+              <div className="flex items-center gap-1.5 ml-auto">
+                <AnimatePresence>
+                  {totalChickens > 0 && goldenReady && onGoldenEggDrop && (
+                    <motion.div
+                      key={`gold-badge-${entranceEpoch}`}
+                      initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.86, y: -6 }}
+                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                      exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.86 }}
+                      transition={cardTransition}
+                      className="animate-clay-badge clay-btn-amber pointer-events-none min-h-[44px] px-2.5 py-2 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1 shadow-lg"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                      <span className="hidden sm:inline">Tap Hen Gold!</span>
+                      <span className="sm:hidden">Gold!</span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+                {onOpenWithdraw && (
+                  <motion.button
+                    key={`withdraw-chip-${entranceEpoch}`}
+                    type="button"
+                    onClick={onOpenWithdraw}
+                    aria-label="Open GRAM Token withdrawal and payout status"
+                    initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    whileHover={!prefersReducedMotion ? { y: -1.5, scale: 1.02 } : undefined}
+                    whileTap={!prefersReducedMotion ? { scale: 0.96 } : undefined}
+                    transition={{ ...cardTransition, delay: 0.04 }}
+                    className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/75 hover:bg-stone-900/85 backdrop-blur-md border border-emerald-400/35 px-3 py-2 text-[11px] font-extrabold text-white inline-flex items-center gap-1.5 shadow-lg"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`w-2 h-2 rounded-full shrink-0 ${
+                        adGate.unlocked ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+                      }`}
+                    />
+                    <span>Withdraw</span>
+                    <span className="font-mono-num text-[10px] px-1.5 py-0.5 rounded-md bg-white/10 text-emerald-300">
+                      {adGate.unlocked ? 'Ready' : `${adGate.watched}/${adGate.required}`}
+                    </span>
+                    <ArrowUpRight className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
+                  </motion.button>
+                )}
+              </div>
             </div>
-          </div>
 
-          {/* Row 2: Coop Fever 3x Rush (inside Farm section) + Auto-Harvest Drone Chip */}
-          <div className="flex items-center justify-between gap-2">
-            {feverActive ? (
-              <div className="pointer-events-auto min-h-[40px] px-3 py-1.5 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 text-amber-950 border border-amber-200/70 text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg">
-                <Flame className="w-3.5 h-3.5 fill-current shrink-0" />
-                <span className="font-mono-num">
-                  {COOP_FEVER_MULTIPLIER}× Fever · {formatCountdownMs(feverRemainingMs)}
-                </span>
-              </div>
-            ) : (onActivateCoopFever || onWatchCoopFeverAd) ? (
-              <button
+            {/* Row 2: Coop Fever 3x Rush (inside Farm section) + Auto-Harvest Drone Chip */}
+            <div className="flex items-center justify-between gap-2">
+              <AnimatePresence mode="popLayout" initial={false}>
+                {feverActive ? (
+                  <motion.div
+                    key={`fever-active-${feverCardState}-${entranceEpoch}`}
+                    initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6, scale: 0.94 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.94 }}
+                    transition={{ ...cardTransition, delay: 0.06 }}
+                    className="pointer-events-auto min-h-[40px] px-3 py-1.5 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 text-amber-950 border border-amber-200/70 text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg"
+                  >
+                    <Flame className="w-3.5 h-3.5 fill-current shrink-0" />
+                    <span className="font-mono-num">
+                      {COOP_FEVER_MULTIPLIER}× Fever · {formatCountdownMs(feverRemainingMs)}
+                    </span>
+                  </motion.div>
+                ) : (onActivateCoopFever || onWatchCoopFeverAd) ? (
+                  <motion.button
+                    key={`fever-btn-${feverCardState}-${entranceEpoch}`}
+                    type="button"
+                    onClick={
+                      feverProgress.ready
+                        ? (onActivateCoopFever ?? onWatchCoopFeverAd)
+                        : (onWatchCoopFeverAd ?? onActivateCoopFever)
+                    }
+                    aria-label={
+                      feverProgress.ready
+                        ? `Activate ${COOP_FEVER_MULTIPLIER}x Coop Fever Rush`
+                        : `Watch ad for ${COOP_FEVER_MULTIPLIER}x Coop Fever Rush (${feverProgress.adsCollected} of ${COOP_FEVER_REQUIRED_ADS} ads)`
+                    }
+                    initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.95 }}
+                    whileHover={!prefersReducedMotion ? { y: -1.5, scale: 1.02 } : undefined}
+                    whileTap={!prefersReducedMotion ? { scale: 0.96 } : undefined}
+                    transition={{ ...cardTransition, delay: 0.06 }}
+                    className={`clay-btn pointer-events-auto min-h-[40px] px-3 py-1.5 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg ${
+                      feverProgress.ready
+                        ? 'bg-gradient-to-r from-amber-400 via-orange-400 to-amber-300 text-amber-950 border border-amber-200 animate-pulse'
+                        : 'bg-stone-950/72 hover:bg-stone-900/85 backdrop-blur-md border border-orange-400/35 text-amber-100'
+                    }`}
+                  >
+                    <Flame
+                      className={`w-3.5 h-3.5 shrink-0 ${
+                        feverProgress.ready ? 'text-orange-700 fill-orange-700' : 'text-orange-400'
+                      }`}
+                    />
+                    {feverProgress.ready ? (
+                      <span>Activate {COOP_FEVER_MULTIPLIER}× Fever!</span>
+                    ) : (
+                      <span className="font-mono-num tabular-nums">
+                        {COOP_FEVER_MULTIPLIER}× Fever · {feverProgress.adsCollected}/{COOP_FEVER_REQUIRED_ADS} Ads
+                      </span>
+                    )}
+                  </motion.button>
+                ) : null}
+              </AnimatePresence>
+
+              <motion.button
+                key={`drone-chip-${droneActive ? 'on' : 'off'}-${entranceEpoch}`}
                 type="button"
-                onClick={
-                  feverProgress.ready
-                    ? (onActivateCoopFever ?? onWatchCoopFeverAd)
-                    : (onWatchCoopFeverAd ?? onActivateCoopFever)
-                }
-                aria-label={
-                  feverProgress.ready
-                    ? `Activate ${COOP_FEVER_MULTIPLIER}x Coop Fever Rush`
-                    : `Watch ad for ${COOP_FEVER_MULTIPLIER}x Coop Fever Rush (${feverProgress.adsCollected} of ${COOP_FEVER_REQUIRED_ADS} ads)`
-                }
-                className={`clay-btn pointer-events-auto min-h-[40px] px-3 py-1.5 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg ${
-                  feverProgress.ready
-                    ? 'bg-gradient-to-r from-amber-400 via-orange-400 to-amber-300 text-amber-950 border border-amber-200 animate-pulse'
-                    : 'bg-stone-950/72 hover:bg-stone-900/85 backdrop-blur-md border border-orange-400/35 text-amber-100'
+                onClick={onOpenYourFarm}
+                aria-label="Open Farm Manager & Auto-Harvest Drone controls"
+                initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6, scale: 0.95 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                whileHover={!prefersReducedMotion ? { y: -1.5, scale: 1.02 } : undefined}
+                whileTap={!prefersReducedMotion ? { scale: 0.96 } : undefined}
+                transition={{ ...cardTransition, delay: 0.09 }}
+                className={`clay-btn pointer-events-auto ml-auto min-h-[40px] px-2.5 py-1.5 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg ${
+                  droneActive
+                    ? 'bg-sky-950/80 backdrop-blur-md border border-sky-400/45 text-sky-200'
+                    : 'bg-stone-950/65 hover:bg-stone-900/80 backdrop-blur-md border border-white/15 text-stone-200'
                 }`}
               >
-                <Flame
-                  className={`w-3.5 h-3.5 shrink-0 ${
-                    feverProgress.ready ? 'text-orange-700 fill-orange-700' : 'text-orange-400'
-                  }`}
-                />
-                {feverProgress.ready ? (
-                  <span>Activate {COOP_FEVER_MULTIPLIER}× Fever!</span>
-                ) : (
-                  <span className="font-mono-num tabular-nums">
-                    {COOP_FEVER_MULTIPLIER}× Fever · {feverProgress.adsCollected}/{COOP_FEVER_REQUIRED_ADS} Ads
-                  </span>
-                )}
-              </button>
-            ) : (
-              <span />
-            )}
-
-            <button
-              type="button"
-              onClick={onOpenYourFarm}
-              aria-label="Open Farm Manager & Auto-Harvest Drone controls"
-              className={`clay-btn pointer-events-auto min-h-[40px] px-2.5 py-1.5 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg ${
-                droneActive
-                  ? 'bg-sky-950/80 backdrop-blur-md border border-sky-400/45 text-sky-200'
-                  : 'bg-stone-950/65 hover:bg-stone-900/80 backdrop-blur-md border border-white/15 text-stone-200'
-              }`}
-            >
-              <Bot className={`w-3.5 h-3.5 shrink-0 ${droneActive ? 'text-sky-400' : 'text-stone-400'}`} />
-              <span className="font-mono-num tabular-nums">
-                {droneActive
-                  ? `Drone ${droneRemainingMs >= 3_600_000 ? `${Math.ceil(droneRemainingMs / 3_600_000)}h` : formatCountdownMs(droneRemainingMs)}`
-                  : 'Auto-Drone'}
-              </span>
-            </button>
-          </div>
-        </div>
-      )}
+                <Bot className={`w-3.5 h-3.5 shrink-0 ${droneActive ? 'text-sky-400' : 'text-stone-400'}`} />
+                <span className="font-mono-num tabular-nums">
+                  {droneActive
+                    ? `Drone ${droneRemainingMs >= 3_600_000 ? `${Math.ceil(droneRemainingMs / 3_600_000)}h` : formatCountdownMs(droneRemainingMs)}`
+                    : 'Auto-Drone'}
+                </span>
+              </motion.button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Chicken Count Milestone Visual Notification */}
-      {activeMilestone && (
-        <div
-          role="status"
-          aria-live="polite"
-          data-testid="farm-milestone-banner"
-          className="animate-clay-modal clay-card-warm absolute top-3 inset-x-3 z-30 !rounded-2xl px-3.5 py-2.5 flex items-center justify-between gap-2.5"
-        >
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-9 h-9 rounded-xl clay-icon-well text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
-              <Award className="w-5 h-5" />
-            </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <span className="text-xs font-extrabold text-stone-900 dark:text-stone-100">
-                  {activeMilestone.title}
-                </span>
-                <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-800 dark:text-emerald-300 text-[10px] font-extrabold font-mono-num">
-                  {activeMilestone.badge}
-                </span>
-              </div>
-              <p className="text-[11px] font-semibold text-stone-600 dark:text-stone-300 truncate">
-                {activeMilestone.subtitle}
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            aria-label="Dismiss milestone notification"
-            onClick={() => setActiveMilestone(null)}
-            className="clay-btn clay-btn-neutral w-11 h-11 rounded-xl flex items-center justify-center shrink-0"
+      <AnimatePresence>
+        {activeMilestone && (
+          <motion.div
+            key={`milestone-${activeMilestone.threshold}`}
+            role="status"
+            aria-live="polite"
+            data-testid="farm-milestone-banner"
+            initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -14, scale: 0.94 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -10, scale: 0.95 }}
+            transition={
+              prefersReducedMotion
+                ? { duration: 0.15 }
+                : { type: 'spring', stiffness: 380, damping: 28, mass: 0.8 }
+            }
+            className="clay-card-warm absolute top-3 inset-x-3 z-30 !rounded-2xl px-3.5 py-2.5 flex items-center justify-between gap-2.5"
           >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      )}
-
-
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-9 h-9 rounded-xl clay-icon-well text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
+                <Award className="w-5 h-5" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-xs font-extrabold text-stone-900 dark:text-stone-100">
+                    {activeMilestone.title}
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-800 dark:text-emerald-300 text-[10px] font-extrabold font-mono-num">
+                    {activeMilestone.badge}
+                  </span>
+                </div>
+                <p className="text-[11px] font-semibold text-stone-600 dark:text-stone-300 truncate">
+                  {activeMilestone.subtitle}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              aria-label="Dismiss milestone notification"
+              onClick={() => setActiveMilestone(null)}
+              className="clay-btn clay-btn-neutral w-11 h-11 rounded-xl flex items-center justify-center shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Buy First Miner Prompt when 0 hens owned (kept crisp above swaying farm diorama) */}
-      {totalChickens <= 0 && (
-        <div className="pointer-events-auto absolute inset-x-4 top-[44%] -translate-y-1/2 flex justify-center z-20">
-          <div className="animate-clay-enter clay-card-warm !rounded-3xl max-w-[295px] w-full p-4 text-center space-y-2.5 shadow-2xl">
-            <div className="w-12 h-12 rounded-2xl clay-icon-well mx-auto flex items-center justify-center">
-              <ChickenSprite breed="leghorn" className="w-9 h-9" />
-            </div>
-            <div className="space-y-1">
-              <h3 className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
-                Buy a Chicken to Mine GRAM
-              </h3>
-              <p className="text-[11px] font-medium text-stone-600 dark:text-stone-300 leading-relaxed">
-                Hens lay eggs automatically every second so you can harvest and withdraw GRAM tokens.
-              </p>
-            </div>
-            {onBuyChickens && (
-              <button
-                type="button"
-                onClick={onBuyChickens}
-                className="clay-btn clay-btn-emerald w-full min-h-[44px] rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5"
-              >
-                <Package className="w-4 h-4" />
-                <span>Buy First Chicken</span>
-              </button>
-            )}
+      <AnimatePresence>
+        {totalChickens <= 0 && (
+          <div className="pointer-events-auto absolute inset-x-4 top-[44%] -translate-y-1/2 flex justify-center z-20">
+            <motion.div
+              key={`starter-card-${entranceEpoch}`}
+              initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 14, scale: 0.94 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 8, scale: 0.95 }}
+              transition={{ duration: 0.34, delay: 0.06, ease: [0.22, 1, 0.36, 1] }}
+              className="clay-card-warm !rounded-3xl max-w-[295px] w-full p-4 text-center space-y-2.5 shadow-2xl"
+            >
+              <div className="w-12 h-12 rounded-2xl clay-icon-well mx-auto flex items-center justify-center">
+                <ChickenSprite breed="leghorn" className="w-9 h-9" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
+                  Buy a Chicken to Mine GRAM
+                </h3>
+                <p className="text-[11px] font-medium text-stone-600 dark:text-stone-300 leading-relaxed">
+                  Hens lay eggs automatically every second so you can harvest and withdraw GRAM tokens.
+                </p>
+              </div>
+              {onBuyChickens && (
+                <button
+                  type="button"
+                  onClick={onBuyChickens}
+                  className="clay-btn clay-btn-emerald w-full min-h-[44px] rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5"
+                >
+                  <Package className="w-4 h-4" />
+                  <span>Buy First Chicken</span>
+                </button>
+              )}
+            </motion.div>
           </div>
-        </div>
-      )}
+        )}
+      </AnimatePresence>
 
       {/* Motion Particle Bursts on Egg Collection & Chicken Purchases */}
       <div
@@ -869,9 +968,15 @@ export function FarmMeadow({
       <div className="absolute inset-x-3 bottom-[4.85rem] lg:bottom-3 z-20 flex flex-col gap-2">
         {/* Primary Farm & Collect Dock */}
         <div className="flex items-end gap-2.5">
-          <button
+          <motion.button
+            key={`farm-stat-card-${entranceEpoch}`}
             type="button"
             onClick={onOpenYourFarm}
+            initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 12, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            whileHover={!prefersReducedMotion ? { y: -2, scale: 1.015 } : undefined}
+            whileTap={!prefersReducedMotion ? { scale: 0.97 } : undefined}
+            transition={{ duration: 0.3, delay: 0.05, ease: [0.22, 1, 0.36, 1] }}
             className="clay-btn clay-card !rounded-2xl flex-1 min-h-[56px] px-3 py-2 flex items-center gap-2.5 text-left"
           >
             <div className="w-9 h-9 rounded-xl clay-icon-well flex items-center justify-center shrink-0">
@@ -885,7 +990,7 @@ export function FarmMeadow({
                 Lv.{profile.level} · {totalChickens} Hens · {profile.basketTierHours}h Cap
               </div>
             </div>
-          </button>
+          </motion.button>
 
           <div className="relative flex-1">
             {harvestBurst && (
@@ -899,18 +1004,27 @@ export function FarmMeadow({
               </div>
             )}
 
-            {pendingEggs > 0 && (
-              <>
-                <div
-                  aria-hidden="true"
-                  className="animate-collect-halo pointer-events-none absolute -inset-1 rounded-2xl bg-amber-300/45 blur-sm"
-                />
-                <div className="animate-clay-badge absolute -top-7 left-1/2 -translate-x-1/2 flex items-center gap-1 rounded-full bg-amber-950/90 text-amber-200 border border-amber-400/40 px-2.5 py-0.5 text-xs font-extrabold shadow-lg whitespace-nowrap pointer-events-none">
-                  <EggIcon className="w-3.5 h-3.5" />
-                  <span className="font-mono-num">+{pendingEggs.toLocaleString()}</span>
-                </div>
-              </>
-            )}
+            <AnimatePresence>
+              {pendingEggs > 0 && (
+                <motion.div
+                  key="pending-eggs-indicator"
+                  initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.85, y: 4 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.85 }}
+                  transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                  className="pointer-events-none"
+                >
+                  <div
+                    aria-hidden="true"
+                    className="animate-collect-halo pointer-events-none absolute -inset-1 rounded-2xl bg-amber-300/45 blur-sm"
+                  />
+                  <div className="animate-clay-badge absolute -top-7 left-1/2 -translate-x-1/2 flex items-center gap-1 rounded-full bg-amber-950/90 text-amber-200 border border-amber-400/40 px-2.5 py-0.5 text-xs font-extrabold shadow-lg whitespace-nowrap pointer-events-none">
+                    <EggIcon className="w-3.5 h-3.5" />
+                    <span className="font-mono-num">+{pendingEggs.toLocaleString()}</span>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             <AnimatePresence>
               {collectRippleSeq > 0 && !prefersReducedMotion && (
@@ -927,19 +1041,26 @@ export function FarmMeadow({
             </AnimatePresence>
 
             <motion.button
+              key={`collect-dock-card-${entranceEpoch}`}
               ref={collectBtnRef}
               type="button"
+              initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 12, scale: 0.96 }}
               animate={
                 isCollectPopping && !prefersReducedMotion
                   ? {
+                      opacity: 1,
                       scale: [1, 1.15, 0.94, 1.04, 1],
                       y: [0, -5, 1, 0],
                     }
-                  : { scale: 1, y: 0 }
+                  : { opacity: 1, scale: 1, y: 0 }
               }
-              transition={{ duration: 0.44, ease: [0.16, 1, 0.3, 1] }}
-              whileHover={pendingEggs > 0 && !prefersReducedMotion ? { scale: 1.025 } : undefined}
-              whileTap={pendingEggs > 0 ? { scale: 0.92 } : undefined}
+              transition={{
+                duration: isCollectPopping ? 0.44 : 0.3,
+                delay: isCollectPopping ? 0 : 0.1,
+                ease: [0.22, 1, 0.36, 1],
+              }}
+              whileHover={pendingEggs > 0 && !prefersReducedMotion ? { y: -1.5, scale: 1.02 } : undefined}
+              whileTap={pendingEggs > 0 && !prefersReducedMotion ? { scale: 0.94 } : undefined}
               onClick={() => {
                 if (pendingEggs > 0) {
                   const nextSeq = ++harvestSeqRef.current;
@@ -1018,6 +1139,6 @@ export function FarmMeadow({
           </div>,
           document.body,
         )}
-    </section>
+    </motion.section>
   );
 }
