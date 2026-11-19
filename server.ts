@@ -42,6 +42,7 @@ import {
   DEFAULT_CHANNELS_CONFIG,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
+  DEFAULT_MAINTENANCE_CONFIG,
   DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
   encodeAchievementsWithAds,
   extractTelegramNumericUserId,
@@ -60,11 +61,13 @@ import {
   REFERRER_SIGNUP_BONUS_COINS,
   renderPayoutChannelApproveMessage,
   renderWithdrawApproveMessage,
+  resolveMaintenanceConfig,
   SIGNUP_BONUS_COINS,
 } from './src/game/economy.ts';
 import type {
   ChannelCheckDiagnosticLog,
   ChannelsConfig,
+  MaintenanceConfig,
   RequiredTelegramChannel,
   SystemDiagnosticsSnapshot,
   SystemServerLogEntry,
@@ -257,11 +260,22 @@ function sanitizeBotTokenInput(raw: unknown): string {
     .replace(/^bot(?=\d+:)/i, '');
 }
 
+const DEFAULT_BACKEND_TELEGRAM_BOT_TOKEN = sanitizeBotTokenInput(
+  '9048180333:AAHXOeaRz85sPRT57pyhNteKBZJ0j4gGREE',
+);
+
 const TELEGRAM_BOT_TOKEN_ENV = sanitizeBotTokenInput(
   process.env.TELEGRAM_BOT_TOKEN ||
     process.env.BOT_TOKEN ||
     process.env.TG_BOT_TOKEN ||
-    '',
+    DEFAULT_BACKEND_TELEGRAM_BOT_TOKEN,
+);
+const BONUS_PER_REFERRAL = Math.max(
+  1,
+  Math.round(
+    Number(process.env.BONUS_PER_REFERRAL || REFERRER_SIGNUP_BONUS_COINS) ||
+      REFERRER_SIGNUP_BONUS_COINS,
+  ),
 );
 const TELEGRAM_BOT_USERNAME_ENV = normalizeTelegramBotUsername(
   process.env.TELEGRAM_BOT_USERNAME || process.env.VITE_TELEGRAM_BOT_USERNAME || '',
@@ -1017,6 +1031,79 @@ async function loadExtraAdminIdsFromFirestore(): Promise<string[]> {
   }
 }
 
+const MAINTENANCE_CONFIG_FILE = path.resolve(__dirname, '.data', 'maintenance_config.json');
+
+function loadMaintenanceConfigFromDisk(): MaintenanceConfig | null {
+  try {
+    if (!fs.existsSync(MAINTENANCE_CONFIG_FILE)) return null;
+    const raw = fs.readFileSync(MAINTENANCE_CONFIG_FILE, 'utf8');
+    const parsed = JSON.parse(raw) as Partial<MaintenanceConfig>;
+    return resolveMaintenanceConfig(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function persistMaintenanceConfigToDisk(cfg: MaintenanceConfig): void {
+  try {
+    const dir = path.dirname(MAINTENANCE_CONFIG_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(MAINTENANCE_CONFIG_FILE, JSON.stringify(cfg), 'utf8');
+  } catch {
+    // Non-fatal on read-only containers
+  }
+}
+
+async function loadMaintenanceConfigFromFirestore(): Promise<MaintenanceConfig> {
+  const disk = loadMaintenanceConfigFromDisk();
+  if (!serverDb) return disk || DEFAULT_MAINTENANCE_CONFIG;
+  try {
+    const snap = await getFreshDoc(doc(serverDb, 'app_config', 'maintenance'));
+    if (!snap.exists()) return disk || DEFAULT_MAINTENANCE_CONFIG;
+    const remote = resolveMaintenanceConfig(snap.data() as Partial<MaintenanceConfig>);
+    if (disk && disk.updatedAtMs > remote.updatedAtMs) {
+      return disk;
+    }
+    persistMaintenanceConfigToDisk(remote);
+    return remote;
+  } catch {
+    return disk || DEFAULT_MAINTENANCE_CONFIG;
+  }
+}
+
+async function saveMaintenanceConfigOnServer(
+  input: Partial<MaintenanceConfig>,
+  updatedBy: string,
+): Promise<MaintenanceConfig> {
+  const resolved = resolveMaintenanceConfig({
+    enabled: Boolean(input.enabled),
+    title: input.title,
+    message: input.message,
+    estimatedReturn: input.estimatedReturn,
+    updatedBy: updatedBy.slice(0, 64),
+    updatedAtMs: Date.now(),
+  });
+  persistMaintenanceConfigToDisk(resolved);
+  if (serverDb) {
+    try {
+      await setDoc(doc(serverDb, 'app_config', 'maintenance'), {
+        ...resolved,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      recordServerLog(
+        'warn',
+        'maintenance',
+        'Saved maintenance config to disk (Firestore sync skipped)',
+        err instanceof Error ? err.message : 'Firestore write error',
+      );
+    }
+  }
+  return resolved;
+}
+
 const CHANNEL_CHECK_LOGS_FILE = path.resolve(__dirname, '.data', 'channel_check_logs.json');
 const channelCheckLogs: ChannelCheckDiagnosticLog[] = [];
 
@@ -1255,8 +1342,18 @@ async function fetchTelegramChatMember(chatId: string, userId: string): Promise<
     return { ok: true, targetChatIdUsed: normalizedHandle, result: primary.result };
   }
 
+  const isTelegramUserNotFoundDescription = (desc: string): boolean => {
+    const low = desc.toLowerCase();
+    return (
+      low.includes('user not found') ||
+      low.includes('user_id_invalid') ||
+      low.includes('participant_id_invalid') ||
+      low.includes('member not found')
+    );
+  };
+
   const primaryDesc = String(primary.description || '').toLowerCase();
-  if (primaryDesc.includes('user not found') || primaryDesc.includes('user_id_invalid')) {
+  if (isTelegramUserNotFoundDescription(primaryDesc)) {
     return {
       ok: false,
       userNotFound: true,
@@ -1281,7 +1378,7 @@ async function fetchTelegramChatMember(chatId: string, userId: string): Promise<
         return { ok: true, targetChatIdUsed: supergroupCandidate, result: retried.result };
       }
       const retryDesc = String(retried.description || '').toLowerCase();
-      if (retryDesc.includes('user not found') || retryDesc.includes('user_id_invalid')) {
+      if (isTelegramUserNotFoundDescription(retryDesc)) {
         return {
           ok: false,
           userNotFound: true,
@@ -1638,7 +1735,7 @@ async function applyReferralInServerDb(params: {
     const referralDocRef = doc(serverDb, 'players', referrerUid, 'referrals', referredUid);
 
     const nowMs = Date.now();
-    const rewardCoins = REFERRER_SIGNUP_BONUS_COINS;
+    const rewardCoins = BONUS_PER_REFERRAL;
     let alreadyLinked = false;
     let safeReferredName = String(params.displayName || '').trim().slice(0, 60) || 'Farmer';
     let safeReferredHandle = formatReferralHandle(String(params.handle || ''), referredUid).slice(0, 40);
@@ -1920,6 +2017,181 @@ async function applyReferralInServerDb(params: {
       statusCode: 500,
     };
   }
+}
+
+async function ensurePlayerInServerDb(tgUser: {
+  id: number | string;
+  first_name?: string;
+  last_name?: string;
+  username?: string;
+  photo_url?: string;
+}): Promise<{ uid: string; playerData: Record<string, unknown> } | null> {
+  const numericId = extractTelegramNumericUserId(String(tgUser.id || ''));
+  if (!numericId) return null;
+  const uid = `tg_${numericId}`;
+  const fullName = [String(tgUser.first_name || '').trim(), String(tgUser.last_name || '').trim()]
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+  const displayName =
+    fullName.slice(0, 60) ||
+    (tgUser.username ? `@${String(tgUser.username).replace(/^@+/, '').slice(0, 50)}` : `Farmer ${numericId.slice(-4)}`);
+  const handle = formatReferralHandle(
+    tgUser.username ? `@${String(tgUser.username).replace(/^@+/, '')}` : '',
+    uid,
+  ).slice(0, 40);
+  const photoUrl = String(tgUser.photo_url || '').slice(0, 512);
+
+  void upsertBotSubscriber({
+    chatId: numericId,
+    username: tgUser.username || '',
+    firstName: tgUser.first_name || displayName,
+    source: 'miniapp',
+  });
+
+  if (!serverDb) {
+    return {
+      uid,
+      playerData: {
+        uid,
+        displayName,
+        handle,
+        photoUrl,
+        referralCount: 0,
+        referralCoinsEarned: 0,
+        referredBy: '',
+      },
+    };
+  }
+
+  try {
+    const playerRef = doc(serverDb, 'players', uid);
+    const lbRef = doc(serverDb, 'leaderboard', uid);
+    const snap = await getFreshDoc(playerRef);
+    const nowMs = Date.now();
+    if (!snap.exists()) {
+      const seeded = createDefaultProfile(uid, displayName, handle, nowMs, photoUrl).profile;
+      const createPayload = toServerFirestorePlayerCreatePayload(seeded);
+      await setDoc(playerRef, createPayload);
+      const lbSnap = await getFreshDoc(lbRef);
+      if (!lbSnap.exists()) {
+        await setDoc(lbRef, {
+          uid,
+          displayName,
+          handle,
+          photoUrl,
+          avatarColor: seeded.avatarColor,
+          referralCode: seeded.referralCode,
+          buyerPoints: 0,
+          inviterCount: 0,
+          eggs: 0,
+          totalEggsCollected: 0,
+          chickensCount: 0,
+          updatedAt: serverTimestamp(),
+        });
+      }
+      return { uid, playerData: createPayload as unknown as Record<string, unknown> };
+    }
+    const existing = snap.data() as Record<string, unknown>;
+    const needsProfileSync =
+      (displayName && existing.displayName !== displayName) ||
+      (tgUser.username && existing.handle !== handle) ||
+      (photoUrl && !existing.photoUrl);
+    if (needsProfileSync) {
+      const nextPayload = toServerFirestorePlayerUpdatePayload(
+        {
+          ...existing,
+          displayName: displayName || existing.displayName,
+          handle: tgUser.username ? handle : existing.handle,
+          photoUrl: photoUrl || existing.photoUrl,
+        },
+        uid,
+      );
+      await updateDoc(playerRef, nextPayload);
+      return { uid, playerData: { ...existing, ...nextPayload } };
+    }
+    return { uid, playerData: existing };
+  } catch (err) {
+    recordServerLog(
+      'warn',
+      'ensure_player',
+      `Failed to sync player ${uid}`,
+      err instanceof Error ? err.message : 'Firestore error',
+    );
+    return {
+      uid,
+      playerData: {
+        uid,
+        displayName,
+        handle,
+        photoUrl,
+        referralCount: 0,
+        referralCoinsEarned: 0,
+        referredBy: '',
+      },
+    };
+  }
+}
+
+function resolveTelegramUserFromRequest(
+  req: express.Request,
+  body?: { initData?: string; token?: string },
+): {
+  valid: boolean;
+  playerId?: string;
+  user?: {
+    id: number | string;
+    first_name?: string;
+    last_name?: string;
+    username?: string;
+    photo_url?: string;
+  };
+  error?: string;
+} {
+  const activeBotToken = getTelegramBotToken();
+  const headerInit = String(req.headers['x-telegram-init-data'] || '').trim();
+  const bodyInit = String(body?.initData || '').trim();
+  const queryInit = typeof req.query.initData === 'string' ? req.query.initData.trim() : '';
+  const rawInitData = headerInit || bodyInit || queryInit;
+
+  if (rawInitData) {
+    const check = verifyTelegramInitData(rawInitData, activeBotToken);
+    if (check.valid && check.playerId && check.user?.id) {
+      return {
+        valid: true,
+        playerId: check.playerId,
+        user: check.user as {
+          id: number | string;
+          first_name?: string;
+          last_name?: string;
+          username?: string;
+          photo_url?: string;
+        },
+      };
+    }
+    return {
+      valid: false,
+      error: check.reason || 'Invalid Telegram initData',
+    };
+  }
+
+  const verifiedActor = resolveVerifiedPlayerActor({
+    req,
+    token: body?.token || (typeof req.query.token === 'string' ? req.query.token : undefined),
+  });
+  const numericId = verifiedActor ? extractTelegramNumericUserId(verifiedActor) : null;
+  if (verifiedActor && numericId) {
+    return {
+      valid: true,
+      playerId: verifiedActor,
+      user: { id: Number(numericId) || numericId },
+    };
+  }
+
+  return {
+    valid: false,
+    error: 'Missing or invalid Telegram initData',
+  };
 }
 
 const BOT_SUBSCRIBERS_FILE = path.resolve(__dirname, '.data', 'bot_subscribers.json');
@@ -2691,7 +2963,7 @@ async function startServer() {
       res.setHeader('Access-Control-Allow-Origin', '*');
     }
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-telegram-init-data');
     if (req.method === 'OPTIONS') {
       res.sendStatus(204);
       return;
@@ -3047,10 +3319,11 @@ async function startServer() {
   app.use(express.json({ limit: '100kb' }));
 
   app.get('/api/config', async (_req, res) => {
-    const [channelsCfg, telegramBotUsername, adminSecurity] = await Promise.all([
+    const [channelsCfg, telegramBotUsername, adminSecurity, maintenanceCfg] = await Promise.all([
       loadChannelsConfigFromFirestore(),
       resolveTelegramBotUsername(),
       loadActiveAdminSecurity(),
+      loadMaintenanceConfigFromFirestore(),
     ]);
     const activeChannels = getActiveRequiredChannels(channelsCfg);
     res.json({
@@ -3067,10 +3340,11 @@ async function startServer() {
       persistentLedgerEnabled: Boolean(serverDb),
       adminPasscodeSource: adminSecurity.source,
       adminPasscodeUpdatedAtMs: adminSecurity.updatedAtMs,
+      maintenance: maintenanceCfg,
     });
   });
 
-  app.post('/api/telegram/check-channels', async (req, res) => {
+  const handleCheckChannelsRequest = async (req: express.Request, res: express.Response) => {
     const ip = getClientIp(req);
     const rl = checkRateLimit(`chk_ch:${ip}`, 60, 60_000);
     if (!rl.allowed) {
@@ -3329,7 +3603,10 @@ async function startServer() {
       channels: checks,
       checkedAtMs: Date.now(),
     });
-  });
+  };
+
+  app.post('/api/telegram/check-channels', handleCheckChannelsRequest);
+  app.post('/api/telegram/check-membership', handleCheckChannelsRequest);
 
   app.post('/api/telegram/check-task-channel', async (req, res) => {
     const ip = getClientIp(req);
@@ -4708,6 +4985,242 @@ async function startServer() {
     });
   });
 
+  // Synced Express Referral API (compatible with Telegram initData header/body & Firestore players/referrals schema)
+  app.post('/api/referral/claim', async (req, res) => {
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`ref_claim:${ip}`, 25, 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({ ok: false, error: 'Too many referral attempts.' });
+      return;
+    }
+
+    const body = (req.body || {}) as {
+      initData?: string;
+      token?: string;
+      referrerId?: string | number;
+      refCode?: string;
+      displayName?: string;
+      handle?: string;
+      photoUrl?: string;
+    };
+
+    const auth = resolveTelegramUserFromRequest(req, body);
+    if (!auth.valid || !auth.user || !auth.playerId) {
+      res.status(401).json({ ok: false, error: auth.error || 'Invalid Telegram initData' });
+      return;
+    }
+
+    const ensured = await ensurePlayerInServerDb(auth.user);
+    const currentUid = ensured?.uid || auth.playerId;
+    const currentUserId = extractTelegramNumericUserId(currentUid) || String(auth.user.id);
+
+    const rawInviter = String(body.referrerId ?? body.refCode ?? '').trim();
+    const strippedInviter = rawInviter.replace(/^(?:ref|r)_/i, '').trim();
+    const inviterNumeric = /^\d{4,20}$/.test(strippedInviter)
+      ? strippedInviter
+      : extractTelegramNumericUserId(strippedInviter);
+
+    if (!strippedInviter || strippedInviter.length < 3) {
+      res.status(400).json({ ok: false, error: 'Invalid referrerId' });
+      return;
+    }
+
+    if (
+      strippedInviter === currentUid ||
+      (inviterNumeric && currentUserId && inviterNumeric === currentUserId)
+    ) {
+      res.status(400).json({ ok: false, error: 'Self-referral not allowed' });
+      return;
+    }
+
+    const tgFirst = String(auth.user.first_name || '').trim();
+    const tgLast = String(auth.user.last_name || '').trim();
+    const tgName = [tgFirst, tgLast].filter(Boolean).join(' ').trim();
+    const tgHandle = auth.user.username ? `@${String(auth.user.username).replace(/^@+/, '')}` : '';
+
+    const result = await applyReferralInServerDb({
+      referredUid: currentUid,
+      refCode: rawInviter,
+      displayName: body.displayName || tgName,
+      handle: body.handle || tgHandle,
+      photoUrl: body.photoUrl || (typeof auth.user.photo_url === 'string' ? auth.user.photo_url : ''),
+    });
+
+    if (result.ok && result.alreadyLinked) {
+      if (result.referrerUid) {
+        saveReferral(currentUid, result.referrerUid);
+      }
+      deletePendingReferral(currentUserId);
+      res.json({
+        ok: true,
+        claimed: false,
+        applied: false,
+        alreadyLinked: true,
+        reason: 'already_linked',
+        message: 'Already referred',
+        referrerUid: result.referrerUid,
+      });
+      return;
+    }
+
+    if (result.ok && result.applied) {
+      if (result.referrerUid) {
+        saveReferral(currentUid, result.referrerUid);
+      }
+      deletePendingReferral(currentUserId);
+      res.json({
+        ok: true,
+        claimed: true,
+        applied: true,
+        status: 'verified',
+        bonusAwarded: result.coinsRewarded ?? BONUS_PER_REFERRAL,
+        coinsRewarded: result.coinsRewarded ?? BONUS_PER_REFERRAL,
+        referredBonusCoins: result.referredBonusCoins ?? REFERRED_WELCOME_BONUS_COINS,
+        nextReferredCoins: result.nextReferredCoins,
+        referrerUid: result.referrerUid,
+        referrerName: result.referrerName,
+        botDmSent: result.botDmSent,
+      });
+      return;
+    }
+
+    if (result.reason === 'self_referral') {
+      deletePendingReferral(currentUserId);
+      res.status(400).json({ ok: false, error: 'Self-referral not allowed' });
+      return;
+    }
+
+    if (result.reason === 'invalid_code') {
+      deletePendingReferral(currentUserId);
+      res.status(404).json({ ok: false, error: 'Referrer not found', reason: 'invalid_code' });
+      return;
+    }
+
+    res.status(result.statusCode || 500).json({
+      ok: false,
+      error: 'Referral claim failed',
+      reason: result.reason,
+    });
+  });
+
+  app.get('/api/referral/stats', async (req, res) => {
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`ref_stats:${ip}`, 60, 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({ ok: false, error: 'Too many requests.' });
+      return;
+    }
+
+    const auth = resolveTelegramUserFromRequest(req);
+    if (!auth.valid || !auth.user || !auth.playerId) {
+      res.status(401).json({ ok: false, error: auth.error || 'Missing Telegram initData' });
+      return;
+    }
+
+    const ensured = await ensurePlayerInServerDb(auth.user);
+    const currentUid = ensured?.uid || auth.playerId;
+    const currentUserId = extractTelegramNumericUserId(currentUid) || String(auth.user.id);
+
+    let playerData: Record<string, unknown> = ensured?.playerData || {};
+    const fsReferrals = new Map<
+      string,
+      {
+        id: string;
+        uid: string;
+        name: string;
+        handle: string;
+        bonus: number;
+        coinsEarned: number;
+        status: string;
+        toppedUpUsd: number;
+        date: string;
+        createdAtMs: number;
+      }
+    >();
+
+    if (serverDb) {
+      try {
+        const [playerSnap, refsSnap] = await Promise.all([
+          getFreshDoc(doc(serverDb, 'players', currentUid)),
+          getDocs(
+            query(
+              collection(serverDb, 'players', currentUid, 'referrals'),
+              orderBy('createdAtMs', 'desc'),
+              limit(200),
+            ),
+          ),
+        ]);
+        if (playerSnap.exists()) {
+          playerData = playerSnap.data() as Record<string, unknown>;
+        }
+        for (const rDoc of refsSnap.docs) {
+          const d = rDoc.data();
+          const refUid = String(d.referredUid || rDoc.id || '').trim();
+          if (!refUid) continue;
+          const createdAtMs = Math.max(0, Number(d.createdAtMs ?? 0) || Date.now());
+          const numId = extractTelegramNumericUserId(refUid);
+          fsReferrals.set(numId || refUid, {
+            id: numId || refUid,
+            uid: refUid,
+            name: String(d.referredName || 'Farmer'),
+            handle: String(d.referredHandle || '@farmer'),
+            bonus: Number(d.coinsEarned ?? BONUS_PER_REFERRAL),
+            coinsEarned: Number(d.coinsEarned ?? BONUS_PER_REFERRAL),
+            status: String(d.status || 'active'),
+            toppedUpUsd: Number(d.toppedUpUsd ?? 0),
+            date: new Date(createdAtMs).toISOString(),
+            createdAtMs,
+          });
+        }
+      } catch {
+        // Merge gracefully with referralStorage below
+      }
+    }
+
+    const mergedDisk = getMergedReferralsForUser(currentUid);
+    for (const id of mergedDisk.referrals) {
+      const cleanId = String(id || '').trim();
+      if (!cleanId) continue;
+      const numId = extractTelegramNumericUserId(cleanId) || cleanId;
+      if (!fsReferrals.has(numId)) {
+        const refUid = /^\d{4,20}$/.test(cleanId) ? `tg_${cleanId}` : cleanId;
+        fsReferrals.set(numId, {
+          id: numId,
+          uid: refUid,
+          name: `Farmer ${numId.slice(-4)}`,
+          handle: `@tg_${numId}`,
+          bonus: BONUS_PER_REFERRAL,
+          coinsEarned: BONUS_PER_REFERRAL,
+          status: 'verified',
+          toppedUpUsd: 0,
+          date: new Date().toISOString(),
+          createdAtMs: Date.now(),
+        });
+      }
+    }
+
+    const referralsList = Array.from(fsReferrals.values()).sort(
+      (a, b) => b.createdAtMs - a.createdAtMs,
+    );
+    const referralCount = Math.max(
+      Number(playerData.referralCount ?? 0) || 0,
+      referralsList.length,
+    );
+    const bonus = Number(playerData.referralCoinsEarned ?? 0) || 0;
+    const invitedByRaw = String(playerData.referredBy || mergedDisk.referrer || '').trim();
+
+    res.json({
+      ok: true,
+      userId: Number(currentUserId) || currentUserId,
+      playerUid: currentUid,
+      bonus,
+      totalReferrals: referralsList.length,
+      referralCount,
+      invitedBy: invitedByRaw || null,
+      referrals: referralsList,
+    });
+  });
+
   app.post('/api/referrals/apply', async (req, res) => {
     const ip = getClientIp(req);
     const rl = checkRateLimit(`ref_apply:${ip}`, 25, 60_000);
@@ -5576,6 +6089,45 @@ async function startServer() {
       ...(userDmReason ? { userDmReason } : {}),
       ...(channelReason ? { reason: channelReason } : {}),
     });
+  });
+
+  app.post('/api/admin/maintenance', async (req, res) => {
+    const body = (req.body || {}) as {
+      token?: string;
+      initData?: string;
+      enabled?: boolean;
+      title?: string;
+      message?: string;
+      estimatedReturn?: string;
+    };
+    const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
+    const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
+    const resolvedPlayerId = resolveVerifiedAdminActor({
+      req,
+      token: body.token,
+      initData: body.initData,
+      extraAdminIds: effectiveExtraAdmins,
+    });
+    if (!resolvedPlayerId) {
+      res.status(403).json({ ok: false, error: 'Verified Admin session required.' });
+      return;
+    }
+    const saved = await saveMaintenanceConfigOnServer(
+      {
+        enabled: Boolean(body.enabled),
+        title: body.title,
+        message: body.message,
+        estimatedReturn: body.estimatedReturn,
+      },
+      resolvedPlayerId,
+    );
+    recordServerLog(
+      saved.enabled ? 'warn' : 'info',
+      'maintenance',
+      `Maintenance Mode ${saved.enabled ? 'ENABLED' : 'DISABLED'} by ${resolvedPlayerId}`,
+      saved.title,
+    );
+    res.json({ ok: true, maintenance: saved });
   });
 
   app.post('/api/admin/data-reset', async (req, res) => {

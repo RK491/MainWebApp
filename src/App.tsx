@@ -64,7 +64,6 @@ import {
   getVerifiableClaimedChannelTasks,
   isAdminPlayerId,
   isAutoHarvestDroneActive,
-  isTelegramMemberStatusJoined,
   MIN_WITHDRAW_ADS_WATCHED,
   normalizeTelegramChannelHandle,
   purchaseAutoHarvestDrone,
@@ -75,6 +74,7 @@ import {
   reinvestEggs,
   renderPayoutChannelApproveMessage,
   renderWithdrawApproveMessage,
+  resolveMaintenanceConfig,
   resolveTaskPricingConfig,
   upgradeBasket,
   watchAdStep,
@@ -890,6 +890,7 @@ export default function App() {
       telegramAppShortName?: string;
       adminPasscodeSource?: 'database' | 'server_file' | 'env' | 'default';
       adminPasscodeUpdatedAtMs?: number;
+      maintenance?: Partial<MaintenanceConfig>;
     }>('/api/config').then((cfg) => {
       if (!cfg) return;
       if (cfg.gramDepositAddress) {
@@ -909,6 +910,13 @@ export default function App() {
       }
       if (typeof cfg.adminPasscodeUpdatedAtMs === 'number') {
         setAdminPasscodeUpdatedAtMs(cfg.adminPasscodeUpdatedAtMs);
+      }
+      if (cfg.maintenance) {
+        const serverMaint = resolveMaintenanceConfig(cfg.maintenance);
+        setMaintenanceConfig((prev) =>
+          prev.updatedAtMs > serverMaint.updatedAtMs ? prev : serverMaint,
+        );
+        setMaintenanceLoaded(true);
       }
       if (cfg.telegramBotUsername || cfg.telegramAppShortName) {
         cacheDetectedTelegramBotConfig(cfg.telegramBotUsername, cfg.telegramAppShortName);
@@ -1346,31 +1354,54 @@ export default function App() {
           return;
         }
         try {
-          const response = await fetch(resolveApiUrl('/api/referrals/apply'), {
-            method: 'POST',
-            cache: 'no-store',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              playerId: targetUid,
-              refCode,
-              displayName: latestBefore.displayName,
-              handle: latestBefore.handle,
-              photoUrl: latestBefore.photoUrl,
-              initData: getTelegramInitData(),
-              token: playerSessionTokenRef.current,
-            }),
-          });
+          const tgInitData = getTelegramInitData();
+          let response = await fetch(
+            resolveApiUrl(tgInitData ? '/api/referral/claim' : '/api/referrals/apply'),
+            {
+              method: 'POST',
+              cache: 'no-store',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                playerId: targetUid,
+                referrerId: refCode,
+                refCode,
+                displayName: latestBefore.displayName,
+                handle: latestBefore.handle,
+                photoUrl: latestBefore.photoUrl,
+                initData: tgInitData,
+                token: playerSessionTokenRef.current,
+              }),
+            },
+          );
+          if (tgInitData && response.status === 401) {
+            response = await fetch(resolveApiUrl('/api/referrals/apply'), {
+              method: 'POST',
+              cache: 'no-store',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                playerId: targetUid,
+                refCode,
+                displayName: latestBefore.displayName,
+                handle: latestBefore.handle,
+                photoUrl: latestBefore.photoUrl,
+                initData: tgInitData,
+                token: playerSessionTokenRef.current,
+              }),
+            });
+          }
           const contentType = (response.headers.get('content-type') || '').toLowerCase();
           const payload = (
             contentType.includes('application/json') ? await response.json().catch(() => null) : null
           ) as {
             ok?: boolean;
+            claimed?: boolean;
             applied?: boolean;
             alreadyLinked?: boolean;
             reason?: string;
             referrerUid?: string;
             referrerName?: string;
             coinsRewarded?: number;
+            bonusAwarded?: number;
             referredBonusCoins?: number;
             nextReferredCoins?: number;
             botDmSent?: boolean;
@@ -1379,7 +1410,7 @@ export default function App() {
           if (!isStillSamePlayer()) return;
 
           if (response.ok && payload?.ok) {
-            if (payload.applied) {
+            if (payload.applied || payload.claimed) {
               const bonus = Number(payload.referredBonusCoins ?? 100);
               const serverNextCoins = Number(payload.nextReferredCoins);
               const resolvedReferrer = payload.referrerUid || refCode;
@@ -1400,7 +1431,11 @@ export default function App() {
               if (!payload.botDmSent && payload.referrerUid) {
                 void sendLocalReferralDmFallback(
                   payload.referrerUid,
-                  Number(payload.coinsRewarded ?? REFERRER_SIGNUP_BONUS_COINS),
+                  Number(
+                    payload.bonusAwarded ??
+                      payload.coinsRewarded ??
+                      REFERRER_SIGNUP_BONUS_COINS,
+                  ),
                 );
               }
               showToast(
@@ -1409,7 +1444,7 @@ export default function App() {
               clearPendingRef();
               return;
             }
-            if (payload.reason === 'already_linked') {
+            if (payload.reason === 'already_linked' || payload.alreadyLinked) {
               if (payload.referrerUid) {
                 markReferralVerifiedLocally(payload.referrerUid);
               }
@@ -1427,6 +1462,11 @@ export default function App() {
               clearPendingRef();
               return;
             }
+          } else if (payload?.reason === 'invalid_code') {
+            void syncDirectReferralRecord(refCode, latestBefore);
+            markReferralVerifiedLocally(refCode);
+            clearPendingRef();
+            return;
           }
         } catch {
           // Fall through to client-side Firestore transaction fallback
@@ -1640,36 +1680,77 @@ export default function App() {
     };
   }, [activePlayerId, isBanned, isPlayerSynced, pendingRefCode, profile.referredBy, showToast]);
 
-  // Sync server /api/referrals storage alongside Firestore referrals so Friends tab stays complete
+  // Sync server /api/referral/stats & /api/referrals storage alongside Firestore referrals so Friends tab stays complete
   useEffect(() => {
     if (!activePlayerId || isBanned) return;
     let cancelled = false;
     const fetchServerReferrals = async () => {
       try {
+        const mergedIds = new Set<string>();
+        let detectedReferrer: string | null = null;
+        const tgInitData = getTelegramInitData();
+
+        if (tgInitData || playerSessionTokenRef.current) {
+          const headers: Record<string, string> = {};
+          if (tgInitData) headers['x-telegram-init-data'] = tgInitData;
+          if (playerSessionTokenRef.current) {
+            headers.Authorization = `Bearer ${playerSessionTokenRef.current}`;
+          }
+          const statsRes = await fetch(resolveApiUrl('/api/referral/stats'), {
+            cache: 'no-store',
+            headers,
+          }).catch(() => null);
+          if (statsRes && statsRes.ok && !cancelled) {
+            const statsPayload = (await statsRes.json().catch(() => null)) as {
+              ok?: boolean;
+              invitedBy?: string | null;
+              referrals?: Array<{ id?: string; uid?: string }>;
+            } | null;
+            if (statsPayload?.ok) {
+              if (statsPayload.invitedBy) detectedReferrer = statsPayload.invitedBy;
+              if (Array.isArray(statsPayload.referrals)) {
+                for (const item of statsPayload.referrals) {
+                  const rid = String(item?.id || item?.uid || '').trim();
+                  if (rid) mergedIds.add(rid);
+                }
+              }
+            }
+          }
+        }
+
         const res = await fetch(
           resolveApiUrl(`/api/referrals?userId=${encodeURIComponent(activePlayerId)}`),
           { cache: 'no-store' },
         );
-        if (!res.ok || cancelled) return;
-        const payload = (await res.json().catch(() => null)) as {
-          referrals?: unknown;
-          referrer?: string | null;
-        } | null;
-        if (cancelled || !payload) return;
-        if (Array.isArray(payload.referrals)) {
-          setServerReferralIds(
-            payload.referrals
-              .map((id) => String(id || '').trim())
-              .filter(Boolean),
-          );
+        if (res.ok && !cancelled) {
+          const payload = (await res.json().catch(() => null)) as {
+            referrals?: unknown;
+            referrer?: string | null;
+          } | null;
+          if (payload) {
+            if (Array.isArray(payload.referrals)) {
+              for (const id of payload.referrals) {
+                const rid = String(id || '').trim();
+                if (rid) mergedIds.add(rid);
+              }
+            }
+            if (!detectedReferrer && payload.referrer) {
+              detectedReferrer = payload.referrer;
+            }
+          }
         }
-        if (payload.referrer && !latestProfileRef.current.referredBy) {
+
+        if (cancelled) return;
+        if (mergedIds.size > 0) {
+          setServerReferralIds(Array.from(mergedIds));
+        }
+        if (detectedReferrer && !latestProfileRef.current.referredBy) {
           try {
             localStorage.setItem(
               `alphagram_referral_verified_v1_${activePlayerId}`,
               JSON.stringify({
                 status: 'verified',
-                referrerId: payload.referrer,
+                referrerId: detectedReferrer,
                 verifiedAtMs: Date.now(),
               }),
             );
@@ -1791,13 +1872,14 @@ export default function App() {
       setCheckingChannels(true);
       setChannelCheckError(null);
       try {
+        const effectiveUid = latestProfileRef.current.uid || activePlayerIdRef.current;
         const endpointUrl = resolveApiUrl('/api/telegram/check-channels');
         const res = await fetch(endpointUrl, {
           method: 'POST',
           cache: 'no-store',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            playerId: latestProfileRef.current.uid,
+            playerId: effectiveUid,
             initData: getTelegramInitData(),
             token: playerSessionTokenRef.current,
             requiredChannels: activeRequiredChannels,
@@ -1810,122 +1892,26 @@ export default function App() {
         ) as (ChannelVerificationResult & { error?: string }) | null;
 
         let data: ChannelVerificationResult | null = null;
-        const localBot = getLocalAdminBotConfig();
         const isMissingApi = !isJson || res.status === 404 || res.status === 405;
-        const isServerBotUnconfiguredWithLocalBot =
-          Boolean(localBot) && Boolean(res.ok && rawPayload?.verificationMode === 'bot_unconfigured');
 
-        if (isMissingApi || isServerBotUnconfiguredWithLocalBot) {
-          // Static preview host OR Express server lacking TELEGRAM_BOT_TOKEN while Admin browser Bot Token exists:
-          // Use Admin's local browser Bot Token directly via Telegram Bot API if configured.
-          const tgNumericId = extractTelegramNumericUserId(latestProfileRef.current.uid);
+        if (isMissingApi) {
+          const tgNumericId = extractTelegramNumericUserId(effectiveUid);
           const nowMs = Date.now();
-
-          if (localBot && tgNumericId) {
-            const chResults = await Promise.all(
-              activeRequiredChannels.map(async (ch) => {
-                const targetChatId = /^-?\d+$/.test(ch.handle.trim())
-                  ? ch.handle.trim()
-                  : `@${ch.handle.trim().replace(/^@+/, '')}`;
-                try {
-                  const tgRes = await fetch(
-                    `https://api.telegram.org/bot${localBot.token}/getChatMember?chat_id=${encodeURIComponent(targetChatId)}&user_id=${encodeURIComponent(tgNumericId)}`,
-                    { cache: 'no-store' },
-                  );
-                  const tgJson = (await tgRes.json().catch(() => ({}))) as {
-                    ok?: boolean;
-                    description?: string;
-                    result?: { status?: string; is_member?: boolean };
-                  };
-                  const statusStr = String(tgJson.result?.status || '');
-                  const joined =
-                    Boolean(tgJson.ok) &&
-                    (statusStr === 'creator' ||
-                      statusStr === 'administrator' ||
-                      statusStr === 'member' ||
-                      (statusStr === 'restricted' && tgJson.result?.is_member === true));
-                  let friendlyErr: string | undefined;
-                  if (!tgJson.ok) {
-                    const descLow = String(tgJson.description || '').toLowerCase();
-                    if (
-                      descLow.includes('member list is inaccessible') ||
-                      descLow.includes('not enough rights') ||
-                      descLow.includes('chat_admin_required') ||
-                      descLow.includes('bot is not a member') ||
-                      descLow.includes('need administrator rights')
-                    ) {
-                      friendlyErr = `Make @${localBot.botUsername || 'your bot'} an Admin in ${ch.handle} to verify joins.`;
-                    } else if (descLow.includes('chat not found')) {
-                      friendlyErr = `Channel ${ch.handle} not found or bot is not Admin there.`;
-                    } else {
-                      friendlyErr = tgJson.description || 'Channel check failed';
-                    }
-                  }
-                  return {
-                    ...ch,
-                    joined,
-                    status: tgJson.ok ? statusStr || (joined ? 'member' : 'left') : 'api_error',
-                    error: friendlyErr,
-                  };
-                } catch {
-                  return {
-                    ...ch,
-                    joined: false,
-                    status: 'network_error',
-                    error: 'Network error reaching Telegram API',
-                  };
-                }
-              }),
-            );
-            const allJoined = chResults.every((c) => c.joined);
-            data = {
-              ok: true,
-              allJoined,
-              verificationMode: 'telegram_bot',
-              telegramUserId: tgNumericId,
-              channels: chResults,
-              checkedAtMs: nowMs,
-            };
-          } else {
-            const previewMode: ChannelVerificationResult['verificationMode'] = !tgNumericId
-              ? 'guest_browser'
-              : 'static_preview';
-            data = {
-              ok: true,
-              allJoined: false,
-              verificationMode: previewMode,
-              telegramUserId: tgNumericId,
-              channels: activeRequiredChannels.map((ch) => ({
-                ...ch,
-                joined: false,
-                status: previewMode === 'guest_browser' ? 'no_telegram_user' : 'static_preview',
-              })),
-              checkedAtMs: nowMs,
-            };
-          }
-
-          const logEntry: ChannelCheckDiagnosticLog = {
-            id: `local_${nowMs}`,
-            timestampMs: nowMs,
-            endpoint: 'check-channels',
-            userIdSource: 'static_preview_fallback',
-            telegramUserId: data.telegramUserId,
-            verificationMode: data.verificationMode,
-            allJoined: data.allJoined,
-            fromFirestore: true,
-            botConfigured: Boolean(localBot),
-            botUsername: localBot?.botUsername ?? null,
-            error: null,
-            channels: data.channels.map((c) => ({
-              handle: c.handle,
-              joined: c.joined,
-              status: c.status,
-              rawDescription: c.error,
+          const previewMode: ChannelVerificationResult['verificationMode'] = !tgNumericId
+            ? 'guest_browser'
+            : 'static_preview';
+          data = {
+            ok: true,
+            allJoined: false,
+            verificationMode: previewMode,
+            telegramUserId: tgNumericId,
+            channels: activeRequiredChannels.map((ch) => ({
+              ...ch,
+              joined: false,
+              status: previewMode === 'guest_browser' ? 'no_telegram_user' : 'static_preview',
             })),
+            checkedAtMs: nowMs,
           };
-          const updatedLogs = appendLocalChannelLog(logEntry as unknown as Record<string, unknown>);
-          setChannelDiagnosticLogs(updatedLogs.slice(0, 5) as unknown as ChannelCheckDiagnosticLog[]);
-          setChannelLogsError(null);
         } else if (!res.ok || !rawPayload) {
           const errMsg =
             rawPayload?.error || `Membership check failed (HTTP ${res.status}). Tap Retry.`;
@@ -2076,81 +2062,18 @@ export default function App() {
           reason?: string;
         } | null;
 
-        const localBot = getLocalAdminBotConfig();
-        const shouldUseLocalBotFallback =
-          !isJson ||
-          res.status === 404 ||
-          res.status === 405 ||
-          Boolean(res.ok && data?.status === 'bot_unconfigured' && localBot);
-
-        if (shouldUseLocalBotFallback) {
-          if (localBot && normalized.handle) {
-            const targetChatId = /^-?\d+$/.test(normalized.handle)
-              ? normalized.handle
-              : `@${normalized.handle.replace(/^@+/, '')}`;
-            const tgRes = await fetch(
-              `https://api.telegram.org/bot${localBot.token}/getChatMember?chat_id=${encodeURIComponent(targetChatId)}&user_id=${encodeURIComponent(numericUserId)}`,
-              { cache: 'no-store' },
-            );
-            const tgJson = (await tgRes.json().catch(() => ({}))) as {
-              ok?: boolean;
-              error_code?: number;
-              description?: string;
-              result?: { status?: string; is_member?: boolean };
-            };
-            if (tgJson.ok && tgJson.result) {
-              const memberStatus = String(tgJson.result.status || 'left');
-              const joined = isTelegramMemberStatusJoined(memberStatus, tgJson.result.is_member);
-              if (joined) {
-                return { joined: true, handle: normalized.handle, status: memberStatus };
-              }
-              const notJoinedReason = `Not joined ${normalized.handle} yet — tap Join, then Retry.`;
-              triggerHapticFeedback('warning');
-              showToast(notJoinedReason);
-              return {
-                joined: false,
-                handle: normalized.handle,
-                status: memberStatus,
-                reason: notJoinedReason,
-              };
-            }
-            const descLow = String(tgJson.description || '').toLowerCase();
-            let reason = tgJson.description || 'Channel check failed.';
-            if (
-              descLow.includes('member list is inaccessible') ||
-              descLow.includes('not enough rights') ||
-              descLow.includes('chat_admin_required') ||
-              descLow.includes('bot is not a member') ||
-              descLow.includes('need administrator rights')
-            ) {
-              reason = `Make @${localBot.botUsername || 'the bot'} an Admin in ${normalized.handle} to verify joins.`;
-            } else if (descLow.includes('chat not found')) {
-              reason = `Channel ${normalized.handle} not found or bot is not Admin there.`;
-            } else if (descLow.includes('user not found') || descLow.includes('participant_id_invalid')) {
-              reason = `Not joined ${normalized.handle} yet — tap Join, then Retry.`;
-            }
-            const apiErrStatus =
-              descLow.includes('user not found') || descLow.includes('participant_id_invalid')
-                ? 'left'
-                : 'api_error';
-            triggerHapticFeedback('warning');
-            showToast(reason);
-            return {
-              joined: false,
-              handle: normalized.handle,
-              status: apiErrStatus,
-              reason,
-            };
-          }
-          const unconfiguredReason =
-            data?.reason || 'Bot verification pending Bot Token setup in Admin Panel.';
+        const isMissingApi = !isJson || res.status === 404 || res.status === 405;
+        if (isMissingApi || data?.status === 'bot_unconfigured') {
+          const reason = isMissingApi
+            ? 'Backend membership verification server unavailable. Open via Bot server.'
+            : data?.reason || 'Backend Bot verification is unavailable right now.';
           triggerHapticFeedback('warning');
-          showToast(unconfiguredReason);
+          showToast(reason);
           return {
             joined: false,
             handle: normalized.handle,
-            status: 'bot_unconfigured',
-            reason: unconfiguredReason,
+            status: isMissingApi ? 'api_error' : 'bot_unconfigured',
+            reason,
           };
         }
 
@@ -2219,53 +2142,7 @@ export default function App() {
           }),
         });
         const contentType = (res.headers.get('content-type') || '').toLowerCase();
-        if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
-          const localBot = getLocalAdminBotConfig();
-          if (localBot) {
-            const uniqueHandles = Array.from(new Set(verifiable.map((v) => v.handle)));
-            const leftHandles = new Set<string>();
-            await Promise.all(
-              uniqueHandles.map(async (handle) => {
-                try {
-                  const targetChatId = /^-?\d+$/.test(handle)
-                    ? handle
-                    : `@${handle.replace(/^@+/, '')}`;
-                  const tgRes = await fetch(
-                    `https://api.telegram.org/bot${localBot.token}/getChatMember?chat_id=${encodeURIComponent(targetChatId)}&user_id=${encodeURIComponent(numericUserId)}`,
-                    { cache: 'no-store' },
-                  );
-                  const tgJson = (await tgRes.json().catch(() => ({}))) as {
-                    ok?: boolean;
-                    error_code?: number;
-                    description?: string;
-                    result?: { status?: string; is_member?: boolean };
-                  };
-                  const descLow = String(tgJson.description || '').toLowerCase();
-                  const userNotFound =
-                    !tgJson.ok &&
-                    tgJson.error_code === 400 &&
-                    (descLow.includes('user not found') || descLow.includes('participant_id_invalid'));
-                  if (
-                    userNotFound ||
-                    (tgJson.ok &&
-                      tgJson.result &&
-                      !isTelegramMemberStatusJoined(
-                        String(tgJson.result.status || 'left'),
-                        tgJson.result.is_member,
-                      ))
-                  ) {
-                    leftHandles.add(handle);
-                  }
-                } catch {
-                  // Ignore transient errors during leave audit
-                }
-              }),
-            );
-            leftTaskIds = verifiable
-              .filter((v) => leftHandles.has(v.handle))
-              .map((v) => v.task.id);
-          }
-        } else if (res.ok) {
+        if (contentType.includes('application/json') && res.ok) {
           const data = (await res.json().catch(() => null)) as {
             ok?: boolean;
             leftTaskIds?: string[];
@@ -3168,25 +3045,46 @@ export default function App() {
   const handleSaveMaintenanceConfig = async (
     cfg: Omit<MaintenanceConfig, 'updatedAtMs'>,
   ): Promise<MaintenanceConfig | null> => {
+    let saved: MaintenanceConfig | null = null;
+    let fsErr: unknown = null;
     try {
-      const saved = await saveMaintenanceConfigInFirestore({
+      saved = await saveMaintenanceConfigInFirestore({
         ...cfg,
         updatedBy: cfg.updatedBy || latestProfileRef.current.uid,
       });
-      setMaintenanceConfig(saved);
+    } catch (err) {
+      fsErr = err;
+    }
+
+    const serverRes = await safeFetchJson<{
+      ok?: boolean;
+      maintenance?: MaintenanceConfig;
+    }>('/api/admin/maintenance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...cfg,
+        token: adminSessionTokenRef.current,
+        initData: getTelegramInitData(),
+      }),
+    });
+
+    const finalSaved = saved || (serverRes?.ok ? serverRes.maintenance || null : null);
+    if (finalSaved) {
+      setMaintenanceConfig(finalSaved);
       setMaintenanceLoaded(true);
       playClaimSound(soundsEnabled);
       triggerHapticFeedback('success');
       showToast(
-        saved.enabled
+        finalSaved.enabled
           ? 'Maintenance Mode enabled — app paused for non-admin users.'
           : 'Maintenance Mode disabled — app is live for all users!',
       );
-      return saved;
-    } catch (err) {
-      showToast(formatSyncErrorMessage(err, 'Failed to save Maintenance Mode settings.'));
-      return null;
+      return finalSaved;
     }
+
+    showToast(formatSyncErrorMessage(fsErr, 'Failed to save Maintenance Mode settings.'));
+    return null;
   };
 
   const handleExecuteDataReset = async (): Promise<{
@@ -4699,8 +4597,7 @@ export default function App() {
 
   const isMaintenanceBlocked =
     maintenanceConfig.enabled &&
-    subView !== 'admin' &&
-    !(isAuthorizedAdmin && adminUnlocked);
+    !(isAuthorizedAdmin && (subView === 'admin' || adminUnlocked));
 
   useEffect(() => {
     if (!isMaintenanceBlocked) return;
