@@ -14,6 +14,7 @@ import type {
   DepositOrder,
   DynamicPromoCode,
   LeaderboardEntry,
+  MaintenanceConfig,
   PromoRewardType,
   ReferralRecord,
   RequiredTelegramChannel,
@@ -4460,6 +4461,44 @@ export function applyLeftChannelPenalties(
     transaction,
     penalizedTasks,
     totalPenaltyCoins,
+  };
+}
+
+export const DEFAULT_MAINTENANCE_CONFIG: MaintenanceConfig = {
+  enabled: false,
+  title: 'Scheduled Maintenance',
+  message:
+    'Alpha Gram is temporarily offline for scheduled maintenance to upgrade servers and improve performance. Your coins, eggs, chickens, and referrals are completely safe.',
+  estimatedReturn: 'We will be back online shortly.',
+  updatedBy: '',
+  updatedAtMs: 0,
+};
+
+export function resolveMaintenanceConfig(
+  raw?: Partial<MaintenanceConfig> | null,
+): MaintenanceConfig {
+  const cleanTitle =
+    typeof raw?.title === 'string' && raw.title.trim().length > 0
+      ? raw.title.trim().slice(0, 80)
+      : DEFAULT_MAINTENANCE_CONFIG.title;
+  const cleanMessage =
+    typeof raw?.message === 'string' && raw.message.trim().length > 0
+      ? raw.message.trim().slice(0, 400)
+      : DEFAULT_MAINTENANCE_CONFIG.message;
+  const cleanEta =
+    typeof raw?.estimatedReturn === 'string'
+      ? raw.estimatedReturn.trim().slice(0, 80)
+      : DEFAULT_MAINTENANCE_CONFIG.estimatedReturn;
+  const cleanUpdatedBy =
+    typeof raw?.updatedBy === 'string' ? raw.updatedBy.trim().slice(0, 64) : '';
+  const updatedAtMs = Number(raw?.updatedAtMs);
+  return {
+    enabled: Boolean(raw?.enabled),
+    title: cleanTitle,
+    message: cleanMessage,
+    estimatedReturn: cleanEta,
+    updatedBy: cleanUpdatedBy,
+    updatedAtMs: Number.isFinite(updatedAtMs) && updatedAtMs >= 0 ? updatedAtMs : 0,
   };
 }
 

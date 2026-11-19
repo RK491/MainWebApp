@@ -46,6 +46,7 @@ import {
   DEFAULT_AD_CONFIG,
   DEFAULT_ADMINS_CONFIG,
   DEFAULT_CHANNELS_CONFIG,
+  DEFAULT_MAINTENANCE_CONFIG,
   DEFAULT_TASK_PRICING_CONFIG,
   DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
   eggsToUsd,
@@ -62,6 +63,7 @@ import {
   normalizeTelegramChannelEntry,
   REFERRED_WELCOME_BONUS_COINS,
   REFERRER_SIGNUP_BONUS_COINS,
+  resolveMaintenanceConfig,
   resolveTaskPricingConfig,
   SIGNUP_BONUS_COINS,
   USER_TASK_MAX_REWARD_COINS,
@@ -80,6 +82,7 @@ import type {
   DepositOrder,
   DynamicPromoCode,
   LeaderboardEntry,
+  MaintenanceConfig,
   PromoRewardType,
   ReferralRecord,
   RequiredTelegramChannel,
@@ -4092,6 +4095,52 @@ export async function executeDataResetInFirestore(adminUid: string): Promise<{
     };
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, 'app_config/system_reset');
+  }
+}
+
+export function subscribeToMaintenanceConfig(
+  onUpdate: (config: MaintenanceConfig) => void,
+): () => void {
+  return onSnapshot(
+    doc(db, 'app_config', 'maintenance'),
+    (snap) => {
+      if (!snap.exists()) {
+        onUpdate(DEFAULT_MAINTENANCE_CONFIG);
+        return;
+      }
+      const d = snap.data();
+      onUpdate(
+        resolveMaintenanceConfig({
+          enabled: Boolean(d.enabled),
+          title: typeof d.title === 'string' ? d.title : undefined,
+          message: typeof d.message === 'string' ? d.message : undefined,
+          estimatedReturn:
+            typeof d.estimatedReturn === 'string' ? d.estimatedReturn : undefined,
+          updatedBy: typeof d.updatedBy === 'string' ? d.updatedBy : undefined,
+          updatedAtMs: Number(d.updatedAtMs ?? 0),
+        }),
+      );
+    },
+    (err) => logSubscriptionError('app_config/maintenance', err),
+  );
+}
+
+export async function saveMaintenanceConfigInFirestore(
+  input: Omit<MaintenanceConfig, 'updatedAtMs'>,
+): Promise<MaintenanceConfig> {
+  const nowMs = Date.now();
+  const payload = resolveMaintenanceConfig({
+    ...input,
+    updatedAtMs: nowMs,
+  });
+  try {
+    await setDoc(doc(db, 'app_config', 'maintenance'), {
+      ...payload,
+      updatedAt: serverTimestamp(),
+    });
+    return payload;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'app_config/maintenance');
   }
 }
 

@@ -443,4 +443,11 @@ export interface SystemResetConfig {
   updatedAtMs: number;
 }
 
-
+export interface MaintenanceConfig {
+  enabled: boolean;
+  title: string;
+  message: string;
+  estimatedReturn: string;
+  updatedBy: string;
+  updatedAtMs: number;
+}

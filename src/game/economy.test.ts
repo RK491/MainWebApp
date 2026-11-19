@@ -59,6 +59,7 @@ import {
   DEFAULT_GET_CODE_CHANNEL_URL,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
+  DEFAULT_MAINTENANCE_CONFIG,
   DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
   detectTop10RankCelebration,
   encodeAchievementsWithAds,
@@ -77,6 +78,7 @@ import {
   purchaseAutoHarvestDrone,
   renderPayoutChannelApproveMessage,
   renderWithdrawApproveMessage,
+  resolveMaintenanceConfig,
   USER_TASK_CHANNEL_CHECK_FEE_COINS,
   USER_TASK_MIN_REWARD_COINS,
   filterWithdrawalsByTab,
@@ -3385,6 +3387,28 @@ test('server referralStorage saves, deduplicates, guards self-referrals, merges 
   } finally {
     resetReferralStorage();
   }
+});
+
+test('resolveMaintenanceConfig normalizes fields, enforces bounds, and preserves English defaults', () => {
+  const defaults = resolveMaintenanceConfig();
+  assert.equal(defaults.enabled, false);
+  assert.equal(defaults.title, DEFAULT_MAINTENANCE_CONFIG.title);
+  assert.equal(defaults.message, DEFAULT_MAINTENANCE_CONFIG.message);
+
+  const custom = resolveMaintenanceConfig({
+    enabled: true,
+    title: '   Server Upgrade in Progress   ',
+    message: '  We are upgrading rewards & bot speed.   ',
+    estimatedReturn: 'Back in ~15 minutes',
+    updatedBy: 'tg_7508911853',
+    updatedAtMs: 1795000000000,
+  });
+  assert.equal(custom.enabled, true);
+  assert.equal(custom.title, 'Server Upgrade in Progress');
+  assert.equal(custom.message, 'We are upgrading rewards & bot speed.');
+  assert.equal(custom.estimatedReturn, 'Back in ~15 minutes');
+  assert.equal(custom.updatedBy, 'tg_7508911853');
+  assert.equal(custom.updatedAtMs, 1795000000000);
 });
 
 

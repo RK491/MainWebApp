@@ -415,6 +415,18 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidMaintenanceConfig(data) {
+      return data.keys().hasAll(['enabled', 'title', 'message', 'estimatedReturn', 'updatedBy', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['enabled', 'title', 'message', 'estimatedReturn', 'updatedBy', 'updatedAtMs', 'updatedAt'])
+        && data.enabled is bool
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 80
+        && data.message is string && data.message.size() >= 1 && data.message.size() <= 400
+        && data.estimatedReturn is string && data.estimatedReturn.size() <= 80
+        && data.updatedBy is string && data.updatedBy.size() <= 64
+        && data.updatedAtMs is number && data.updatedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
     function isValidBotSubscriber(data, chatId) {
       return data.keys().hasAll(['chatId', 'username', 'firstName', 'source', 'isBotBlocked', 'joinedAtMs', 'lastSeenAtMs', 'updatedAt'])
         && data.keys().hasOnly(['chatId', 'username', 'firstName', 'source', 'isBotBlocked', 'joinedAtMs', 'lastSeenAtMs', 'updatedAt'])
@@ -737,6 +749,9 @@ service cloud.firestore {
           && incoming().updatedAt == request.time)
         || (configId == 'system_reset'
           && isValidSystemResetConfig(incoming())
+          && incoming().updatedAt == request.time)
+        || (configId == 'maintenance'
+          && isValidMaintenanceConfig(incoming())
           && incoming().updatedAt == request.time)
       );
       allow delete: if false;
