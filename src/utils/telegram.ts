@@ -22,6 +22,8 @@ interface TelegramWindow {
       ready?: () => void;
       expand?: () => void;
       openTelegramLink?: (url: string) => void;
+      onEvent?: (eventType: string, callback: () => void) => void;
+      offEvent?: (eventType: string, callback: () => void) => void;
       initData?: string;
       initDataUnsafe?: {
         user?: TelegramWebAppUser;
@@ -525,6 +527,49 @@ export function notifyTelegramOpenLink(channelUrl: string): boolean {
   }
   return false;
 }
+
+export function subscribeTelegramAppActivated(callback: () => void): () => void {
+  if (typeof window === 'undefined') return () => {};
+
+  const onFocusOrVisible = () => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      return;
+    }
+    callback();
+  };
+
+  window.addEventListener('focus', onFocusOrVisible);
+  window.addEventListener('pageshow', onFocusOrVisible);
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', onFocusOrVisible);
+  }
+
+  const tgWebApp = (window as unknown as TelegramWindow).Telegram?.WebApp;
+  const onTgActivated = () => callback();
+  if (tgWebApp && typeof tgWebApp.onEvent === 'function') {
+    try {
+      tgWebApp.onEvent('activated', onTgActivated);
+    } catch {
+      // Ignore unsupported Telegram client event bindings
+    }
+  }
+
+  return () => {
+    window.removeEventListener('focus', onFocusOrVisible);
+    window.removeEventListener('pageshow', onFocusOrVisible);
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', onFocusOrVisible);
+    }
+    if (tgWebApp && typeof tgWebApp.offEvent === 'function') {
+      try {
+        tgWebApp.offEvent('activated', onTgActivated);
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+  };
+}
+
 
 const LOCAL_ADMIN_BOT_STORAGE_KEY = 'chickenland_admin_local_bot_v1';
 const LOCAL_CHANNEL_LOGS_STORAGE_KEY = 'chickenland_local_channel_logs_v1';

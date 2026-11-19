@@ -66,7 +66,11 @@ import type {
   TaskSortOption,
   UserFarmProfile,
 } from '../types/farm';
-import { getTelegramChannelUrl, notifyTelegramOpenLink } from '../utils/telegram';
+import {
+  getTelegramChannelUrl,
+  notifyTelegramOpenLink,
+  subscribeTelegramAppActivated,
+} from '../utils/telegram';
 import { hasConfiguredAdNetworkSdk, hasConfiguredAdsgramTaskSdk } from '../utils/ads';
 import { CoinIcon, EggIcon } from './GameIcons';
 
@@ -479,6 +483,18 @@ export function TasksView({
     }
 
     pendingReturnTaskIdRef.current = task.id;
+    setTaskRetryHandles((prev) => {
+      if (!(task.id in prev)) return prev;
+      const next = { ...prev };
+      delete next[task.id];
+      return next;
+    });
+    setTaskRetryReasons((prev) => {
+      if (!(task.id in prev)) return prev;
+      const next = { ...prev };
+      delete next[task.id];
+      return next;
+    });
     setTaskStages((prev) => ({ ...prev, [task.id]: 'checking' }));
     if (checkTimersRef.current[task.id]) {
       window.clearTimeout(checkTimersRef.current[task.id]);
@@ -487,33 +503,15 @@ export function TasksView({
       delete checkTimersRef.current[task.id];
       if (!task.requireChannelCheck) {
         markTaskVerifiedLocally(task.id);
-        setTaskStages((prev) => ({ ...prev, [task.id]: 'ready' }));
-      } else if (onVerifyTaskChannel && task.actionUrl) {
-        void onVerifyTaskChannel(task.actionUrl, { requireChannelCheck: true }).then((check) => {
-          if (check.joined) {
-            markTaskVerifiedLocally(task.id);
-            setTaskStages((prev) => ({ ...prev, [task.id]: 'ready' }));
-          } else {
-            setTaskStages((prev) => ({ ...prev, [task.id]: 'retry' }));
-            if (check.handle) {
-              setTaskRetryHandles((prev) => ({ ...prev, [task.id]: check.handle! }));
-            }
-            if (check.reason && check.status !== 'left' && check.status !== 'kicked') {
-              setTaskRetryReasons((prev) => ({ ...prev, [task.id]: check.reason! }));
-            }
-          }
-        });
-      } else {
-        markTaskVerifiedLocally(task.id);
-        setTaskStages((prev) => ({ ...prev, [task.id]: 'ready' }));
       }
+      setTaskStages((prev) => ({ ...prev, [task.id]: 'ready' }));
     }, TASK_VERIFY_DELAY_MS);
   };
 
-  // Automatically promote / re-verify task when user lands back in the Mini App after joining
+  // Automatically show Claim as soon as user returns from Telegram after tapping Join
   useEffect(() => {
     const handleReturnFromTelegram = () => {
-      if (document.visibilityState === 'hidden') return;
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       const pendingId = pendingReturnTaskIdRef.current;
       if (!pendingId) return;
       const targetTask = allTasks.find((t) => t.id === pendingId);
@@ -529,49 +527,23 @@ export function TasksView({
         delete checkTimersRef.current[pendingId];
       }
 
+      pendingReturnTaskIdRef.current = null;
       if (!targetTask.requireChannelCheck) {
-        pendingReturnTaskIdRef.current = null;
         markTaskVerifiedLocally(pendingId);
-        setTaskStages((prev) => ({ ...prev, [pendingId]: 'ready' }));
-        return;
       }
-
-      if (onVerifyTaskChannel && targetTask.actionUrl) {
-        setTaskStages((prev) => ({ ...prev, [pendingId]: 'verifying' }));
-        void onVerifyTaskChannel(targetTask.actionUrl, { requireChannelCheck: true })
-          .then((check) => {
-            if (check.joined) {
-              pendingReturnTaskIdRef.current = null;
-              markTaskVerifiedLocally(pendingId);
-              setTaskStages((prev) => ({ ...prev, [pendingId]: 'ready' }));
-            } else {
-              setTaskStages((prev) => ({ ...prev, [pendingId]: 'retry' }));
-              if (check.handle) {
-                setTaskRetryHandles((prev) => ({ ...prev, [pendingId]: check.handle! }));
-              }
-              if (check.reason && check.status !== 'left' && check.status !== 'kicked') {
-                setTaskRetryReasons((prev) => ({ ...prev, [pendingId]: check.reason! }));
-              }
-            }
-          })
-          .catch(() => {
-            setTaskStages((prev) => ({ ...prev, [pendingId]: 'retry' }));
-          });
-      }
+      setTaskStages((prev) => ({ ...prev, [pendingId]: 'ready' }));
     };
 
-    window.addEventListener('focus', handleReturnFromTelegram);
-    document.addEventListener('visibilitychange', handleReturnFromTelegram);
-    return () => {
-      window.removeEventListener('focus', handleReturnFromTelegram);
-      document.removeEventListener('visibilitychange', handleReturnFromTelegram);
-    };
-  }, [allTasks, markTaskVerifiedLocally, onVerifyTaskChannel, profile.completedTaskIds, taskStages]);
+    return subscribeTelegramAppActivated(handleReturnFromTelegram);
+  }, [allTasks, markTaskVerifiedLocally, profile.completedTaskIds, taskStages]);
 
   const handleClaimCheckedTask = async (task: TaskDefinition) => {
     if (profile.completedTaskIds.includes(task.id)) return;
+    if (pendingReturnTaskIdRef.current === task.id) {
+      pendingReturnTaskIdRef.current = null;
+    }
 
-    // Only enforce Telegram channel verification when Enable Channel Check is enabled on the task
+    // Live-verify Telegram channel membership on Claim/Retry when Enable Channel Check is active
     const shouldCheckChannel = Boolean(
       onVerifyTaskChannel && task.actionUrl && task.requireChannelCheck,
     );
@@ -978,8 +950,9 @@ export function TasksView({
               <div className="text-[11px] font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5 px-0.5">
                 <Check className="w-3 h-3" />
                 <span>
-                  {verifiedTasks[task.id] === 'verified' ? 'Verified! ' : ''}
-                  Tap Claim to receive +{task.rewardCoins.toLocaleString()} coins
+                  {task.requireChannelCheck && verifiedTasks[task.id] !== 'verified'
+                    ? `Tap Claim to verify join & get +${task.rewardCoins.toLocaleString()} coins`
+                    : `${verifiedTasks[task.id] === 'verified' ? 'Verified! ' : ''}Tap Claim to receive +${task.rewardCoins.toLocaleString()} coins`}
                 </span>
               </div>
             )}

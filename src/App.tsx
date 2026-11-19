@@ -99,6 +99,7 @@ import {
   deleteCustomTaskInFirestore,
   deletePromoCodeInFirestore,
   ensurePlayerInFirestore,
+  executeDataResetInFirestore,
   fetchCustomTasksFromFirestore,
   fetchPlayerReferralsFromFirestore,
   getStoredPlayerId,
@@ -218,6 +219,7 @@ import {
   resolveApiUrl,
   safeFetchJson,
   setLocalAdminBotConfig,
+  subscribeTelegramAppActivated,
   type TelegramBotConfig,
   triggerHapticFeedback,
   verifyTelegramBotTokenDirect,
@@ -2315,29 +2317,30 @@ export default function App() {
     });
   }, [activeChannelsSignature, channelsGateEnabled, executeClaimPromo]);
 
-  // Auto-verify required Telegram channels upon returning from Telegram so users never need manual Retry
+  // Live-sync required Telegram channels when returning from Telegram or opening gate/withdraw views
   useEffect(() => {
-    if (!channelsGateEnabled || isBanned) return;
-    if (channelVerification?.allJoined) return;
-    const onReturnCheck = () => {
-      if (document.visibilityState === 'hidden') return;
+    if (!channelsGateEnabled || isBanned || !isPlayerSynced) return;
+    if (showChannelGateModal || subView === 'withdraw') {
+      const now = Date.now();
+      if (now - lastAutoChannelCheckAtRef.current >= 2500) {
+        lastAutoChannelCheckAtRef.current = now;
+        void handleCheckChannels({ silent: true });
+      }
+    }
+    const triggerLiveChannelSync = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       if (!showChannelGateModal && subView !== 'withdraw') return;
       const now = Date.now();
-      if (now - lastAutoChannelCheckAtRef.current < 2500) return;
+      if (now - lastAutoChannelCheckAtRef.current < 2000) return;
       lastAutoChannelCheckAtRef.current = now;
       void handleCheckChannels({ silent: true });
     };
-    window.addEventListener('focus', onReturnCheck);
-    document.addEventListener('visibilitychange', onReturnCheck);
-    return () => {
-      window.removeEventListener('focus', onReturnCheck);
-      document.removeEventListener('visibilitychange', onReturnCheck);
-    };
+    return subscribeTelegramAppActivated(triggerLiveChannelSync);
   }, [
-    channelVerification?.allJoined,
     channelsGateEnabled,
     handleCheckChannels,
     isBanned,
+    isPlayerSynced,
     showChannelGateModal,
     subView,
   ]);
@@ -3149,37 +3152,7 @@ export default function App() {
     error?: string;
     summary?: string;
   }> => {
-    try {
-      const res = await fetch(resolveApiUrl('/api/admin/data-reset'), {
-        method: 'POST',
-        cache: 'no-store',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          token: adminSessionTokenRef.current,
-          initData: getTelegramInitData(),
-          confirm: 'RESET',
-        }),
-      });
-      const contentType = (res.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
-        return {
-          ok: false,
-          error: 'Data Reset requires the live Node server API (/api/admin/data-reset).',
-        };
-      }
-      const payload = (await res.json().catch(() => ({}))) as {
-        ok?: boolean;
-        resetEpochMs?: number;
-        summary?: string;
-        error?: string;
-      };
-      if (!res.ok || !payload.ok) {
-        const errMsg = payload.error || `Data Reset failed (HTTP ${res.status}).`;
-        showToast(errMsg);
-        return { ok: false, error: errMsg };
-      }
-
-      const epochMs = Number(payload.resetEpochMs) || Date.now();
+    const completeResetLocally = (epochMs: number, summary?: string) => {
       setSystemResetConfig((prev) => ({
         resetEpochMs: epochMs,
         resetCount: (prev.resetCount || 0) + 1,
@@ -3195,11 +3168,63 @@ export default function App() {
       playClaimSound(soundsEnabled);
       triggerHapticFeedback('success');
       showToast('System Data Reset complete — fresh system ready!');
-      return { ok: true, summary: payload.summary };
+      return { ok: true, summary };
+    };
+
+    const runFirestoreResetFallback = async (): Promise<{
+      ok: boolean;
+      error?: string;
+      summary?: string;
+    }> => {
+      try {
+        const fb = await executeDataResetInFirestore(latestProfileRef.current.uid);
+        return completeResetLocally(fb.resetEpochMs, fb.summary);
+      } catch (err) {
+        const errMsg = formatSyncErrorMessage(err, 'Failed to execute system Data Reset.');
+        showToast(errMsg);
+        return { ok: false, error: errMsg };
+      }
+    };
+
+    try {
+      const res = await fetch(resolveApiUrl('/api/admin/data-reset'), {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: adminSessionTokenRef.current,
+          initData: getTelegramInitData(),
+          confirm: 'RESET',
+        }),
+      });
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (
+        !contentType.includes('application/json') ||
+        res.status === 404 ||
+        res.status === 405 ||
+        res.status >= 500
+      ) {
+        return await runFirestoreResetFallback();
+      }
+      const payload = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        resetEpochMs?: number;
+        summary?: string;
+        error?: string;
+      };
+      if (!res.ok || !payload.ok) {
+        if (res.status === 401 || res.status === 403) {
+          const errMsg = payload.error || `Data Reset denied (HTTP ${res.status}).`;
+          showToast(errMsg);
+          return { ok: false, error: errMsg };
+        }
+        return await runFirestoreResetFallback();
+      }
+
+      const epochMs = Number(payload.resetEpochMs) || Date.now();
+      return completeResetLocally(epochMs, payload.summary);
     } catch {
-      const errMsg = 'Network error running Data Reset.';
-      showToast(errMsg);
-      return { ok: false, error: errMsg };
+      return await runFirestoreResetFallback();
     }
   };
 

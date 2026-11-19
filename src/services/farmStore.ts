@@ -14,9 +14,14 @@ import {
   runTransaction,
   serverTimestamp,
   setDoc,
+  startAfter,
   updateDoc,
   where,
   writeBatch,
+  type DocumentData,
+  type Query,
+  type QueryDocumentSnapshot,
+  type QuerySnapshot,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import {
@@ -58,6 +63,7 @@ import {
   REFERRED_WELCOME_BONUS_COINS,
   REFERRER_SIGNUP_BONUS_COINS,
   resolveTaskPricingConfig,
+  SIGNUP_BONUS_COINS,
   USER_TASK_MAX_REWARD_COINS,
   USER_TASK_MAX_SLOTS,
   USER_TASK_MIN_REWARD_COINS,
@@ -3792,5 +3798,302 @@ export function subscribeToSystemResetConfig(
     (err) => logSubscriptionError('app_config/system_reset', err),
   );
 }
+
+export async function executeDataResetInFirestore(adminUid: string): Promise<{
+  resetEpochMs: number;
+  playersResetCount: number;
+  tasksDeletedCount: number;
+  promosDeletedCount: number;
+  bansDeletedCount: number;
+  referralsDeletedCount: number;
+  withdrawalsRejectedCount: number;
+  summary: string;
+}> {
+  const nowMs = Date.now();
+  const resetTokens = encodeAchievementsWithAds([], 0, { resetEpochMs: nowMs });
+  let playersResetCount = 0;
+  let referralsDeletedCount = 0;
+  let tasksDeletedCount = 0;
+  let promosDeletedCount = 0;
+  let bansDeletedCount = 0;
+  let withdrawalsRejectedCount = 0;
+
+  const deleteCollectionPaged = async (colName: string, pageSize: number): Promise<number> => {
+    let removed = 0;
+    for (let page = 0; page < 50; page++) {
+      const snap = await getDocsFromServer(query(collection(db, colName), limit(pageSize)));
+      if (snap.empty) break;
+      for (const d of snap.docs) {
+        try {
+          await deleteDoc(d.ref);
+          removed += 1;
+        } catch {
+          // Skip docs that fail rule validation
+        }
+      }
+      if (snap.size < pageSize) break;
+    }
+    return removed;
+  };
+
+  try {
+    tasksDeletedCount = await deleteCollectionPaged('tasks', 100);
+    promosDeletedCount = await deleteCollectionPaged('promo_codes', 50);
+    bansDeletedCount = await deleteCollectionPaged('banned_users', 100);
+
+    // Reject pending withdraw_requests (rules disallow delete on withdraw_requests)
+    let lastWdCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+    for (let page = 0; page < 50; page++) {
+      const wdQ: Query<DocumentData> = lastWdCursor
+        ? query(
+            collection(db, 'withdraw_requests'),
+            orderBy('__name__'),
+            startAfter(lastWdCursor),
+            limit(100),
+          )
+        : query(collection(db, 'withdraw_requests'), orderBy('__name__'), limit(100));
+      const wdSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(wdQ);
+      if (wdSnap.empty) break;
+      for (const d of wdSnap.docs) {
+        if (String(d.data()?.status || '') === 'pending') {
+          try {
+            await updateDoc(d.ref, {
+              status: 'rejected',
+              adminNote: 'System reset by Admin',
+              reviewedAtMs: nowMs,
+              updatedAt: serverTimestamp(),
+            });
+            withdrawalsRejectedCount += 1;
+          } catch {
+            // Best-effort
+          }
+        }
+      }
+      lastWdCursor = wdSnap.docs[wdSnap.docs.length - 1];
+      if (wdSnap.size < 100) break;
+    }
+
+    // Reset all player profiles & clean referrals/pending records (preserve __admin_vault__)
+    let lastPlayerCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+    for (let page = 0; page < 100; page++) {
+      const pQ: Query<DocumentData> = lastPlayerCursor
+        ? query(
+            collection(db, 'players'),
+            orderBy('__name__'),
+            startAfter(lastPlayerCursor),
+            limit(50),
+          )
+        : query(collection(db, 'players'), orderBy('__name__'), limit(50));
+      const pSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(pQ);
+      if (pSnap.empty) break;
+
+      for (const d of pSnap.docs) {
+        if (d.id === ADMIN_PASSCODE_VAULT_UID) continue;
+
+        for (let rPage = 0; rPage < 40; rPage++) {
+          const refSnap = await getDocsFromServer(
+            query(collection(db, 'players', d.id, 'referrals'), limit(50)),
+          );
+          if (refSnap.empty) break;
+          for (const rDoc of refSnap.docs) {
+            try {
+              await deleteDoc(rDoc.ref);
+              referralsDeletedCount += 1;
+            } catch {
+              // Best-effort
+            }
+          }
+          if (refSnap.size < 50) break;
+        }
+
+        let lastUserWdCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+        for (let wPage = 0; wPage < 20; wPage++) {
+          const uWdQ: Query<DocumentData> = lastUserWdCursor
+            ? query(
+                collection(db, 'players', d.id, 'withdrawals'),
+                orderBy('__name__'),
+                startAfter(lastUserWdCursor),
+                limit(40),
+              )
+            : query(collection(db, 'players', d.id, 'withdrawals'), orderBy('__name__'), limit(40));
+          const uWdSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(uWdQ);
+          if (uWdSnap.empty) break;
+          for (const wDoc of uWdSnap.docs) {
+            const st = String(wDoc.data()?.status || '');
+            if (st === 'pending' || st === 'processing') {
+              try {
+                await updateDoc(wDoc.ref, {
+                  status: 'rejected',
+                  adminNote: 'System reset by Admin',
+                  reviewedAtMs: nowMs,
+                });
+              } catch {
+                // Best-effort
+              }
+            }
+          }
+          lastUserWdCursor = uWdSnap.docs[uWdSnap.docs.length - 1];
+          if (uWdSnap.size < 40) break;
+        }
+
+        let lastUserTxCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+        for (let tPage = 0; tPage < 20; tPage++) {
+          const uTxQ: Query<DocumentData> = lastUserTxCursor
+            ? query(
+                collection(db, 'players', d.id, 'transactions'),
+                orderBy('__name__'),
+                startAfter(lastUserTxCursor),
+                limit(60),
+              )
+            : query(collection(db, 'players', d.id, 'transactions'), orderBy('__name__'), limit(60));
+          const uTxSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(uTxQ);
+          if (uTxSnap.empty) break;
+          for (const tDoc of uTxSnap.docs) {
+            if (String(tDoc.data()?.status || '') === 'pending') {
+              try {
+                await updateDoc(tDoc.ref, { status: 'rejected' });
+              } catch {
+                // Best-effort
+              }
+            }
+          }
+          lastUserTxCursor = uTxSnap.docs[uTxSnap.docs.length - 1];
+          if (uTxSnap.size < 60) break;
+        }
+
+        const pd = d.data();
+        const safeName = String(pd.displayName || '').trim().slice(0, 60) || 'Farmer';
+        const safeHandle = formatReferralHandle(String(pd.handle || ''), d.id).slice(0, 40) || '@farmer';
+        const rawColor = String(pd.avatarColor || '').trim().slice(0, 20);
+        const safeColor = rawColor.length >= 4 ? rawColor : '#EF4444';
+        const rawLang = String(pd.language || 'en').trim().slice(0, 16);
+        const safeLang = rawLang.length >= 2 ? rawLang : 'en';
+
+        try {
+          await updateDoc(d.ref, {
+            displayName: safeName,
+            handle: safeHandle,
+            photoUrl: String(pd.photoUrl || '').slice(0, 512),
+            avatarColor: safeColor,
+            language: safeLang,
+            level: 1,
+            xp: 0,
+            coins: SIGNUP_BONUS_COINS,
+            eggs: 0,
+            totalEggsCollected: 0,
+            totalCashEarnedUsd: 0,
+            totalWithdrawnUsd: 0,
+            basketCapacity: 300,
+            basketTierHours: 8,
+            leghornCount: 0,
+            rhodeCount: 0,
+            orpingtonCount: 0,
+            australorpCount: 0,
+            boughtThisWeek: 0,
+            dailyStreak: 0,
+            lastDailyClaimDate: '',
+            completedTaskIds: [],
+            claimedPromoCodes: [],
+            watchedAdsCount: 0,
+            totalAdsWatched: 0,
+            referredBy: '',
+            referralActivated: false,
+            referralCount: 0,
+            referralCoinsEarned: 0,
+            firstDepositBonusUsed: false,
+            lastCollectedAt: nowMs,
+            feedBoostUntilMs: 0,
+            lastGoldenEggAtMs: 0,
+            goldenEggsFound: 0,
+            claimedAchievementIds: resetTokens,
+            claimedReferralMilestones: [],
+            updatedAt: serverTimestamp(),
+          });
+          playersResetCount += 1;
+        } catch {
+          // Best-effort on individual malformed legacy doc
+        }
+      }
+      lastPlayerCursor = pSnap.docs[pSnap.docs.length - 1];
+      if (pSnap.size < 50) break;
+    }
+
+    // Reset leaderboard scores
+    let lastLbCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+    for (let page = 0; page < 100; page++) {
+      const lbQ: Query<DocumentData> = lastLbCursor
+        ? query(
+            collection(db, 'leaderboard'),
+            orderBy('__name__'),
+            startAfter(lastLbCursor),
+            limit(50),
+          )
+        : query(collection(db, 'leaderboard'), orderBy('__name__'), limit(50));
+      const lbSnap: QuerySnapshot<DocumentData> = await getDocsFromServer(lbQ);
+      if (lbSnap.empty) break;
+      for (const d of lbSnap.docs) {
+        if (d.id === ADMIN_PASSCODE_VAULT_UID) continue;
+        try {
+          await updateDoc(d.ref, {
+            buyerPoints: 0,
+            inviterCount: 0,
+            eggs: 0,
+            totalEggsCollected: 0,
+            chickensCount: 0,
+            updatedAt: serverTimestamp(),
+          });
+        } catch {
+          // Best-effort
+        }
+      }
+      lastLbCursor = lbSnap.docs[lbSnap.docs.length - 1];
+      if (lbSnap.size < 50) break;
+    }
+
+    // Reset season back to Season 1
+    await setDoc(doc(db, 'app_config', 'season'), {
+      seasonNumber: 1,
+      title: 'Harvest Cup Season 1',
+      prizePoolCoins: 25000,
+      endsAtMs: nowMs + 4 * 86_400_000,
+      lastWinners: [],
+      updatedAtMs: nowMs,
+      updatedAt: serverTimestamp(),
+    });
+
+    // Update app_config/system_reset epoch so online clients immediately sync fresh starter state
+    let prevCount = 0;
+    try {
+      const resetSnap = await getDocFromServer(doc(db, 'app_config', 'system_reset'));
+      if (resetSnap.exists()) {
+        prevCount = Math.max(0, Math.floor(Number(resetSnap.data()?.resetCount ?? 0) || 0));
+      }
+    } catch {
+      prevCount = 0;
+    }
+    await setDoc(doc(db, 'app_config', 'system_reset'), {
+      resetEpochMs: nowMs,
+      resetCount: prevCount + 1,
+      resetBy: String(adminUid || 'admin').slice(0, 64),
+      updatedAtMs: nowMs,
+      updatedAt: serverTimestamp(),
+    });
+
+    const summary = `${playersResetCount} players reset · ${tasksDeletedCount} tasks, ${promosDeletedCount} promos, ${bansDeletedCount} bans, ${referralsDeletedCount} referrals cleared · ${withdrawalsRejectedCount} pending withdrawals closed`;
+    return {
+      resetEpochMs: nowMs,
+      playersResetCount,
+      tasksDeletedCount,
+      promosDeletedCount,
+      bansDeletedCount,
+      referralsDeletedCount,
+      withdrawalsRejectedCount,
+      summary,
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'app_config/system_reset');
+  }
+}
+
 
 
