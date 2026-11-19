@@ -6622,7 +6622,7 @@ async function startServer() {
           setDoc(doc(serverDb, 'app_config', 'system_reset'), {
             resetEpochMs: nowMs,
             resetCount: prevCount + 1,
-            resetBy: resolvedPlayerId,
+            resetBy: String(resolvedPlayerId || 'admin').slice(0, 64),
             updatedAtMs: nowMs,
             updatedAt: serverTimestamp(),
           }),
@@ -6708,8 +6708,22 @@ async function startServer() {
     });
   } else {
     const distDir = path.resolve(__dirname, 'dist');
-    app.use(express.static(distDir));
+    app.use(
+      express.static(distDir, {
+        setHeaders: (res, filePath) => {
+          if (
+            filePath.endsWith('index.html') ||
+            filePath.endsWith('sw.js') ||
+            filePath.endsWith('registerSW.js') ||
+            filePath.endsWith('manifest.webmanifest')
+          ) {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+          }
+        },
+      }),
+    );
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
       res.sendFile(path.join(distDir, 'index.html'));
     });
     app.listen(PORT, '0.0.0.0', () => {

@@ -16,6 +16,9 @@
     <meta property="og:description" content="Build your Alpha Gram poultry farm, collect eggs 24/7, earn referral rewards and 5% deposit share, and track deposits and withdrawals." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700;800&family=JetBrains+Mono:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
@@ -26,7 +29,20 @@
           document.documentElement.classList.add('dark');
           document.documentElement.style.colorScheme = 'dark';
         }
+        if ('caches' in window) {
+          caches.delete('pages-network-first').catch(function () {});
+        }
         if ('serviceWorker' in navigator) {
+          var swReloaded = false;
+          navigator.serviceWorker.addEventListener('controllerchange', function () {
+            if (swReloaded) return;
+            try {
+              if (sessionStorage.getItem('alphagram_sw_reloaded') === '1') return;
+              sessionStorage.setItem('alphagram_sw_reloaded', '1');
+            } catch (e) {}
+            swReloaded = true;
+            window.location.reload();
+          });
           navigator.serviceWorker.getRegistrations().then(function (regs) {
             for (var i = 0; i < regs.length; i++) {
               regs[i].update().catch(function () {});

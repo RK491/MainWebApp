@@ -84,14 +84,7 @@ export default defineConfig(() => {
             },
             {
               urlPattern: ({ request }) => request.mode === 'navigate',
-              handler: 'NetworkFirst',
-              options: {
-                cacheName: 'pages-network-first',
-                networkTimeoutSeconds: 3,
-                cacheableResponse: {
-                  statuses: [200],
-                },
-              },
+              handler: 'NetworkOnly',
             },
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
