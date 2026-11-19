@@ -623,7 +623,8 @@ function resolveVerifiedAdminActor(params: {
     }
   }
 
-  const rawInitData = String(params.initData || '').trim();
+  const headerInitData = String(params.req.headers['x-telegram-init-data'] || '').trim();
+  const rawInitData = String(params.initData || headerInitData || '').trim();
   const botToken = getTelegramBotToken();
   if (rawInitData && botToken) {
     const verifiedInit = verifyTelegramInitData(rawInitData, botToken, {
@@ -1740,6 +1741,8 @@ async function applyReferralInServerDb(params: {
     let safeReferredName = String(params.displayName || '').trim().slice(0, 60) || 'Farmer';
     let safeReferredHandle = formatReferralHandle(String(params.handle || ''), referredUid).slice(0, 40);
     let nextReferredCoins = 0;
+    let referrerTotalReferrals = 1;
+    let referrerTotalCoinsEarned = rewardCoins;
 
     await runTransaction(serverDb, async (tx) => {
       const [referredSnap, referredLbSnap, referrerSnap, referrerLbSnap, existingRefSnap] =
@@ -1844,6 +1847,8 @@ async function applyReferralInServerDb(params: {
       const nextReferrerCoins = Math.max(-100_000_000, (Number(rp.coins ?? 0) || 0) + rewardCoins);
       const nextReferrerCount = Math.max(0, Math.floor(Number(rp.referralCount ?? 0))) + 1;
       const nextReferrerCoinsEarned = Math.max(0, Number(rp.referralCoinsEarned ?? 0)) + rewardCoins;
+      referrerTotalReferrals = nextReferrerCount;
+      referrerTotalCoinsEarned = nextReferrerCoinsEarned;
       const referrerFakeProfile = {
         leghornCount: Number(rp.leghornCount ?? 0),
         rhodeCount: Number(rp.rhodeCount ?? 0),
@@ -1922,7 +1927,15 @@ async function applyReferralInServerDb(params: {
         referredName: safeReferredName,
         referredHandle: safeReferredHandle,
         rewardCoins,
+        totalReferrals: referrerTotalReferrals,
+        totalReferralCoins: referrerTotalCoinsEarned,
       });
+      const botUsername =
+        runtimeBotConfig?.botUsername ||
+        TELEGRAM_BOT_USERNAME_ENV ||
+        cachedBotUsername ||
+        DEFAULT_TELEGRAM_BOT_USERNAME;
+      const friendsUrl = `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}?startapp=friends`;
       try {
         let tgRes = await fetch(
           `https://api.telegram.org/bot${activeBotToken}/sendMessage`,
@@ -1933,6 +1946,9 @@ async function applyReferralInServerDb(params: {
               chat_id: numericReferrerId,
               text: messageText,
               parse_mode: 'HTML',
+              reply_markup: {
+                inline_keyboard: [[{ text: '👥 View Friends & Rewards', url: friendsUrl }]],
+              },
             }),
             signal: AbortSignal.timeout(7000),
           },
@@ -2507,6 +2523,32 @@ interface TelegramUpdatePayload {
   };
 }
 
+function getFastBotUsername(): string {
+  return (
+    runtimeBotConfig?.botUsername ||
+    TELEGRAM_BOT_USERNAME_ENV ||
+    cachedBotUsername ||
+    DEFAULT_TELEGRAM_BOT_USERNAME
+  );
+}
+
+function buildStartWelcomeText(params: {
+  greetName: string;
+  referralStatusLine?: string;
+}): string {
+  const refSection = params.referralStatusLine ? `\n\n${params.referralStatusLine}` : '';
+  return [
+    `🐔 <b>Welcome to Alpha Gram, ${params.greetName}!</b>`,
+    '',
+    '🐣 <b>Starter Pack:</b> <b>+1,000 Coins</b> ready to hatch your first hens',
+    '🥚 <b>24/7 Mining:</b> Collect eggs hourly &amp; charge <b>3× Coop Fever</b>',
+    `👥 <b>Invite &amp; Earn:</b> <b>+${BONUS_PER_REFERRAL} Coins</b> per friend + <b>5%</b> deposit &amp; egg share`,
+    '💎 <b>TON Payouts:</b> Swap eggs directly for <b>GRAM</b> on TON',
+    refSection,
+    '👇 Tap below to open your farm &amp; start earning!',
+  ].join('\n');
+}
+
 async function processTelegramUpdate(update: TelegramUpdatePayload): Promise<boolean> {
   if (!update || typeof update !== 'object') return false;
   let captured = false;
@@ -2514,6 +2556,7 @@ async function processTelegramUpdate(update: TelegramUpdatePayload): Promise<boo
   const msg = update.message;
   if (msg && msg.from && !msg.from.is_bot && msg.chat?.type === 'private') {
     const rawChatId = String(msg.chat.id ?? msg.from.id ?? '');
+    const numericChatId = extractTelegramNumericUserId(rawChatId);
     const text = String(msg.text || '').trim();
     const startMatch = text.match(/^\/start(?:@[a-zA-Z0-9_]+)?(?:\s+([^\s]+))?/i);
     const isStart = Boolean(startMatch);
@@ -2524,78 +2567,130 @@ async function processTelegramUpdate(update: TelegramUpdatePayload): Promise<boo
       // Ignore malformed URI components
     }
     const startPayload = rawStartArg.replace(/^(?:ref|r)_/i, '').trim();
-    const saved = await upsertBotSubscriber({
+    const hasStartRef = Boolean(isStart && startPayload.length >= 3 && numericChatId);
+    const botToken = getTelegramBotToken();
+    const botUsername = getFastBotUsername();
+    const miniAppUrl = startPayload
+      ? `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}?startapp=${encodeURIComponent(startPayload)}`
+      : `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}`;
+    const friendsUrl = `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}?startapp=friends`;
+    const greetName = escapeHtml(
+      String(msg.from.first_name || msg.from.username || 'Farmer').trim().slice(0, 50) || 'Farmer',
+    );
+    const replyMarkup = {
+      inline_keyboard: [
+        [{ text: '🐔 Open Alpha Gram Farm', url: miniAppUrl }],
+        [{ text: `👥 Invite & Earn +${BONUS_PER_REFERRAL} Coins`, url: friendsUrl }],
+      ],
+    };
+
+    // Send /start welcome reply IMMEDIATELY without blocking on Firestore I/O
+    const sentMessagePromise: Promise<number | null> =
+      isStart && botToken && numericChatId
+        ? fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: numericChatId,
+              text: buildStartWelcomeText({
+                greetName,
+                referralStatusLine: hasStartRef
+                  ? `🎁 <i>Checking invite link &amp; crediting +${REFERRED_WELCOME_BONUS_COINS} Welcome Coins...</i>`
+                  : undefined,
+              }),
+              parse_mode: 'HTML',
+              reply_markup: replyMarkup,
+            }),
+            signal: AbortSignal.timeout(6000),
+          })
+            .then(async (res) => {
+              const data = (await res.json().catch(() => null)) as {
+                ok?: boolean;
+                result?: { message_id?: number };
+              } | null;
+              return data?.ok && typeof data.result?.message_id === 'number'
+                ? data.result.message_id
+                : null;
+            })
+            .catch(() => null)
+        : Promise.resolve(null);
+
+    const subscriberPromise = upsertBotSubscriber({
       chatId: rawChatId,
       username: msg.from.username,
       firstName: msg.from.first_name,
       source: isStart ? 'bot_start' : 'bot_message',
       isBotBlocked: false,
     });
-    if (saved) captured = true;
 
-    let botStartRefApplied = false;
-    let botStartReferrerName = '';
-    if (isStart && saved && startPayload.length >= 3) {
+    if (hasStartRef && numericChatId) {
       const tgDisplayName =
-        String(msg.from.first_name || msg.from.username || `Farmer ${saved.chatId.slice(-4)}`).trim().slice(0, 60) ||
-        'Farmer';
+        String(msg.from.first_name || msg.from.username || `Farmer ${numericChatId.slice(-4)}`)
+          .trim()
+          .slice(0, 60) || 'Farmer';
       const tgHandle = msg.from.username
         ? `@${msg.from.username.replace(/^@+/, '')}`
-        : `@tg_${saved.chatId}`;
+        : `@tg_${numericChatId}`;
+
       savePendingReferral({
-        chatId: saved.chatId,
+        chatId: numericChatId,
         refCode: startPayload,
         displayName: tgDisplayName,
         handle: tgHandle,
         createdAtMs: Date.now(),
       });
-      const refResult = await applyReferralInServerDb({
-        referredUid: `tg_${saved.chatId}`,
-        refCode: startPayload,
-        displayName: tgDisplayName,
-        handle: tgHandle,
-      });
+
+      const [saved, sentMsgId, refResult] = await Promise.all([
+        subscriberPromise,
+        sentMessagePromise,
+        applyReferralInServerDb({
+          referredUid: `tg_${numericChatId}`,
+          refCode: startPayload,
+          displayName: tgDisplayName,
+          handle: tgHandle,
+        }),
+      ]);
+      if (saved) captured = true;
+
+      let updatedRefStatus = '';
       if (refResult.ok && refResult.applied) {
-        botStartRefApplied = true;
-        botStartReferrerName = refResult.referrerName || 'your friend';
-        deletePendingReferral(saved.chatId);
+        deletePendingReferral(numericChatId);
+        updatedRefStatus = `🎁 <b>Referral Applied!</b> Joined via <b>${escapeHtml(
+          refResult.referrerName || 'your friend',
+        )}</b> — <b>+${REFERRED_WELCOME_BONUS_COINS} Welcome Coins</b> credited to your farm!`;
       } else if (
         refResult.ok &&
         (refResult.reason === 'already_linked' ||
           refResult.reason === 'self_referral' ||
           refResult.reason === 'invalid_code')
       ) {
-        deletePendingReferral(saved.chatId);
+        deletePendingReferral(numericChatId);
       }
-    }
 
-    const botToken = getTelegramBotToken();
-    if (isStart && botToken && saved) {
-      try {
-        const botUsername = await resolveTelegramBotUsername();
-        const miniAppUrl = startPayload
-          ? `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}?startapp=${encodeURIComponent(startPayload)}`
-          : `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}`;
-        const greetName = escapeHtml(saved.firstName || 'Farmer');
-        const refLine = botStartRefApplied
-          ? `\n\n🎁 <b>Referral Applied!</b> Joined via <b>${escapeHtml(botStartReferrerName)}</b> — +${REFERRED_WELCOME_BONUS_COINS} bonus coins credited to your farm!`
-          : '';
-        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      if (botToken && sentMsgId) {
+        void fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            chat_id: saved.chatId,
-            text: `🐔 <b>Welcome to Alpha Gram, ${greetName}!</b>\n\nHatch hens, collect fresh eggs every hour, boost to <b>3× Fever</b>, and withdraw <b>GRAM</b> directly on TON.${refLine}\n\nTap below to open your farm!`,
+            chat_id: numericChatId,
+            message_id: sentMsgId,
+            text: buildStartWelcomeText({
+              greetName,
+              referralStatusLine: updatedRefStatus || undefined,
+            }),
             parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [[{ text: '🐔 Open Alpha Gram Farm', url: miniAppUrl }]],
-            },
+            reply_markup: replyMarkup,
           }),
-          signal: AbortSignal.timeout(6000),
-        });
-      } catch {
-        // Non-fatal welcome reply failure
+          signal: AbortSignal.timeout(5000),
+        }).catch(() => undefined);
       }
+    } else {
+      const [saved] = await Promise.all([subscriberPromise, sentMessagePromise]);
+      if (saved) captured = true;
+    }
+
+    if (isStart && botToken && numericChatId && !cachedBotUsername) {
+      void resolveTelegramBotUsername();
     }
   }
 
@@ -2618,8 +2713,10 @@ async function processTelegramUpdate(update: TelegramUpdatePayload): Promise<boo
 }
 
 let lastLoggedActiveWebhookUrl = '';
+let lastWebhookCheckAtMs = 0;
+let cachedExternalWebhookUrl = '';
 let botPollInFlight = false;
-async function pollTelegramBotUpdates(): Promise<{
+async function pollTelegramBotUpdates(longPollSeconds = 0): Promise<{
   ok: boolean;
   webhookActive: boolean;
   newUpdates: number;
@@ -2630,38 +2727,48 @@ async function pollTelegramBotUpdates(): Promise<{
     return { ok: false, webhookActive: false, newUpdates: 0, error: 'Bot token not configured' };
   }
   if (botPollInFlight) {
-    return { ok: true, webhookActive: false, newUpdates: 0 };
+    return { ok: true, webhookActive: Boolean(cachedExternalWebhookUrl), newUpdates: 0 };
   }
   botPollInFlight = true;
   try {
-    const infoRes = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`, {
-      signal: AbortSignal.timeout(6000),
-    });
-    const infoData = (await infoRes.json()) as {
-      ok?: boolean;
-      result?: { url?: string };
-    };
-    if (infoData.ok && infoData.result?.url) {
-      if (lastLoggedActiveWebhookUrl !== infoData.result.url) {
-        lastLoggedActiveWebhookUrl = infoData.result.url;
+    const now = Date.now();
+    // Only check getWebhookInfo once every 60s (or before initial poll) to eliminate per-cycle latency
+    if (lastWebhookCheckAtMs === 0 || now - lastWebhookCheckAtMs >= 60_000) {
+      lastWebhookCheckAtMs = now;
+      const infoRes = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`, {
+        signal: AbortSignal.timeout(5000),
+      }).catch(() => null);
+      if (infoRes && infoRes.ok) {
+        const infoData = (await infoRes.json().catch(() => ({}))) as {
+          ok?: boolean;
+          result?: { url?: string };
+        };
+        cachedExternalWebhookUrl = infoData.ok ? String(infoData.result?.url || '') : '';
+      }
+    }
+
+    if (cachedExternalWebhookUrl) {
+      if (lastLoggedActiveWebhookUrl !== cachedExternalWebhookUrl) {
+        lastLoggedActiveWebhookUrl = cachedExternalWebhookUrl;
         recordServerLog(
           'warn',
           'bot_poller',
           'External Telegram webhook is active; /start getUpdates polling is paused',
-          infoData.result.url,
+          cachedExternalWebhookUrl,
         );
       }
       botHeartbeatState.lastHeartbeatAtMs = Date.now();
       botHeartbeatState.lastHeartbeatOk = true;
-      botHeartbeatState.webhookUrl = infoData.result.url;
+      botHeartbeatState.webhookUrl = cachedExternalWebhookUrl;
       botHeartbeatState.error = null;
       return { ok: true, webhookActive: true, newUpdates: 0 };
     }
     lastLoggedActiveWebhookUrl = '';
 
+    const safeWaitSec = Math.max(0, Math.min(25, Math.floor(longPollSeconds)));
     const params = new URLSearchParams({
       limit: '100',
-      timeout: '0',
+      timeout: String(safeWaitSec),
       allowed_updates: JSON.stringify(['message', 'my_chat_member']),
     });
     if (cachedTelegramUpdateOffset > 0) {
@@ -2669,14 +2776,18 @@ async function pollTelegramBotUpdates(): Promise<{
     }
     const updRes = await fetch(
       `https://api.telegram.org/bot${botToken}/getUpdates?${params.toString()}`,
-      { signal: AbortSignal.timeout(7000) },
+      { signal: AbortSignal.timeout((safeWaitSec + 8) * 1000) },
     );
     const updData = (await updRes.json()) as {
       ok?: boolean;
+      error_code?: number;
       description?: string;
       result?: TelegramUpdatePayload[];
     };
     if (!updData.ok || !Array.isArray(updData.result)) {
+      if (updData.error_code === 409) {
+        lastWebhookCheckAtMs = 0; // Force refresh getWebhookInfo next cycle
+      }
       const errMsg = redactBotToken(updData.description || 'Failed to poll updates');
       botHeartbeatState.lastHeartbeatAtMs = Date.now();
       botHeartbeatState.lastHeartbeatOk = false;
@@ -2691,18 +2802,23 @@ async function pollTelegramBotUpdates(): Promise<{
     }
 
     let highestId = cachedTelegramUpdateOffset - 1;
-    let newUpdates = 0;
     for (const u of updData.result) {
       if (typeof u.update_id === 'number' && u.update_id > highestId) {
         highestId = u.update_id;
-      }
-      if (await processTelegramUpdate(u)) {
-        newUpdates += 1;
       }
     }
     if (highestId >= cachedTelegramUpdateOffset) {
       persistTelegramUpdateOffset(highestId + 1);
     }
+
+    let newUpdates = 0;
+    if (updData.result.length > 0) {
+      const processedFlags = await Promise.all(
+        updData.result.map((u) => processTelegramUpdate(u).catch(() => false)),
+      );
+      newUpdates = processedFlags.filter(Boolean).length;
+    }
+
     botHeartbeatState.lastHeartbeatAtMs = Date.now();
     botHeartbeatState.lastHeartbeatOk = true;
     botHeartbeatState.error = null;
@@ -2932,21 +3048,29 @@ function parseBroadcastMediaDataUrl(
   return { ok: true, mime, buffer, ext };
 }
 
-let botPollIntervalHandle: ReturnType<typeof setInterval> | null = null;
+let botPollLoopRunning = false;
 
 function ensureBotPollerRunning(): void {
-  if (!getTelegramBotToken()) return;
-  void pollTelegramBotUpdates();
-  if (!botPollIntervalHandle) {
-    botPollIntervalHandle = setInterval(() => {
-      if (getTelegramBotToken()) {
-        void pollTelegramBotUpdates();
+  if (!getTelegramBotToken() || botPollLoopRunning) return;
+  botPollLoopRunning = true;
+
+  const runLongPollCycle = async () => {
+    while (botPollLoopRunning) {
+      if (!getTelegramBotToken()) {
+        await new Promise((r) => setTimeout(r, 3000));
+        continue;
       }
-    }, 5_000);
-    if (typeof botPollIntervalHandle.unref === 'function') {
-      botPollIntervalHandle.unref();
+      const res = await pollTelegramBotUpdates(20).catch(() => ({
+        ok: false,
+        webhookActive: false,
+        newUpdates: 0,
+      }));
+      const delayMs = res.webhookActive ? 15_000 : res.ok ? 80 : 2_000;
+      await new Promise((r) => setTimeout(r, delayMs));
     }
-  }
+  };
+
+  void runLongPollCycle();
 }
 
 async function startServer() {
@@ -5472,6 +5596,23 @@ async function startServer() {
       return;
     }
 
+    let referrerTotalReferrals: number | undefined;
+    let referrerTotalCoins: number | undefined;
+    if (serverDb) {
+      try {
+        const refPlayerSnap = await getFreshDoc(doc(serverDb, 'players', referrerUid));
+        if (refPlayerSnap.exists()) {
+          const rpd = refPlayerSnap.data();
+          const rc = Number(rpd.referralCount ?? 0);
+          const re = Number(rpd.referralCoinsEarned ?? 0);
+          if (Number.isFinite(rc) && rc > 0) referrerTotalReferrals = rc;
+          if (Number.isFinite(re) && re > 0) referrerTotalCoins = re;
+        }
+      } catch {
+        // Optional enrichment
+      }
+    }
+
     const messageText = buildReferralBotNotificationMessage({
       event,
       referredName: body.referredName,
@@ -5479,7 +5620,12 @@ async function startServer() {
       rewardCoins,
       depositGram: body.depositGram,
       depositUsd: body.depositUsd,
+      totalReferrals: referrerTotalReferrals,
+      totalReferralCoins: referrerTotalCoins,
     });
+
+    const botUsername = getFastBotUsername();
+    const friendsUrl = `https://t.me/${botUsername}/${TELEGRAM_MINIAPP_SHORT_NAME}?startapp=friends`;
 
     try {
       let tgRes = await fetch(
@@ -5491,6 +5637,9 @@ async function startServer() {
             chat_id: numericReferrerId,
             text: messageText,
             parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [[{ text: '👥 View Friends & Rewards', url: friendsUrl }]],
+            },
           }),
           signal: AbortSignal.timeout(7000),
         },

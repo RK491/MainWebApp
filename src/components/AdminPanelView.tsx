@@ -2273,6 +2273,72 @@ export function AdminPanelView({
         </button>
       </div>
 
+      {/* Prominent Global Maintenance Mode Quick Toggle (visible across all Admin tabs) */}
+      <div
+        className={`clay-card !rounded-2xl px-3.5 py-2.5 flex items-center justify-between gap-2.5 border ${
+          maintenanceConfig.enabled
+            ? 'border-amber-300/90 dark:border-amber-700/70'
+            : 'border-emerald-200/80 dark:border-emerald-800/50'
+        }`}
+      >
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div
+            className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+              maintenanceConfig.enabled
+                ? 'bg-amber-500/20 text-amber-600 dark:text-amber-300'
+                : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+            }`}
+          >
+            <Wrench className="w-4 h-4" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span
+                className={`w-2 h-2 rounded-full shrink-0 ${
+                  maintenanceConfig.enabled ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'
+                }`}
+              />
+              <span className="text-xs font-extrabold text-stone-900 dark:text-stone-100 truncate">
+                Maintenance Mode: {maintenanceConfig.enabled ? 'ON (Offline)' : 'OFF (Site Live)'}
+              </span>
+            </div>
+            <div className="text-[11px] text-stone-500 dark:text-stone-400 truncate">
+              {maintenanceConfig.enabled
+                ? 'Non-admin users are blocked with the maintenance notice.'
+                : 'All regular players can open the bot normally.'}
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => navigateAdminTab('maintenance')}
+            className="clay-btn clay-btn-neutral px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold"
+          >
+            Settings
+          </button>
+          <button
+            type="button"
+            disabled={!onSaveMaintenanceConfig || savingMaintenance}
+            onClick={() => {
+              const next = !maintenanceConfig.enabled;
+              setMaintEnabledDraft(next);
+              void handleSaveMaintenanceSubmit(next);
+            }}
+            className={`clay-btn px-3 py-1.5 rounded-xl text-[11px] font-extrabold inline-flex items-center gap-1 disabled:opacity-50 ${
+              maintenanceConfig.enabled ? 'clay-btn-emerald' : 'clay-btn-amber'
+            }`}
+          >
+            {savingMaintenance ? (
+              <Loader2 className="w-3 h-3 animate-spin" />
+            ) : (
+              <Power className="w-3 h-3" />
+            )}
+            <span>{maintenanceConfig.enabled ? 'Turn OFF' : 'Turn ON'}</span>
+          </button>
+        </div>
+      </div>
+
       {/* Contextual Sub-Tab Bar inside each Bottom Tab Group */}
       {(() => {
         const subTabsByGroup: Record<

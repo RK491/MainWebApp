@@ -518,6 +518,8 @@ export default function App() {
   const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => getStoredAudioSettings());
   const musicEnabled = audioSettings.musicEnabled;
   const soundsEnabled = audioSettings.soundsEnabled;
+  const soundsEnabledRef = useRef(soundsEnabled);
+  soundsEnabledRef.current = soundsEnabled;
   const allAudioMuted = isAllAudioMuted(audioSettings);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => getStoredTheme());
   const [notificationPermission, setNotificationPermission] = useState(() =>
@@ -608,6 +610,12 @@ export default function App() {
   const ensurePromiseRef = useRef<Promise<UserFarmProfile | void>>(Promise.resolve());
   const [isPlayerSynced, setIsPlayerSynced] = useState(false);
   const prevWithdrawalStatusRef = useRef<Map<string, string> | null>(null);
+  const seenReferralIdsRef = useRef<{ uid: string; hydrated: boolean; ids: Set<string> }>({
+    uid: '',
+    hydrated: false,
+    ids: new Set(),
+  });
+  const appSessionStartedAtRef = useRef<number>(Date.now());
   const userSelectedLangRef = useRef<LanguageCode | null>(null);
 
   const toastTimerRef = useRef<number | null>(null);
@@ -1029,6 +1037,7 @@ export default function App() {
     referralAttemptedKeysRef.current.clear();
     claimPendingAttemptsRef.current = { uid: '', count: 0, resolved: false };
     prevWithdrawalStatusRef.current = null;
+    seenReferralIdsRef.current = { uid: targetUid, hydrated: true, ids: new Set() };
   }, []);
 
   useEffect(() => {
@@ -1129,7 +1138,56 @@ export default function App() {
         }
         setWithdrawals(wds);
       },
-      onReferrals: (refs: ReferralRecord[]) => setReferrals(refs),
+      onReferrals: (refs: ReferralRecord[]) => {
+        const currentTracker = seenReferralIdsRef.current;
+        if (currentTracker.uid !== activePlayerId) {
+          seenReferralIdsRef.current = {
+            uid: activePlayerId,
+            hydrated: true,
+            ids: new Set(refs.map((r) => r.referredUid || r.id).filter(Boolean)),
+          };
+        } else if (!currentTracker.hydrated) {
+          for (const r of refs) {
+            const key = r.referredUid || r.id;
+            if (key) currentTracker.ids.add(key);
+          }
+          currentTracker.hydrated = true;
+        } else {
+          const freshArrivals: ReferralRecord[] = [];
+          for (const r of refs) {
+            const key = r.referredUid || r.id;
+            if (!key || currentTracker.ids.has(key)) continue;
+            currentTracker.ids.add(key);
+            // Notify when joined during this session (avoids stale cache re-hydrating old rows)
+            if (!r.createdAtMs || r.createdAtMs >= appSessionStartedAtRef.current - 120_000) {
+              freshArrivals.push(r);
+            }
+          }
+          if (freshArrivals.length > 0) {
+            const newest = freshArrivals[0];
+            const friendLabel =
+              newest.referredName ||
+              (newest.referredHandle ? `@${newest.referredHandle.replace(/^@/, '')}` : 'A friend');
+            const coinsEarned = Math.max(
+              REFERRER_SIGNUP_BONUS_COINS,
+              Number(newest.coinsEarned || REFERRER_SIGNUP_BONUS_COINS),
+            );
+            triggerRewardConfetti();
+            playClaimSound(soundsEnabledRef.current);
+            triggerHapticFeedback('success');
+            if (freshArrivals.length === 1) {
+              showToast(
+                `🎉 New Referral Received! ${friendLabel} joined (+${coinsEarned.toLocaleString()} Coins)!`,
+              );
+            } else {
+              showToast(
+                `🎉 ${freshArrivals.length} New Referrals Received! Check Friends tab for your rewards!`,
+              );
+            }
+          }
+        }
+        setReferrals(refs);
+      },
     };
 
     // Always attach live Firestore snapshot listener right away so cached & queued writes stay reactive
@@ -1438,8 +1496,11 @@ export default function App() {
                   ),
                 );
               }
+              triggerRewardConfetti();
+              playClaimSound(soundsEnabledRef.current);
+              triggerHapticFeedback('success');
               showToast(
-                `+${bonus} welcome coins! Joined via ${payload.referrerName || 'a friend'}'s referral!`,
+                `🎉 Referral Bonus! +${bonus} welcome coins unlocked via ${payload.referrerName || 'a friend'}!`,
               );
               clearPendingRef();
               return;
@@ -1488,7 +1549,12 @@ export default function App() {
             saveCachedPlayerProfile(refRes.profile);
             markReferralVerifiedLocally(refRes.referrerUid);
             void syncDirectReferralRecord(refRes.referrerUid, refRes.profile);
-            showToast(`+100 welcome coins! Joined via ${refRes.referrerName}'s referral!`);
+            triggerRewardConfetti();
+            playClaimSound(soundsEnabledRef.current);
+            triggerHapticFeedback('success');
+            showToast(
+              `🎉 Referral Bonus! +100 welcome coins unlocked via ${refRes.referrerName}!`,
+            );
             const notifyPayload = await safeFetchJson<{ ok?: boolean; sent?: boolean }>('/api/referrals/notify', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -1636,8 +1702,11 @@ export default function App() {
                 return next;
               });
               if (payload.applied) {
+                triggerRewardConfetti();
+                playClaimSound(soundsEnabledRef.current);
+                triggerHapticFeedback('success');
                 showToast(
-                  `+${bonus} welcome coins! Joined via ${payload.referrerName || 'a friend'}'s referral!`,
+                  `🎉 Referral Bonus! +${bonus} welcome coins unlocked via ${payload.referrerName || 'a friend'}!`,
                 );
               }
               return;
@@ -3137,6 +3206,9 @@ export default function App() {
       if (sessionToken) {
         headers.Authorization = `Bearer ${sessionToken}`;
       }
+      if (tgInitData) {
+        headers['x-telegram-init-data'] = tgInitData;
+      }
       const res = await fetch(resolveApiUrl('/api/admin/data-reset'), {
         method: 'POST',
         cache: 'no-store',
@@ -3164,7 +3236,7 @@ export default function App() {
       };
       if (!res.ok || !payload.ok) {
         if (res.status === 401 || res.status === 403) {
-          if (isAuthorizedAdmin && adminUnlocked && !sessionToken) {
+          if (isAuthorizedAdmin && adminUnlocked) {
             return await runFirestoreResetFallback();
           }
           const errMsg = payload.error || `Data Reset denied (HTTP ${res.status}).`;

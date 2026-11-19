@@ -4114,11 +4114,22 @@ export function buildReferralBotNotificationMessage(params: {
   rewardCoins: number;
   depositGram?: string;
   depositUsd?: number;
+  totalReferrals?: number;
+  totalReferralCoins?: number;
 }): string {
   const safeName = escapeTelegramHtml((params.referredName || 'New Farmer').trim().slice(0, 60));
   const safeHandle = escapeTelegramHtml(formatReferralHandle(params.referredHandle || '', '').slice(0, 40));
   const safeCoins = Math.max(0, Math.round(Number(params.rewardCoins) || 0));
   const pct = Math.round(REFERRAL_DEPOSIT_COMMISSION_RATE * 100);
+  const eggPct = Math.round(REFERRER_LIFETIME_EGG_COMMISSION_RATE * 100);
+  const totalRefs =
+    typeof params.totalReferrals === 'number' && Number.isFinite(params.totalReferrals)
+      ? Math.max(1, Math.floor(params.totalReferrals))
+      : null;
+  const totalEarned =
+    typeof params.totalReferralCoins === 'number' && Number.isFinite(params.totalReferralCoins)
+      ? Math.max(safeCoins, Math.round(params.totalReferralCoins))
+      : null;
 
   if (params.event === 'deposit_commission') {
     const safeGram = escapeTelegramHtml((params.depositGram || '').trim().slice(0, 40));
@@ -4126,26 +4137,54 @@ export function buildReferralBotNotificationMessage(params: {
     const depositLine = safeGram
       ? `💰 <b>Friend Deposit:</b> ${safeGram} (~$${safeUsd})`
       : `💰 <b>Friend Deposit:</b> $${safeUsd}`;
+    const totalLine =
+      totalEarned !== null
+        ? `\n🏦 <b>Total Referral Earnings:</b> ${totalEarned.toLocaleString()} Coins`
+        : '';
 
     return [
       '💎 <b>Referral Deposit Commission Received!</b>',
       '',
       `👤 <b>Referred User:</b> ${safeName} (${safeHandle})`,
       depositLine,
-      `🪙 <b>Your ${pct}% Commission Received:</b> +${safeCoins.toLocaleString()} Coins`,
+      `🪙 <b>Your ${pct}% Commission Received:</b> +${safeCoins.toLocaleString()} Coins${totalLine}`,
       '',
       `Keep inviting friends to earn <b>+${REFERRER_SIGNUP_BONUS_COINS} Coins</b> per referral and a <b>${pct}% share</b> of every deposit they make!`,
     ].join('\n');
+  }
+
+  const nextCrate =
+    totalRefs !== null
+      ? REFERRAL_MILESTONE_CRATES.find((c) => totalRefs < c.targetActive) ||
+        REFERRAL_MILESTONE_CRATES[REFERRAL_MILESTONE_CRATES.length - 1]
+      : REFERRAL_MILESTONE_CRATES[0];
+
+  const progressLines: string[] = [];
+  if (totalRefs !== null) {
+    const crateDetail =
+      nextCrate.bonusLeghorns > 0
+        ? `+${nextCrate.rewardCoins.toLocaleString()}c + ${nextCrate.bonusLeghorns} Hen`
+        : `+${nextCrate.rewardCoins.toLocaleString()}c`;
+    const crateLine =
+      totalRefs >= nextCrate.targetActive
+        ? `🏆 <b>${escapeTelegramHtml(nextCrate.title)} Unlocked!</b> Open Friends tab to claim <b>${crateDetail}</b>!`
+        : `🎯 <b>Next Crate (${escapeTelegramHtml(nextCrate.title)}):</b> ${totalRefs}/${nextCrate.targetActive} friends → <b>${crateDetail}</b>`;
+    progressLines.push(
+      `👥 <b>Total Friends Invited:</b> ${totalRefs}${totalEarned !== null ? ` · 🪙 <b>Total Earned:</b> ${totalEarned.toLocaleString()}c` : ''}`,
+      crateLine,
+    );
   }
 
   return [
     '🎉 <b>New Referral Received &amp; Reward Credited!</b>',
     '',
     `👤 <b>Referred User:</b> ${safeName} (${safeHandle})`,
-    `🪙 <b>Reward Received:</b> +${safeCoins.toLocaleString()} Coins`,
+    `🪙 <b>Instant Reward Credited:</b> +${safeCoins.toLocaleString()} Coins`,
+    `🎁 <b>Friend Welcome Bonus:</b> +${REFERRED_WELCOME_BONUS_COINS} Coins`,
+    ...(progressLines.length > 0 ? ['', ...progressLines] : []),
     '',
-    `💎 <b>${pct}% Deposit Share Bonus:</b>`,
-    `Whenever your referred user makes a deposit, you will automatically receive a <b>${pct}% share</b> of their deposit in Coins!`,
+    `💎 <b>${pct}% Deposit &amp; ${eggPct}% Lifetime Egg Share:</b>`,
+    `Whenever your referred user makes a deposit, you automatically receive a <b>${pct}% share</b> in Coins plus <b>${eggPct}% of their eggs</b>!`,
   ].join('\n');
 }
 

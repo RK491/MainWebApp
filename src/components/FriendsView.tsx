@@ -16,6 +16,7 @@ import {
   type DailyReferralGrowthPoint,
   REFERRAL_DEPOSIT_COMMISSION_RATE,
   REFERRAL_MILESTONE_CRATES,
+  REFERRED_WELCOME_BONUS_COINS,
   REFERRER_LIFETIME_EGG_COMMISSION_RATE,
   REFERRER_SIGNUP_BONUS_COINS,
   summarizeReferrals,
@@ -23,6 +24,7 @@ import {
 import type { ReferralRecord, TransactionEntry, UserFarmProfile } from '../types/farm';
 import {
   buildPersonalReferralUrl,
+  buildReferralShareData,
   copyTextWithFallback,
   getReferralStartId,
   openTelegramForwardShare,
@@ -78,7 +80,7 @@ export function FriendsView({
   onClaimReferralMilestone,
 }: FriendsViewProps) {
   const shouldReduceMotion = useReducedMotion();
-  const [feedback, setFeedback] = useState<'shared' | 'copied-link' | 'error' | null>(null);
+  const [feedback, setFeedback] = useState<'shared' | 'copied-link' | 'copied-pitch' | 'error' | null>(null);
   const [isSharing, setIsSharing] = useState(false);
   const [heroImgFailed, setHeroImgFailed] = useState(false);
   const [basketImgFailed, setBasketImgFailed] = useState(false);
@@ -92,7 +94,7 @@ export function FriendsView({
     };
   }, []);
 
-  const showFeedback = (next: 'shared' | 'copied-link' | 'error') => {
+  const showFeedback = (next: 'shared' | 'copied-link' | 'copied-pitch' | 'error') => {
     if (feedbackTimerRef.current !== null) {
       window.clearTimeout(feedbackTimerRef.current);
     }
@@ -126,9 +128,15 @@ export function FriendsView({
     [botConfig.appShortName, botConfig.botUsername, referralStartId],
   );
 
-  const handleCopy = async (text: string) => {
+  const handleCopy = async (text: string, kind: 'copied-link' | 'copied-pitch' = 'copied-link') => {
     const ok = await copyTextWithFallback(text);
-    showFeedback(ok ? 'copied-link' : 'error');
+    showFeedback(ok ? kind : 'error');
+  };
+
+  const handleCopyInvitePitch = async () => {
+    const shareData = buildReferralShareData(referralStartId, referralUrl, profile.displayName);
+    const fullPitch = `${shareData.text || ''}\n\n${referralUrl}`;
+    await handleCopy(fullPitch, 'copied-pitch');
   };
 
   const handleShare = () => {
@@ -143,6 +151,14 @@ export function FriendsView({
   };
 
   const { activeCount, pendingCount, totalToppedUp } = summarizeReferrals(referrals);
+  const effectiveActiveCount = Math.max(profile.referralCount, activeCount);
+  const nextUnclaimedCrate = useMemo(
+    () =>
+      REFERRAL_MILESTONE_CRATES.find(
+        (c) => !(profile.claimedReferralMilestones ?? []).includes(c.targetActive),
+      ) || null,
+    [profile.claimedReferralMilestones],
+  );
   const invitedFriends = useMemo(
     () => buildInvitedFriendsList(referrals, transactions),
     [referrals, transactions],
@@ -171,15 +187,30 @@ export function FriendsView({
       ? 'Ready to Forward in Telegram!'
       : feedback === 'copied-link'
         ? 'Referral Link Copied!'
-        : 'Share Referral Link';
+        : feedback === 'copied-pitch'
+          ? 'Invite Message Copied!'
+          : 'Share Referral Link';
 
   return (
     <div className="animate-clay-enter space-y-4">
-      <div>
-        <h1 className="text-2xl font-extrabold text-stone-900 dark:text-stone-100">Invite Friends</h1>
-        <p className="text-sm text-stone-500 dark:text-stone-400">
-          Earn +{REFERRER_SIGNUP_BONUS_COINS} coins per referral &amp; {depositPercentLabel} commission on every friend deposit
-        </p>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-extrabold text-stone-900 dark:text-stone-100">Invite Friends</h1>
+          <p className="text-sm text-stone-500 dark:text-stone-400">
+            Earn +{REFERRER_SIGNUP_BONUS_COINS} coins per referral, +{REFERRED_WELCOME_BONUS_COINS} bonus for your friend &amp; {depositPercentLabel} deposit share
+          </p>
+        </div>
+        {nextUnclaimedCrate && (
+          <div className="clay-card-warm !rounded-2xl px-3 py-1.5 text-right shrink-0">
+            <div className="text-[10px] font-extrabold uppercase tracking-wider text-amber-800 dark:text-amber-300">
+              Next Crate ({Math.min(effectiveActiveCount, nextUnclaimedCrate.targetActive)}/{nextUnclaimedCrate.targetActive})
+            </div>
+            <div className="text-xs font-extrabold font-mono-num text-stone-900 dark:text-stone-100">
+              +{nextUnclaimedCrate.rewardCoins.toLocaleString()}c
+              {nextUnclaimedCrate.bonusLeghorns > 0 ? ` + ${nextUnclaimedCrate.bonusLeghorns} Hen` : ''}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Clay Mascot & Reward Trio Hero */}
@@ -238,34 +269,54 @@ export function FriendsView({
         <div>
           <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100">Referral rewards</h2>
           <p className="text-xs text-stone-500 dark:text-stone-400">
-            Get +{REFERRER_SIGNUP_BONUS_COINS} coins immediately when a friend joins via your link, plus a {depositPercentLabel} coin commission whenever they deposit (and {eggPercentLabel} lifetime eggs).
+            Get +{REFERRER_SIGNUP_BONUS_COINS} coins immediately when a friend joins via your link, your friend receives +{REFERRED_WELCOME_BONUS_COINS} welcome coins, and you earn {depositPercentLabel} coins on deposits + {eggPercentLabel} lifetime eggs.
           </p>
         </div>
 
-        <div className="grid grid-cols-2 gap-2.5">
-          <div className="clay-card-mint clay-hover-lift !rounded-2xl p-3 text-center">
-            <div className="flex items-center justify-center gap-1 text-xl font-extrabold text-emerald-700 dark:text-emerald-400 font-mono-num">
-              <CoinIcon className="w-5 h-5" />
+        <div className="grid grid-cols-3 gap-2">
+          <div className="clay-card-mint clay-hover-lift !rounded-2xl p-2.5 text-center">
+            <div className="flex items-center justify-center gap-1 text-lg sm:text-xl font-extrabold text-emerald-700 dark:text-emerald-400 font-mono-num">
+              <CoinIcon className="w-4 h-4 sm:w-5 sm:h-5 shrink-0" />
               <span>+{REFERRER_SIGNUP_BONUS_COINS}</span>
             </div>
-            <div className="text-xs font-semibold text-stone-600 dark:text-stone-300 mt-0.5">Instant coins per referral</div>
+            <div className="text-[11px] font-semibold text-stone-600 dark:text-stone-300 mt-0.5 leading-tight">
+              You earn instantly
+            </div>
           </div>
-          <div className="clay-card-warm clay-hover-lift !rounded-2xl p-3 text-center">
-            <div className="flex items-center justify-center gap-1 text-xl font-extrabold text-amber-700 dark:text-amber-400 font-mono-num">
-              <CoinIcon className="w-5 h-5" />
+          <div className="clay-inset clay-hover-lift !rounded-2xl p-2.5 text-center">
+            <div className="flex items-center justify-center gap-1 text-lg sm:text-xl font-extrabold text-sky-700 dark:text-sky-400 font-mono-num">
+              <Gift className="w-4 h-4 sm:w-5 sm:h-5 shrink-0" />
+              <span>+{REFERRED_WELCOME_BONUS_COINS}</span>
+            </div>
+            <div className="text-[11px] font-semibold text-stone-600 dark:text-stone-300 mt-0.5 leading-tight">
+              Friend bonus
+            </div>
+          </div>
+          <div className="clay-card-warm clay-hover-lift !rounded-2xl p-2.5 text-center">
+            <div className="flex items-center justify-center gap-1 text-lg sm:text-xl font-extrabold text-amber-700 dark:text-amber-400 font-mono-num">
+              <CoinIcon className="w-4 h-4 sm:w-5 sm:h-5 shrink-0" />
               <span>{depositPercentLabel}</span>
             </div>
-            <div className="text-xs font-semibold text-stone-600 dark:text-stone-300 mt-0.5">Share on every deposit</div>
+            <div className="text-[11px] font-semibold text-stone-600 dark:text-stone-300 mt-0.5 leading-tight">
+              Deposit &amp; {eggPercentLabel} eggs
+            </div>
           </div>
         </div>
 
         <div className="clay-inset !rounded-2xl px-3.5 py-2.5 text-[11px] font-semibold text-stone-600 dark:text-stone-300 text-center">
-          Instant Telegram Bot alerts notify you as soon as a referral joins (+{REFERRER_SIGNUP_BONUS_COINS} coins) and whenever they make a deposit ({depositPercentLabel} share).
+          Instant Telegram Bot &amp; in-app alerts notify you the moment a referral joins (+{REFERRER_SIGNUP_BONUS_COINS} coins) or deposits ({depositPercentLabel} share) — plus unlock Bonus Crates at 3, 10 &amp; 25 friends!
         </div>
 
         <div className="space-y-1.5">
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs font-bold text-stone-500 dark:text-stone-400">Your Referral Link</span>
+            <button
+              type="button"
+              onClick={() => void handleCopyInvitePitch()}
+              className="text-[11px] font-extrabold text-amber-700 dark:text-amber-400 hover:underline cursor-pointer"
+            >
+              {feedback === 'copied-pitch' ? 'Invite Message Copied!' : 'Copy Invite Message'}
+            </button>
           </div>
           <div className="flex items-center gap-2">
             <input
@@ -277,7 +328,7 @@ export function FriendsView({
             />
             <button
               type="button"
-              onClick={() => void handleCopy(referralUrl)}
+              onClick={() => void handleCopy(referralUrl, 'copied-link')}
               aria-label="Copy referral link"
               className="clay-btn clay-btn-emerald min-h-[44px] min-w-[44px] rounded-2xl flex items-center justify-center shrink-0"
             >

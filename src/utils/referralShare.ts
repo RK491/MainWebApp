@@ -64,11 +64,11 @@ export function buildReferralShareData(
   return {
     title: 'Join Alpha Gram!',
     text: [
-      `🐔✨ Join ${possessiveOwner} Alpha Gram farm and claim +1,000 sign-up bonus coins!`,
+      `🐔✨ Join ${possessiveOwner} Alpha Gram farm and claim +1,000 sign-up bonus coins! (+100 EXTRA referral welcome coins inside)`,
       '',
-      '🥚 Collect golden eggs 24/7 — even while offline',
-      '🚀 Unlock stronger hens & climb the Top 10 leaderboard',
-      '💎 Convert eggs into real GRAM rewards on TON',
+      '🥚 Hatch hens & collect fresh eggs 24/7 (even offline)',
+      '🔥 Charge Coop Fever up to 3× laying speed',
+      '💎 Swap eggs into real GRAM tokens directly on TON',
     ].join('\n'),
     url: referralUrl,
   };
@@ -80,7 +80,7 @@ export function buildTelegramDirectShareUrl(
   referrerName?: string,
 ): string {
   const shareData = buildReferralShareData(referralCode, referralUrl, referrerName);
-  const fullMessage = `${shareData.text || ''}\n\n👇 Tap below to start farming & claim your bonus:\n${referralUrl}`;
+  const fullMessage = `${shareData.text || ''}\n\n👇 Tap below to open Alpha Gram & claim +1,100 bonus coins:\n${referralUrl}`;
   return `https://t.me/share/url?text=${encodeURIComponent(fullMessage)}`;
 }
 
